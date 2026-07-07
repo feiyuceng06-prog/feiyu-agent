@@ -1,0 +1,28 @@
+[project]
+name = "feiyu-agent"
+version = "0.1.0"
+description = "A minimal terminal coding agent for Claude, DeepSeek, and Kimi"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "anthropic>=0.40",
+    "pillow>=9",
+]
+
+[project.optional-dependencies]
+# 只有用 DeepSeek / Kimi 时才需要
+openai = ["openai>=1.30"]
+
+[project.scripts]
+feiyu = "feiyu.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["feiyu"]
+
+[tool.setuptools.package-data]
+feiyu = ["logo.png"]
