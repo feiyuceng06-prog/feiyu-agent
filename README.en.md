@@ -189,6 +189,14 @@ Given a task, it doesn't just start rewriting things. It looks around first — 
 
 All of this runs through seven basic abilities: run a shell command, read a file, write a file, replace an exact chunk of a file, list files by glob, search contents with a regex, and fetch a web page. It prints each one as it goes, so you can always see what it's doing.
 
+### Office documents
+
+Reading a `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, `.odp` or `.pdf` extracts the text automatically, so you can just ask what a report says. Spreadsheets come back row by row, presentations slide by slide. The first six are handled with the standard library (these formats are ZIP archives of XML); PDF needs `pdftotext` on the system.
+
+Only the **text** survives — layout, styling and images do not, and you can't edit the original file with `edit_file`. To create or modify these files, have it write a script using `python-docx`, `openpyxl` and friends, or drive LibreOffice from the command line for format conversion.
+
+Other binary formats report a clear error instead of returning mojibake.
+
 `web_fetch` accepts http/https only and converts HTML to **Markdown**, keeping headings, links and code blocks.
 
 It has two modes, and the difference matters:

@@ -1,6 +1,9 @@
 import difflib
 import ipaddress
 import os
+import shutil as _shutil
+import zipfile
+import xml.etree.ElementTree as ET
 import socket
 import time
 import re
@@ -42,8 +45,10 @@ TOOL_SCHEMAS = [
     {
         "name": "read_file",
         "description": (
-            "读取工作区内的一个 UTF-8 文本文件，返回带 1 起始行号的内容，"
-            "方便你在编辑时引用行 "
+            "读取工作区内的文件 文本文件返回带 1 起始行号的内容，方便你在编辑时引用行 "
+            "docx / xlsx / pptx / odt / ods / odp / pdf 会自动抽成纯文本（只有文字，"
+            "排版和图片不保留，也无法用 edit_file 改回去） "
+            "其他二进制格式会明确报错，不会返回乱码 "
         ),
         "input_schema": {
             "type": "object",
@@ -177,6 +182,137 @@ def _child_env() -> dict:
         for name, value in os.environ.items()
         if name in _SECRET_KEEP or not _SECRET_WORDS.search(name)
     }
+
+
+# ---- 办公文档 ----
+# docx / xlsx / pptx / odt 都是 zip 装 XML，用标准库就能抽出文字，不必引依赖
+
+def _tag(node) -> str:
+    """去掉命名空间前缀，只留标签名 """
+    return node.tag.rsplit("}", 1)[-1]
+
+
+def _texts(node, want: str) -> list[str]:
+    return [n.text or "" for n in node.iter() if _tag(n) == want]
+
+
+def _from_docx(zf) -> str:
+    root = ET.fromstring(zf.read("word/document.xml"))
+    lines = []
+    for node in root.iter():
+        if _tag(node) == "p":
+            line = "".join(_texts(node, "t")).strip()
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _from_pptx(zf) -> str:
+    names = sorted(n for n in zf.namelist()
+                   if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
+    out = []
+    for i, name in enumerate(names, 1):
+        root = ET.fromstring(zf.read(name))
+        body = [t.strip() for t in _texts(root, "t") if t and t.strip()]
+        out.append("== 第 %d 页 ==\n%s" % (i, "\n".join(body)))
+    return "\n\n".join(out)
+
+
+def _from_xlsx(zf) -> str:
+    shared = []
+    if "xl/sharedStrings.xml" in zf.namelist():
+        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+        for item in root:
+            shared.append("".join(_texts(item, "t")))
+    sheets = sorted(n for n in zf.namelist()
+                    if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
+    out = []
+    for i, name in enumerate(sheets, 1):
+        root = ET.fromstring(zf.read(name))
+        rows = []
+        for row in (n for n in root.iter() if _tag(n) == "row"):
+            cells = []
+            for cell in (c for c in row if _tag(c) == "c"):
+                kind = cell.get("t")
+                value = "".join(_texts(cell, "v")) or ""
+                if kind == "s" and value.isdigit() and int(value) < len(shared):
+                    value = shared[int(value)]
+                elif kind == "inlineStr":
+                    value = "".join(_texts(cell, "t"))
+                cells.append(value)
+            rows.append("\t".join(cells))
+        out.append("== 工作表 %d ==\n%s" % (i, "\n".join(rows)))
+    return "\n\n".join(out)
+
+
+def _from_opendocument(zf) -> str:
+    root = ET.fromstring(zf.read("content.xml"))
+    return "\n".join(
+        "".join(n.itertext()).strip()
+        for n in root.iter() if _tag(n) in ("p", "h")
+    )
+
+
+def _from_ods(zf) -> str:
+    """表格按行输出，不能像文档那样一个单元格一行 """
+    root = ET.fromstring(zf.read("content.xml"))
+    out = []
+    for i, table in enumerate((n for n in root.iter() if _tag(n) == "table"), 1):
+        rows = []
+        for row in (n for n in table.iter() if _tag(n) == "table-row"):
+            cells = []
+            for cell in (c for c in row if _tag(c) == "table-cell"):
+                text = "".join(cell.itertext()).strip()
+                # 连续空列会被压成一个带 number-columns-repeated 的单元格
+                repeat = 1
+                for key, value in cell.attrib.items():
+                    if key.endswith("number-columns-repeated"):
+                        repeat = min(int(value or 1), 64)
+                cells.extend([text] * repeat)
+            while cells and not cells[-1]:
+                cells.pop()
+            if cells:
+                rows.append("\t".join(cells))
+        if rows:
+            out.append("== 工作表 %d ==\n%s" % (i, "\n".join(rows)))
+    return "\n\n".join(out)
+
+
+_ZIP_READERS = {
+    ".docx": _from_docx, ".xlsx": _from_xlsx, ".pptx": _from_pptx,
+    ".odt": _from_opendocument, ".ods": _from_ods, ".odp": _from_opendocument,
+}
+
+
+def read_document(target: Path) -> str | None:
+    """能认的二进制格式抽成文本，认不出返回 None """
+    suffix = target.suffix.lower()
+    if suffix == ".pdf":
+        if not _shutil.which("pdftotext"):
+            return None
+        try:
+            done = subprocess.run(["pdftotext", "-layout", str(target), "-"],
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout if done.returncode == 0 else None
+    reader = _ZIP_READERS.get(suffix)
+    if reader is None:
+        return None
+    try:
+        with zipfile.ZipFile(target) as zf:
+            return reader(zf)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError):
+        return None
+
+
+def _looks_binary(raw: bytes) -> bool:
+    if b"\x00" in raw[:4096]:
+        return True
+    try:
+        raw[:4096].decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 def _local_ok() -> bool:
@@ -439,7 +575,26 @@ class Toolbox:
 
     def _tool_read_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
-        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+
+        extracted = read_document(target)
+        if extracted is not None:
+            text = _truncate(extracted.strip())
+            kind = target.suffix.lower().lstrip(".")
+            return ToolResult(
+                "（从 %s 里抽出的文本，排版和图片没有保留）\n\n%s" % (kind, text or "（没抽到文字）"),
+                summary="读取 %s，%d 行文本" % (kind, len(text.splitlines())),
+            )
+
+        raw = target.read_bytes()
+        if _looks_binary(raw):
+            return ToolResult(
+                "这是二进制文件，读不了 认得的格式有 docx / xlsx / pptx / odt / ods / odp / pdf；"
+                "其他格式可以用 bash 调 soffice 或别的工具先转成文本 ",
+                is_error=True,
+                summary="二进制文件，无法直接读",
+            )
+
+        lines = raw.decode("utf-8", errors="replace").splitlines()
         offset = max(1, int(args.get("offset", 1)))
         limit = int(args.get("limit", len(lines)))
         chunk = lines[offset - 1 : offset - 1 + limit]

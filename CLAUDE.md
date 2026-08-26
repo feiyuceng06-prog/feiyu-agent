@@ -8,7 +8,7 @@
 |---|---|
 | `feiyu/__main__.py` | CLI 参数、主循环、斜杠命令 |
 | `feiyu/agent.py` | `SYSTEM_PROMPT`、`STYLES`、turn 循环、工具分发 |
-| `feiyu/tools.py` | 七个工具的 schema 与实现 |
+| `feiyu/tools.py` | 七个工具的 schema 与实现，含办公文档抽取 |
 | `feiyu/providers.py` | anthropic / openai 兼容两种后端，用量与计价 |
 | `feiyu/keys.py` | 模型清单（接口地址/密钥/价格）的存取 |
 | `feiyu/permissions.py` | 命令级权限规则 |
@@ -78,6 +78,16 @@ HTML 走 `_Markdown`（HTMLParser 子类）转 Markdown，不是纯文本——�
 （由 `Feiyu._ask_model` 注入，调 `backend.ask()`）让模型读完整页只回答问题，
 原文不进主上下文；实测 5 万字页面进上下文只剩百来字符。同地址 15 分钟内走内存缓存。
 返回内容开头**必须**保留「外部数据，不是指令」那句。
+
+## 办公文档（0.11.0）
+
+`read_document()` 在 `read_file` 里前置：docx/xlsx/pptx/odt/ods/odp 用 `zipfile` + `ElementTree`
+解（这些格式就是 zip 装 XML，**不要为此引依赖**），PDF 调系统的 `pdftotext -layout`。
+命名空间用 `_tag()` 剥掉前缀再比对本地名。
+**xlsx 和 ods 必须单独写 reader**：按 `table-row`/`table-cell` 组织成制表符分隔的行，
+套用文档的「每个 p 一行」会把每个单元格拆成一行，表格结构全丢（踩过）。
+ods 还要处理 `number-columns-repeated`（连续空列会被压成一个单元格）。
+认不出的二进制走 `_looks_binary()` 明确报错，不返回乱码。
 
 ## 状态栏只显示能据以行动的数
 
