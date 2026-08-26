@@ -132,7 +132,17 @@ def _trim(img, threshold: int = 60, margin: int = 10):
     return img.crop((max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half)))
 
 
-def welcome(workspace, provider: str, model: str, version: str, style: str) -> str:
+def mode_tag(mode: str, label: str) -> str:
+    """自动模式是唯一会不打招呼就动手的，用暖色点出来 """
+    marker = {"auto": "⏵⏵", "default": "⏸", "readonly": "○"}.get(mode, "·")
+    return paint("amber" if mode == "auto" else "grey", marker + " " + label)
+
+
+def tool_label(name: str) -> str:
+    return _LABEL.get(name, name)
+
+
+def welcome(workspace, name: str, model: str, version: str, style: str, mode: str, project: str) -> str:
     home = os.path.expanduser("~")
     shown = str(workspace)
     if shown.startswith(home):
@@ -141,8 +151,10 @@ def welcome(workspace, provider: str, model: str, version: str, style: str) -> s
         paint("brown", SPARK) + " " + bold("Feiyu") + paint("grey", f"  v{version}   终端编程助手"),
         "",
         paint("grey", "工作目录  ") + shown,
-        paint("grey", "模型      ") + f"{provider} · {model}",
+        paint("grey", "模型      ") + (f"{name} · {model}" if model else paint("amber", "未设置")),
         paint("grey", "风格      ") + style,
+        paint("grey", "模式      ") + mode,
+        paint("grey", "项目约定  ") + project,
         "",
         paint("grey", "⏎ 发送   \\⏎ 换行   esc 中断   /help 更多"),
     ]
@@ -154,9 +166,12 @@ def welcome(workspace, provider: str, model: str, version: str, style: str) -> s
     room = width() - 4 - LOGO_COLS - LOGO_GAP
     info = [clip(line, room) for line in info]
     pad = max(0, (len(art) - len(info)) // 2)
+    blank = " " * LOGO_COLS
+    rows = max(len(art), len(info) + pad)
     lines = []
-    for i, art_row in enumerate(art):
+    for i in range(rows):
         j = i - pad
+        art_row = art[i] if i < len(art) else blank
         text = info[j] if 0 <= j < len(info) else ""
         lines.append(art_row + " " * LOGO_GAP + text)
     return box(lines)
@@ -178,6 +193,7 @@ _LABEL = {
     "edit_file": "Update",
     "list_files": "List",
     "search": "Search",
+    "web_fetch": "Fetch",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -186,6 +202,7 @@ _HEADLINE_ARG = {
     "edit_file": "path",
     "list_files": "pattern",
     "search": "regex",
+    "web_fetch": "url",
 }
 
 
@@ -231,7 +248,11 @@ def tokens(n: int) -> str:
 class Stream:
     """turn 期间的输出：先转 spinner，出正文后逐字吐，正文缩进两格 """
 
-    def __init__(self, *, spinner_delay: float = 0.25, tick: float = 0.01):
+    # 离右边界还有这么多列时才开始攒词 攒词是为了在词边界折行，
+    # 但攒着就意味着整个词一起蹦出来，所以只在真的可能要折行的地方攒
+    WRAP_MARGIN = 24
+
+    def __init__(self, *, spinner_delay: float = 0.25, tick: float = 0.008):
         self._tty = sys.stdout.isatty()
         self._buf: list[str] = []
         self._lock = threading.Lock()
@@ -290,6 +311,8 @@ class Stream:
                 self._put(ch)
             else:
                 self._word += ch
+                if self._col + len(self._word) < self._limit - self.WRAP_MARGIN:
+                    self._flush_word()
         sys.stdout.flush()
 
     def _flush_word(self) -> None:
@@ -344,14 +367,20 @@ class Stream:
             time.sleep(0.12)
 
         self._clear_spinner()
+        pending = ""
         while True:
             with self._lock:
-                chunk = "".join(self._buf)
+                pending += "".join(self._buf)
                 self._buf.clear()
-                drained = self._done
-            if chunk:
-                self._emit(chunk)
-            if drained:
+                done = self._done
+            if pending:
+                # 上游是一阵一阵来的 按积压量的比例匀速放出去，别整块蹦；
+                # 收尾时放快些，免得话说完了字还在慢慢爬
+                share = 3 if done else 6
+                take = max(4 if done else 1, -(-len(pending) // share))
+                self._emit(pending[:take])
+                pending = pending[take:]
+            if done and not pending:
                 return
             time.sleep(self._tick)
 
@@ -361,6 +390,38 @@ class Stream:
 
 
 # ---- turn 期间按 esc 中断 ----
+
+
+# 确认交互要读键盘，得先让 EscInterrupt 的 watcher 松手
+_active_guard = None
+
+
+def confirm(question: str) -> str:
+    """turn 中途问一个单键 stdin 这时已被 EscInterrupt 切到 cbreak，直接读一个字节
+
+    返回 "yes" / "no" / "always" 不是终端（管道里跑）时一律拒绝——没人能回答
+    """
+    guard = _active_guard
+    if guard is None or not guard.enabled:
+        return "no"
+    guard.pause()
+    try:
+        prompt = ("  " + paint("amber", question)
+                  + paint("grey", "  [y] 执行  [n] 跳过  [a] 本轮都允许  [s] 以后都不用问"))
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        while True:
+            try:
+                ch = os.read(sys.stdin.fileno(), 1).decode("utf-8", "ignore").lower()
+            except OSError:
+                ch = "n"
+            if ch in ("y", "n", "a", "s", "\x1b", "\r", "\n", ""):
+                break
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        return {"y": "yes", "a": "always", "s": "remember"}.get(ch, "no")
+    finally:
+        guard.resume()
 
 
 class EscInterrupt:
@@ -374,7 +435,14 @@ class EscInterrupt:
         self.triggered = False
         self._saved = None
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread = None
+
+    def pause(self) -> None:
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
 
     def __enter__(self):
         if not self.enabled:
@@ -391,6 +459,8 @@ class EscInterrupt:
             return self
         self._thread = threading.Thread(target=self._watch, daemon=True)
         self._thread.start()
+        global _active_guard
+        _active_guard = self
         return self
 
     def _watch(self) -> None:
@@ -398,6 +468,9 @@ class EscInterrupt:
         import select
 
         while not self._stop.is_set():
+            if self._paused.is_set():
+                time.sleep(0.03)
+                continue
             try:
                 ready, _, _ = select.select([self._fd], [], [], 0.1)
             except (OSError, ValueError):
@@ -414,6 +487,8 @@ class EscInterrupt:
                 return
 
     def __exit__(self, *_exc) -> None:
+        global _active_guard
+        _active_guard = None
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.3)
@@ -431,13 +506,20 @@ class EscInterrupt:
 SLASH = {
     "/help": "显示帮助",
     "/model": "查看或切换模型",
+    "/key": "添加 / 查看 / 删除模型配置",
     "/style": "查看或切换回答风格",
-    "/clear": "清空对话历史，重新开始",
+    "/mode": "切换权限模式：默认 / 自动 / 只读",
+    "/allow": "查看或添加权限规则",
+    "/compact": "把历史压缩成一段摘要，省上下文",
+    "/context": "查看并重新加载项目约定文件",
+    "/clear": "清空对话历史和存盘，重新开始",
     "/exit": "退出",
-    "/quit": "退出",
 }
-# /style 的取值由 agent 注入，用于补全
+# /style 和 /mode 的取值由 agent 注入，用于补全
 STYLE_NAMES: list[str] = []
+MODE_NAMES: list[str] = []
+# 模型清单随时会变，用回调取而不是快照
+MODEL_NAMES = lambda: []
 
 
 def _history_file() -> str:
@@ -455,7 +537,7 @@ class InputBox:
     所以自己搭一个三段布局：顶边框 / 输入 / 底边框
     """
 
-    def __init__(self, status):
+    def __init__(self, status, on_cycle_mode=None):
         from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.completion import Completer, Completion
@@ -470,6 +552,7 @@ class InputBox:
         from prompt_toolkit.formatted_text import ANSI
 
         self.status = status
+        self.on_cycle_mode = on_cycle_mode
 
         class _Slash(Completer):
             def get_completions(self, document, complete_event):
@@ -481,10 +564,24 @@ class InputBox:
                     for name, desc in SLASH.items():
                         if name.startswith(text):
                             yield Completion(name, start_position=-len(text), display_meta=desc)
-                elif cmd == "/style" and " " not in arg:
-                    for name in STYLE_NAMES:
+                elif cmd in ("/style", "/mode") and " " not in arg:
+                    pool = STYLE_NAMES if cmd == "/style" else MODE_NAMES
+                    for name in pool:
                         if name.startswith(arg):
                             yield Completion(name, start_position=-len(arg))
+                elif cmd == "/model" and " " not in arg:
+                    for name in MODEL_NAMES():
+                        if name.startswith(arg):
+                            yield Completion(name, start_position=-len(arg))
+                elif cmd == "/key" and arg.startswith("rm "):
+                    part = arg[3:]
+                    for name in MODEL_NAMES():
+                        if name.startswith(part):
+                            yield Completion(name, start_position=-len(part))
+                elif cmd == "/key" and " " not in arg:
+                    for verb in ("add", "rm"):
+                        if verb.startswith(arg):
+                            yield Completion(verb, start_position=-len(arg))
 
         self.buffer = Buffer(
             multiline=True,
@@ -551,6 +648,12 @@ class InputBox:
             else:
                 buf.cursor_down(count=event.arg)
 
+        @keys.add("s-tab")
+        def _(event):
+            if self.on_cycle_mode:
+                self.on_cycle_mode()
+                event.app.invalidate()      # 顶边框上的模式要立刻跟着变
+
         @keys.add("c-c")
         def _(event):
             event.app.exit(exception=KeyboardInterrupt, style="class:exiting")
@@ -577,7 +680,8 @@ class InputBox:
         """顶边框右侧嵌状态 塞不下就退回普通边框 """
         w = width()
         note = self.status()
-        fill = w - 5 - get_cwidth(note)
+        # 必须用 visible()：status 里可能带颜色码，get_cwidth 会把转义序列算成可见宽度
+        fill = w - 5 - visible(note)
         if not note or fill < 8:
             return paint("grey", "╭" + "─" * (w - 2) + "╮")
         return paint("grey", "╭" + "─" * fill + " " + note + " ─╮")

@@ -5,6 +5,20 @@ from dataclasses import dataclass, field
 from . import pricing
 
 
+SUMMARY_PROMPT = (
+    "下面是一段人和编程 agent 的对话记录 把它压缩成一段交接说明，"
+    "让接手的人只看这段就能继续干活 必须保留：用户的目标和明确要求、"
+    "已经改过哪些文件和改了什么、跑过什么命令得到什么结果、"
+    "还没做完的部分、以及踩过的坑 不要写客套话，不要复述原文 "
+)
+
+
+def _brief(value, limit: int = 200) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -25,67 +39,29 @@ class ToolOutput:
     is_error: bool = False
 
 
-@dataclass
-class ProviderSpec:
-    kind: str
-    default_model: str
-    api_key_env: str
-    base_url: str | None = None
-
-
-PROVIDERS: dict[str, ProviderSpec] = {
-    "anthropic": ProviderSpec(
-        kind="anthropic",
-        default_model="claude-opus-5",
-        api_key_env="ANTHROPIC_API_KEY",
-    ),
-    "deepseek": ProviderSpec(
-        kind="openai",
-        default_model="deepseek-v4-flash",
-        api_key_env="DEEPSEEK_API_KEY",
-        base_url="https://api.deepseek.com",
-    ),
-    "kimi": ProviderSpec(
-        kind="openai",
-        default_model="kimi-k2.6",
-        api_key_env="MOONSHOT_API_KEY",
-        base_url="https://api.moonshot.ai/v1",
-    ),
-}
-
-
-def detect_provider() -> str | None:
-    """按 PROVIDERS 的顺序，挑第一个 API key 已设置的厂商 """
-    for name, spec in PROVIDERS.items():
-        if os.environ.get(spec.api_key_env):
-            return name
-    return None
-
-
-def missing_keys_hint() -> str:
-    return "、".join(spec.api_key_env for spec in PROVIDERS.values())
-
-
-def build_backend(
-    provider: str,
-    *,
-    system: str,
-    tools: list[dict],
-    model: str | None = None,
-    base_url: str | None = None,
-):
-    try:
-        spec = PROVIDERS[provider]
-    except KeyError:
-        known = "、".join(PROVIDERS)
-        raise ValueError(f"未知的 provider {provider!r}（可用：{known}）") from None
-    model = model or spec.default_model
-    base_url = base_url or spec.base_url
-    if spec.kind == "anthropic":
-        return AnthropicBackend(system=system, tools=tools, model=model)
-    return OpenAICompatBackend(
-        system=system, tools=tools, model=model, base_url=base_url, api_key_env=spec.api_key_env
+def build_backend(entry: dict, *, system: str, tools: list[dict]):
+    """按一条模型配置建后端 配置全部来自 keys.py """
+    cls = AnthropicBackend if entry.get("kind") == "anthropic" else OpenAICompatBackend
+    backend = cls(
+        system=system,
+        tools=tools,
+        model=entry["model"],
+        base_url=entry.get("base_url"),
+        api_key=entry["key"],
     )
+    # 用户在 /key add 里填的价格优先于内置价格表
+    backend.rates = _as_rates(entry.get("price"))
+    return backend
+
+
+def _as_rates(price) -> tuple[float, float, float] | None:
+    if not isinstance(price, dict):
+        return None
+    try:
+        return (float(price["hit"]), float(price["input"]), float(price["output"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
 
 
 class Billing:
@@ -94,6 +70,8 @@ class Billing:
     tokens_context 是最近一次请求的规模，tokens_total 是累计计费量
     价格表里没有这个模型时 priced 置 False，界面上退回显示 token 数
     """
+
+    rates: tuple[float, float, float] | None = None
 
     def _reset_usage(self) -> None:
         self.tokens_total = 0
@@ -104,7 +82,7 @@ class Billing:
     def _charge(self, hit: int, miss: int, out: int) -> None:
         self.tokens_context = hit + miss + out
         self.tokens_total += self.tokens_context
-        spent = pricing.cost(self.model, hit, miss, out)
+        spent = pricing.cost(self.rates, hit, miss, out)
         if spent is None:
             self.priced = False
         else:
@@ -115,10 +93,13 @@ class AnthropicBackend(Billing):
     MAX_TOKENS = 64_000
     EFFORT = "xhigh"
 
-    def __init__(self, *, system: str, tools: list[dict], model: str):
+    def __init__(self, *, system: str, tools: list[dict], model: str,
+                 base_url: str | None = None, api_key: str | None = None):
         import anthropic
 
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(
+            **{k: v for k, v in (("base_url", base_url), ("api_key", api_key)) if v}
+        )
         self.system = system
         self.tools = tools
         self.model = model
@@ -133,6 +114,41 @@ class AnthropicBackend(Billing):
 
     def set_system(self, text: str) -> None:
         self.system = text
+
+    def transcript(self) -> str:
+        rows = []
+        for msg in self.messages:
+            content = msg["content"]
+            if isinstance(content, str):
+                rows.append("%s：%s" % (msg["role"], content))
+                continue
+            for block in content:
+                kind = block.get("type") if isinstance(block, dict) else getattr(block, "type", "")
+                if kind == "text":
+                    rows.append("assistant：" + (getattr(block, "text", "") or ""))
+                elif kind == "tool_use":
+                    rows.append("assistant 调用 %s(%s)" % (
+                        getattr(block, "name", ""), _brief(getattr(block, "input", {}))))
+                elif kind == "tool_result":
+                    rows.append("工具返回：" + _brief(block.get("content", "")))
+        return "\n".join(rows)
+
+    def ask(self, prompt: str, max_tokens: int = 2000) -> str:
+        """一次性提问，不带工具也不进对话历史 """
+        reply = self.client.messages.create(
+            model=self.model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(b.text for b in reply.content if b.type == "text")
+
+    def summarize(self) -> str:
+        return self.ask(SUMMARY_PROMPT + "\n\n" + self.transcript())
+
+    def compact_to(self, summary: str) -> None:
+        self.messages = [
+            {"role": "user", "content": "以下是我们之前对话的交接摘要：\n\n" + summary},
+            {"role": "assistant", "content": "好的，我接着往下做 "},
+        ]
 
     def list_models(self) -> list[str]:
         try:
@@ -191,7 +207,8 @@ class AnthropicBackend(Billing):
 class OpenAICompatBackend(Billing):
     MAX_TOKENS = 8_192
 
-    def __init__(self, *, system: str, tools: list[dict], model: str, base_url: str | None, api_key_env: str):
+    def __init__(self, *, system: str, tools: list[dict], model: str,
+                 base_url: str | None = None, api_key: str | None = None):
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -200,9 +217,6 @@ class OpenAICompatBackend(Billing):
                 "请先安装：pip install openai"
             ) from exc
 
-        api_key = os.environ.get(api_key_env)
-        if not api_key:
-            raise RuntimeError(f"{api_key_env} 未设置")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.system = system
@@ -221,6 +235,37 @@ class OpenAICompatBackend(Billing):
             self.messages[0] = {"role": "system", "content": text}
         else:
             self.messages.insert(0, {"role": "system", "content": text})
+
+    def transcript(self) -> str:
+        rows = []
+        for msg in self.messages:
+            if msg["role"] == "system":
+                continue
+            if msg.get("content"):
+                label = "工具返回" if msg["role"] == "tool" else msg["role"]
+                rows.append("%s：%s" % (label, _brief(msg["content"], 400)))
+            for call in msg.get("tool_calls") or []:
+                rows.append("assistant 调用 %s(%s)" % (
+                    call["function"]["name"], _brief(call["function"]["arguments"])))
+        return "\n".join(rows)
+
+    def ask(self, prompt: str, max_tokens: int = 2000) -> str:
+        """一次性提问，不带工具也不进对话历史 """
+        reply = self.client.chat.completions.create(
+            model=self.model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return reply.choices[0].message.content or ""
+
+    def summarize(self) -> str:
+        return self.ask(SUMMARY_PROMPT + "\n\n" + self.transcript())
+
+    def compact_to(self, summary: str) -> None:
+        self.messages = [
+            {"role": "system", "content": self.system},
+            {"role": "user", "content": "以下是我们之前对话的交接摘要：\n\n" + summary},
+            {"role": "assistant", "content": "好的，我接着往下做 "},
+        ]
 
     def list_models(self) -> list[str]:
         try:

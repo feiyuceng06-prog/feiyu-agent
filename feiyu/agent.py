@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from . import ui
+from . import keys, permissions
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 
@@ -24,6 +25,54 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 别停下来问 涉及范围变化或破坏性操作时，先问 """
 
 
+# 上下文接近上限时自动压缩 具体上限可以在 models.json 里给某条配置写 "limit"
+DEFAULT_CONTEXT_LIMIT = 128_000
+COMPACT_RATIO = 0.75
+
+# 一次任务里最多连续调多少轮工具 纯保险：模型卡在某个循环里时不至于一直转下去
+MAX_ROUNDS = 25
+
+
+# 工作区里放一份约定给它读 按这个顺序找第一个存在的
+CONTEXT_FILES = ("FEIYU.md", "AGENTS.md", "CLAUDE.md")
+MAX_CONTEXT_CHARS = 8000
+
+
+def load_project_context(workspace: Path) -> tuple[str, str]:
+    """返回 (文件名, 内容)，找不到返回两个空串 """
+    for name in CONTEXT_FILES:
+        target = workspace / name
+        try:
+            if not target.is_file():
+                continue
+            text = target.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if text:
+            return name, text[:MAX_CONTEXT_CHARS]
+    return "", ""
+
+
+# 权限模式 会改变状态的三个工具受管，读类工具永远放行
+MODES = {
+    "default": ("默认", "允许列表里的直接跑，其余问你一声"),
+    "auto": ("自动", "所有工具调用直接执行，不打断"),
+    "readonly": ("只读", "只让它读文件、列目录、搜索、抓网页，写和执行一律拒绝"),
+}
+MODE_ORDER = ("default", "auto", "readonly")
+# confirm 模式下要问一声的：改本地状态的，加上会把内容发到外网的
+GUARDED = {"bash", "write_file", "edit_file", "web_fetch"}
+# readonly 模式下直接拒绝的 web_fetch 不改任何东西，所以只读模式放行
+WRITES = {"bash", "write_file", "edit_file"}
+
+
+# 不告诉它跑在什么模型上的话，被问起来它会自己编一个（实测 deepseek 会说自己是 Claude）
+IDENTITY = (
+    "\n\n关于你自己：你当前使用的模型是 {model}（配置名 {name}） "
+    "用户问起你是什么模型时照这个回答，不要猜，也不要说成别家的模型 "
+)
+
+
 # 回答风格：接在 SYSTEM_PROMPT 后面的一段补充指令
 STYLES = {
     "default": ("默认", ""),
@@ -43,23 +92,45 @@ STYLES = {
 }
 
 class Feiyu:
-    def __init__(
-        self,
-        workspace: Path,
-        *,
-        provider: str = "anthropic",
-        model: str | None = None,
-        base_url: str | None = None,
-    ):
-        self.toolbox = Toolbox(workspace)
+    def __init__(self, workspace: Path, *, model: str = ""):
+        self.toolbox = Toolbox(workspace, ask_model=self._ask_model)
+        self.context_file, self.context_text = load_project_context(workspace)
         self.style = "default"
-        self.backend = build_backend(
-            provider,
-            system=SYSTEM_PROMPT,
-            tools=TOOL_SCHEMAS,
-            model=model,
-            base_url=base_url,
-        )
+        self.mode = "default"
+        self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
+        self.name = ""           # 当前用的是 /key 里的哪一条
+        self.context_limit = DEFAULT_CONTEXT_LIMIT
+        self.backend = None
+        if model:
+            self.use_model(model)
+
+    @property
+    def ready(self) -> bool:
+        return self.backend is not None
+
+    def _ask_model(self, prompt: str) -> str:
+        """给 web_fetch 的 prompt 模式用：读完页面只回答问题，原文不进主上下文 """
+        if self.backend is None:
+            return ""
+        try:
+            return (self.backend.ask(prompt) or "").strip()
+        except Exception:
+            return ""
+
+    def _refresh_system(self) -> None:
+        """身份和风格都会变，每次变完重拼一遍系统提示 """
+        if self.backend is None:
+            return
+        text = SYSTEM_PROMPT + IDENTITY.format(model=self.model, name=self.name) + STYLES[self.style][1]
+        if self.context_text:
+            # 项目约定放最后，比通用指令更具体，冲突时以它为准
+            text += "\n\n这个项目在 %s 里写了自己的约定，优先照它来：\n\n%s" % (
+                self.context_file, self.context_text)
+        self.backend.set_system(text)
+
+    def reload_context(self) -> None:
+        self.context_file, self.context_text = load_project_context(self.toolbox.root)
+        self._refresh_system()
 
     @property
     def tokens(self) -> int:
@@ -83,21 +154,50 @@ class Feiyu:
 
     @property
     def model(self) -> str:
-        return self.backend.model
-
-    def set_model(self, name: str) -> None:
-        """同一厂商内换模型，对话历史照旧 """
-        self.backend.model = name
+        return self.backend.model if self.backend else ""
 
     def list_models(self) -> list[str]:
-        return self.backend.list_models()
+        return self.backend.list_models() if self.backend else []
+
+    def use_model(self, name: str) -> bool:
+        """切到 /key 里的某一条 换了接口就得换客户端，所以整个后端重建
+
+        消息格式一样的话（都是 openai 兼容 / 都是 anthropic）历史搬过去，
+        否则只能丢掉——两边的 messages 结构不通用
+        """
+        entry = keys.load().get(name)
+        if entry is None:
+            return False
+        old = self.backend
+        fresh = build_backend(entry, system=SYSTEM_PROMPT, tools=TOOL_SCHEMAS)
+        if old is not None:
+            same = type(fresh) is type(old)
+            if same:
+                fresh.messages = old.messages
+                fresh.tokens_context = old.tokens_context
+            fresh.tokens_total = old.tokens_total
+            fresh.cost = old.cost
+            fresh.priced = old.priced
+        self.backend = fresh
+        self.name = name
+        self.context_limit = int(entry.get("limit") or DEFAULT_CONTEXT_LIMIT)
+        keys.set_last(name)
+        self._refresh_system()
+        return True
+
+    def cycle_mode(self) -> str:
+        self.mode = MODE_ORDER[(MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)]
+        return self.mode
 
     def set_style(self, name: str) -> None:
         self.style = name
-        self.backend.set_system(SYSTEM_PROMPT + STYLES[name][1])
+        self._refresh_system()
 
     def send(self, user_message: str) -> str:
+        if self.backend is None:
+            raise RuntimeError("还没有可用的模型 先用 /key add 添加一个，再用 /model 选中 ")
         self.backend.add_user_message(user_message)
+        rounds = 0
         while True:
             stream = ui.Stream()
             stream.start()
@@ -108,16 +208,115 @@ class Feiyu:
                 stream.finish()
 
             if not turn.tool_calls:
+                self._maybe_compact()
                 return turn.text
 
             if stream.wrote_text:
                 print()
             self.backend.add_tool_results(self._run_tools(turn.tool_calls))
+            rounds += 1
+            if rounds >= MAX_ROUNDS:
+                return self._stop_runaway(rounds)
+            self._maybe_compact(mid_turn=True)
+
+    # 放行 / 拒绝的三种结果：(是否放行, 是否从此全放, 给人看的短语, 给模型看的说明)
+    _PASS = (True, False, "", "")
+    _ALL = (True, True, "", "")
+
+    def restore(self, data: dict) -> bool:
+        """从存盘恢复 系统提示会按当前的身份/风格/项目约定重新拼，不用存盘里的那份 """
+        name = data.get("model") or ""
+        if not name or not self.use_model(name):
+            return False
+        if data.get("style") in STYLES:
+            self.style = data["style"]
+        if data.get("mode") in MODES:
+            self.mode = data["mode"]
+        b = self.backend
+        b.messages = data["messages"]
+        b.tokens_total = int(data.get("tokens_total") or 0)
+        b.tokens_context = int(data.get("tokens_context") or 0)
+        b.cost = float(data.get("cost") or 0.0)
+        b.priced = bool(data.get("priced", True))
+        self._refresh_system()
+        return True
+
+    def compact(self) -> str:
+        """把历史交给模型总结成一段交接说明，替换掉原文 返回摘要，失败返回空串 """
+        if self.backend is None:
+            return ""
+        summary = (self.backend.summarize() or "").strip()
+        if not summary:
+            return ""
+        self.backend.compact_to(summary)
+        self.backend.tokens_context = 0
+        return summary
+
+    def _stop_runaway(self, rounds: int) -> str:
+        """连续调了太多轮工具还没收敛，收手 历史补一条 assistant 让角色保持交替 """
+        note = (
+            "连续调用了 %d 轮工具还没做完，我先停下来 "
+            "可能是我卡在某个循环里了，也可能这个任务需要拆小一点 " % rounds
+        )
+        self.backend.messages.append({"role": "assistant", "content": note})
+        print(ui.warn("已达到 %d 轮工具调用上限，自动停下 再说一句话可以让它接着做 " % rounds))
+        print()
+        return note
+
+    def _maybe_compact(self, *, mid_turn: bool = False) -> None:
+        if self.backend is None or self.context <= self.context_limit * COMPACT_RATIO:
+            return
+        print(ui.notice("上下文快满了（%s / %s），正在压缩…" % (
+            ui.tokens(self.context), ui.tokens(self.context_limit))))
+        if self.compact():
+            print(ui.notice("已压缩成一段摘要，早先的原文不再重发"))
+            if mid_turn:
+                # compact_to 收尾是 assistant，任务还没做完，得再补一条 user 把话接上
+                self.backend.add_user_message("（以上是压缩后的进展摘要）接着把刚才的任务做完 ")
+        else:
+            print(ui.warn("压缩没成功，历史照旧 需要的话用 /clear 清空"))
+        print()
+
+    def _gate(self, call, allow_all: bool):
+        if self.mode == "readonly" and call.name in WRITES:
+            return (False, False, "只读模式已拒绝",
+                    "当前是只读模式，不允许写文件或执行命令 要做这一步，用户得先按 shift+tab "
+                    "或用 /mode 切到 default（按允许列表）或 auto（直接执行） "
+                    "别自己编模式名字，就说这两个 ")
+
+        ruling = permissions.verdict(call.name, call.input)
+        if ruling == "deny":
+            return (False, False, "被权限规则拒绝",
+                    "这条调用被用户的权限规则挡下了（可能涉及密钥或私钥路径） "
+                    "别绕道去试别的写法，把你想做什么告诉用户，让他决定 ")
+        if ruling == "allow" or self.mode == "auto" or call.name not in GUARDED or allow_all:
+            return self._PASS
+        if self.mode == "readonly":
+            return self._PASS
+
+        answer = self.approve(call.name, call.input) if self.approve else "no"
+        if answer == "always":
+            return self._ALL
+        if answer == "remember":
+            permissions.add_allow(permissions.suggest(call.name, call.input))
+            return self._PASS
+        if answer == "yes":
+            return self._PASS
+        return (False, False, "用户拒绝",
+                "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
 
     def _run_tools(self, calls) -> list[ToolOutput]:
         outputs = []
+        allow_all = False
         for call in calls:
             print(ui.tool_call(call.name, call.input), flush=True)
+            ok, always, label, reason = self._gate(call, allow_all)
+            allow_all = allow_all or always
+            if not ok:
+                print(ui.tool_result(label, [], is_error=True))
+                print()
+                outputs.append(ToolOutput(id=call.id, content=reason, is_error=True))
+                continue
             result = self.toolbox.run(call.name, call.input)
             summary = result.summary or result.content.splitlines()[0][:80]
             print(ui.tool_result(summary, result.detail, is_error=result.is_error))

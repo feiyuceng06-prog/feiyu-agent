@@ -12,3 +12,11 @@ env/
 
 .claude/
 .DS_Store
+
+# 密钥相关 —— 模型配置本来存在 ~/.config/feiyu/ 下，
+# 这几条是防手滑把副本放进仓库
+.env*
+models.json
+*.pem
+*.key
+secrets*
