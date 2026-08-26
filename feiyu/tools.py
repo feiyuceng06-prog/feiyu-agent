@@ -1,6 +1,10 @@
+import difflib
+import os
 import re
+import shlex
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -10,7 +14,10 @@ TOOL_SCHEMAS = [
         "description": (
             "在工作区里执行一条 shell 命令，返回合并后的 stdout+stderr 和退出码 "
             "用于构建、跑测试、git、安装依赖，以及其他没有专门工具覆盖的操作 "
-            "命令从工作区根目录执行 过长的输出会被截断 "
+            "cd 会在多次调用之间保持：一旦 cd 进子目录，后续命令都从那里执行，"
+            "不用每次都写 cd x && … 目录不能离开工作区，越界会被弹回 "
+            "read_file/write_file/edit_file 的路径始终相对工作区根目录，不受 cd 影响 "
+            "过长的输出会被截断 "
         ),
         "input_schema": {
             "type": "object",
@@ -107,13 +114,36 @@ _MAX_OUTPUT = 30_000
 
 @dataclass
 class ToolResult:
-    content: str
+    content: str                                  # 喂给模型的
     is_error: bool = False
+    summary: str = ""                             # 给人看的一行
+    detail: list[tuple[str, str]] = field(default_factory=list)  # (kind, 文本)，kind 为 '-'/'+'/''
+
+
+def _peek(lines: list[str], keep: int = 3) -> list[tuple[str, str]]:
+    shown = [("", line) for line in lines[:keep]]
+    if len(lines) > keep:
+        shown.append(("", f"… 还有 {len(lines) - keep} 行"))
+    return shown
+
+
+def _diff(old_text: str, new_text: str, keep: int = 6) -> list[tuple[str, str]]:
+    old, new = old_text.splitlines(), new_text.splitlines()
+    rows: list[tuple[str, str]] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new).get_opcodes():
+        if tag == "equal":
+            continue
+        rows += [("-", f"{k + 1:>4}  - {old[k]}") for k in range(i1, i2)]
+        rows += [("+", f"{k + 1:>4}  + {new[k]}") for k in range(j1, j2)]
+    if len(rows) > keep:
+        rows = rows[:keep] + [("", f"… 还有 {len(rows) - keep} 行改动")]
+    return rows
 
 
 class Toolbox:
     def __init__(self, root: Path):
         self.root = root.resolve()
+        self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
 
     def _resolve(self, path: str) -> Path:
         target = (self.root / path).resolve()
@@ -134,18 +164,59 @@ class Toolbox:
     def _tool_bash(self, args: dict) -> ToolResult:
         command = args["command"]
         timeout = int(args.get("timeout", 120))
-        proc = subprocess.run(
+        # 命令末尾把 PWD 写进临时文件，这样 cd 能跨调用保持；
+        # 走文件而不是 stdout，免得污染给模型看的输出
+        fd, pwd_file = tempfile.mkstemp(prefix="feiyu-pwd-")
+        os.close(fd)
+        wrapped = "%s\n__feiyu_rc=$?\npwd > %s 2>/dev/null\nexit $__feiyu_rc" % (
             command,
-            shell=True,
-            cwd=self.root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            shlex.quote(pwd_file),
         )
+        try:
+            proc = subprocess.run(
+                wrapped,
+                shell=True,
+                cwd=self.cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            self._track_cwd(pwd_file)
+        finally:
+            try:
+                os.unlink(pwd_file)
+            except OSError:
+                pass
         out = (proc.stdout or "") + (proc.stderr or "")
         out = _truncate(out)
         body = out if out.strip() else "（无输出）"
-        return ToolResult(f"退出码: {proc.returncode}\n{body}", is_error=proc.returncode != 0)
+        lines = [line for line in out.splitlines() if line.strip()]
+        if proc.returncode != 0:
+            summary, detail = f"退出码 {proc.returncode}", _peek(lines, 4)
+        else:
+            summary = lines[0] if lines else "（无输出）"
+            detail = _peek(lines[1:]) if len(lines) > 1 else []
+        return ToolResult(
+            f"退出码: {proc.returncode}\n{body}",
+            is_error=proc.returncode != 0,
+            summary=summary,
+            detail=detail,
+        )
+
+    def _track_cwd(self, pwd_file: str) -> None:
+        """命令跑完后更新 cwd 走出工作区的一律弹回根目录 """
+        try:
+            with open(pwd_file, encoding="utf-8") as f:
+                reported = f.read().strip()
+        except OSError:
+            return
+        if not reported:
+            return
+        target = Path(reported).resolve()
+        if target.is_dir() and (target == self.root or self.root in target.parents):
+            self.cwd = target
+        else:
+            self.cwd = self.root
 
     def _tool_read_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
@@ -154,14 +225,19 @@ class Toolbox:
         limit = int(args.get("limit", len(lines)))
         chunk = lines[offset - 1 : offset - 1 + limit]
         numbered = "\n".join(f"{offset + i}\t{line}" for i, line in enumerate(chunk))
-        return ToolResult(_truncate(numbered) or "（空文件）")
+        return ToolResult(
+            _truncate(numbered) or "（空文件）",
+            summary=f"读取 {len(chunk)} 行" if chunk else "空文件",
+        )
 
     def _tool_write_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
         target.parent.mkdir(parents=True, exist_ok=True)
+        existed = target.exists()
         target.write_text(args["content"], encoding="utf-8")
         n = args["content"].count("\n") + 1
-        return ToolResult(f"已写入 {n} 行到 {args['path']}")
+        verb = "覆盖" if existed else "新建"
+        return ToolResult(f"已写入 {n} 行到 {args['path']}", summary=f"{verb} {n} 行")
 
     def _tool_edit_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
@@ -172,8 +248,9 @@ class Toolbox:
             return ToolResult("文件中找不到 old_str", is_error=True)
         if count > 1:
             return ToolResult(f"old_str 匹配到 {count} 处，请让它唯一", is_error=True)
-        target.write_text(text.replace(old, new, 1), encoding="utf-8")
-        return ToolResult(f"已编辑 {args['path']}")
+        updated = text.replace(old, new, 1)
+        target.write_text(updated, encoding="utf-8")
+        return ToolResult(f"已编辑 {args['path']}", summary="已修改 1 处", detail=_diff(text, updated))
 
     def _tool_list_files(self, args: dict) -> ToolResult:
         pattern = args.get("pattern", "**/*")
@@ -185,7 +262,11 @@ class Toolbox:
                 continue
             matches.append(str(p.relative_to(self.root)))
         matches.sort()
-        return ToolResult("\n".join(matches) or "（无匹配）")
+        return ToolResult(
+            "\n".join(matches) or "（无匹配）",
+            summary=f"{len(matches)} 个文件" if matches else "无匹配",
+            detail=_peek(matches),
+        )
 
     def _tool_search(self, args: dict) -> ToolResult:
         rx = re.compile(args["regex"])
@@ -206,7 +287,11 @@ class Toolbox:
                 continue
             if len(hits) >= 200:
                 break
-        return ToolResult("\n".join(hits) or "（无匹配）")
+        return ToolResult(
+            "\n".join(hits) or "（无匹配）",
+            summary=f"{len(hits)} 处匹配" if hits else "无匹配",
+            detail=_peek(hits),
+        )
 
 
 def _truncate(text: str) -> str:

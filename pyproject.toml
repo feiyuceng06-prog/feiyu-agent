@@ -1,6 +1,6 @@
 [project]
 name = "feiyu-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A minimal terminal coding agent for Claude, DeepSeek, and Kimi"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "anthropic>=0.40",
     "pillow>=9",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["feiyu"]
+
+# 版本号只写在 feiyu/__init__.py，这里读过来，免得两处漂移
+[tool.setuptools.dynamic]
+version = { attr = "feiyu.__version__" }
 
 [tool.setuptools.package-data]
 feiyu = ["logo.png"]

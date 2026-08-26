@@ -1,18 +1,16 @@
 import argparse
-import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-from .agent import Feiyu
-from .providers import PROVIDERS
-
-BANNER = "\033[1mFeiyu\033[0m — 终端编程助手 输入任务开始，输入 /exit 退出 \n"
+from . import pricing, ui
+from . import __version__
+from .agent import STYLES, Feiyu
+from .providers import PROVIDERS, detect_provider, missing_keys_hint
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="feiyu", description="Feiyu 编程助手")
+    parser.add_argument("-V", "--version", action="version", version=f"feiyu {__version__}")
     parser.add_argument(
         "-w",
         "--workspace",
@@ -22,9 +20,9 @@ def main() -> int:
     parser.add_argument(
         "-p",
         "--provider",
-        default="anthropic",
+        default=None,
         choices=sorted(PROVIDERS),
-        help="选择模型厂商（默认 anthropic） ",
+        help="选择模型厂商（默认挑第一个设了 API key 的） ",
     )
     parser.add_argument(
         "-m",
@@ -49,10 +47,15 @@ def main() -> int:
         print(f"错误：{workspace} 不是一个目录", file=sys.stderr)
         return 2
 
+    provider = args.provider or detect_provider()
+    if provider is None:
+        print(f"错误：没有可用的 API key，请设置其中一个：{missing_keys_hint()}", file=sys.stderr)
+        return 2
+
     try:
         agent = Feiyu(
             workspace,
-            provider=args.provider,
+            provider=provider,
             model=args.model,
             base_url=args.base_url,
         )
@@ -63,88 +66,119 @@ def main() -> int:
     if args.prompt:
         _run_turn(agent, " ".join(args.prompt))
         return 0
+    if not sys.stdin.isatty():
+        return _piped(agent)
 
-    _show_logo()
-    print(BANNER, end="")
-    print(f"\033[2m工作目录：{workspace}  ·  模型：{args.provider}\033[0m\n")
+    ui.STYLE_NAMES[:] = list(STYLES)
+    ui.enter_screen()
+    print(ui.welcome(workspace, provider, agent.model, __version__, STYLES[agent.style][0]))
+    print()
+
+    def status() -> str:
+        if not agent.tokens:
+            return provider
+        spent = agent.cost
+        # 价格表里没这个模型就别瞎报钱，退回显示 token 数
+        money = pricing.yuan(spent) if spent is not None else "计费 " + ui.tokens(agent.tokens)
+        return "%s  ·  上下文 %s  ·  %s" % (provider, ui.tokens(agent.context), money)
+
+    inbox = ui.InputBox(status)
     while True:
         try:
-            user_input = input("\033[1m›\033[0m ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if not user_input:
+            text = inbox.ask().strip()
+        except KeyboardInterrupt:
             continue
-        if user_input in ("/exit", "/quit"):
+        except EOFError:
             return 0
-        _run_turn(agent, user_input)
+        if not text:
+            continue
+        if text.startswith("/"):
+            cmd, _, arg = text.partition(" ")
+            arg = arg.strip()
+            if cmd in ("/exit", "/quit"):
+                return 0
+            if cmd == "/help":
+                print(_help())
+            elif cmd == "/clear":
+                agent.reset()
+                print(ui.notice("对话历史已清空"))
+            elif cmd == "/model":
+                print(_model(agent, arg))
+            elif cmd == "/style":
+                print(_style(agent, arg))
+            else:
+                print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
+            print()
+            continue
         print()
+        _run_turn(agent, text)
+        print()
+
+
+def _model(agent: Feiyu, arg: str) -> str:
+    if arg:
+        if arg == agent.model:
+            return ui.notice(f"已经在用 {arg} 了")
+        agent.set_model(arg)
+        return ui.notice(f"模型已切到 {arg}，对话历史保留")
+    rows = [ui.notice("当前  ") + ui.bold(agent.model)]
+    names = agent.list_models()
+    if names:
+        rows.append("")
+        for n in names:
+            tick = ui.paint("brown", " ●") if n == agent.model else "  "
+            rows.append("   " + tick + " " + (ui.bold(n) if n == agent.model else ui.paint("grey", n)))
+    else:
+        rows.append(ui.notice("（拉不到模型列表）"))
+    rows.append("")
+    rows.append(ui.notice("/model <名字> 切换"))
+    return "\n".join(rows)
+
+
+def _style(agent: Feiyu, arg: str) -> str:
+    if arg:
+        if arg not in STYLES:
+            return ui.error("没有 %s 这个风格，可选：%s" % (arg, "、".join(STYLES)))
+        agent.set_style(arg)
+        return ui.notice("回答风格已切到 " + STYLES[arg][0])
+    rows = []
+    for key, (label, _) in STYLES.items():
+        tick = ui.paint("brown", " ●") if key == agent.style else "  "
+        name = ui.bold(key.ljust(12)) if key == agent.style else ui.paint("grey", key.ljust(12))
+        rows.append("   " + tick + " " + name + ui.paint("grey", label))
+    rows.append("")
+    rows.append(ui.notice("/style <名字> 切换 只影响 agent 怎么说话，不动模型 "))
+    return "\n".join(rows)
+
+
+def _help() -> str:
+    rows = [ui.notice("命令")]
+    for cmd, desc in ui.SLASH.items():
+        rows.append("    " + ui.bold(cmd.ljust(8)) + ui.paint("grey", desc))
+    rows.append("")
+    rows.append(ui.notice("按键    ⏎ 发送 · \\⏎ 换行 · esc 中断当前回答 · ctrl-d 退出"))
+    rows.append(ui.notice("版本    feiyu " + __version__))
+    return "\n".join(rows)
+
+
+def _piped(agent: Feiyu) -> int:
+    """stdin 不是终端时（管道、脚本）：一行一个任务，不画框 """
+    for line in sys.stdin:
+        task = line.strip()
+        if task and task not in ("/exit", "/quit"):
+            _run_turn(agent, task)
     return 0
 
 
-def _show_logo() -> None:
-    logo = Path(__file__).parent / "logo.png"
-    if not logo.exists():
-        return
-    try:
-        if os.environ.get("KITTY_WINDOW_ID") and shutil.which("kitty"):
-            subprocess.run(["kitty", "+kitten", "icat", "--align", "left", str(logo)], check=False)
-        elif os.environ.get("TERM_PROGRAM") == "iTerm.app":
-            _show_iterm2(logo)
-        elif shutil.which("img2sixel"):
-            subprocess.run(["img2sixel", str(logo)], check=False)
-        else:
-            _show_blocks(logo)
-    except Exception:
-        pass
-
-
-def _show_iterm2(logo: Path) -> None:
-    import base64
-
-    data = base64.b64encode(logo.read_bytes()).decode()
-    sys.stdout.write(f"\033]1337;File=inline=1;width=18;preserveAspectRatio=1:{data}\a\n")
-    sys.stdout.flush()
-
-
-def _show_blocks(logo: Path, cols: int = 36) -> None:
-    try:
-        from PIL import Image
-    except ImportError:
-        return
-    if os.name == "nt":
-        os.system("")
-    img = Image.open(logo).convert("RGBA")
-    w, h = img.size
-    rows = max(1, round(h / w * cols / 2))
-    img = img.resize((cols, rows * 2), Image.LANCZOS)
-    px = img.load()
-    lines = []
-    for r in range(rows):
-        cells = []
-        for c in range(cols):
-            tr, tg, tb, ta = px[c, r * 2]
-            br, bg, bb, ba = px[c, r * 2 + 1]
-            top, bot = ta >= 128, ba >= 128
-            if not top and not bot:
-                cells.append("\033[0m ")
-            elif top and bot:
-                cells.append(f"\033[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m▀")
-            elif top:
-                cells.append(f"\033[0;38;2;{tr};{tg};{tb}m▀")
-            else:
-                cells.append(f"\033[0;38;2;{br};{bg};{bb}m▄")
-        lines.append("".join(cells) + "\033[0m")
-    print("\n".join(lines))
-
-
 def _run_turn(agent: Feiyu, prompt: str) -> None:
+    guard = ui.EscInterrupt()
     try:
-        agent.send(prompt)
+        with guard:
+            agent.send(prompt)
     except KeyboardInterrupt:
-        print("\n\033[2m[已中断]\033[0m")
+        print(ui.warn("已中断"))
     except Exception as exc:
-        print(f"\n\033[31m错误：{exc}\033[0m", file=sys.stderr)
+        print(ui.error(f"错误：{exc}"))
 
 
 if __name__ == "__main__":

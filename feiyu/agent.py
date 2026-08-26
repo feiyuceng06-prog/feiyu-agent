@@ -1,10 +1,6 @@
-import json
-import sys
-import threading
-import time
-from collections import deque
 from pathlib import Path
 
+from . import ui
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 
@@ -28,6 +24,24 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 别停下来问 涉及范围变化或破坏性操作时，先问 """
 
 
+# 回答风格：接在 SYSTEM_PROMPT 后面的一段补充指令
+STYLES = {
+    "default": ("默认", ""),
+    "concise": (
+        "简洁",
+        "\n\n再压缩一些：能一句话说完就不要两句 除非用户问，否则不解释实现细节 ",
+    ),
+    "explanatory": (
+        "详细",
+        "\n\n每次改动后多说一两句为什么这么改、放弃了什么方案，让用户看懂取舍 ",
+    ),
+    "teaching": (
+        "教学",
+        "\n\n把用户当成正在学这块的人：动手前先讲清思路，改完解释涉及的概念和为什么这样写 "
+        "遇到值得一提的坑就顺带说明 ",
+    ),
+}
+
 class Feiyu:
     def __init__(
         self,
@@ -38,6 +52,7 @@ class Feiyu:
         base_url: str | None = None,
     ):
         self.toolbox = Toolbox(workspace)
+        self.style = "default"
         self.backend = build_backend(
             provider,
             system=SYSTEM_PROMPT,
@@ -46,110 +61,68 @@ class Feiyu:
             base_url=base_url,
         )
 
+    @property
+    def tokens(self) -> int:
+        """累计计费量 """
+        return getattr(self.backend, "tokens_total", 0)
+
+    @property
+    def context(self) -> int:
+        """最近一次请求的规模，即当前对话占了多少上下文 """
+        return getattr(self.backend, "tokens_context", 0)
+
+    @property
+    def cost(self) -> float | None:
+        """累计花费（人民币） 价格表里没有这个模型时返回 None """
+        if not getattr(self.backend, "priced", False):
+            return None
+        return getattr(self.backend, "cost", 0.0)
+
+    def reset(self) -> None:
+        self.backend.reset()
+
+    @property
+    def model(self) -> str:
+        return self.backend.model
+
+    def set_model(self, name: str) -> None:
+        """同一厂商内换模型，对话历史照旧 """
+        self.backend.model = name
+
+    def list_models(self) -> list[str]:
+        return self.backend.list_models()
+
+    def set_style(self, name: str) -> None:
+        self.style = name
+        self.backend.set_system(SYSTEM_PROMPT + STYLES[name][1])
+
     def send(self, user_message: str) -> str:
         self.backend.add_user_message(user_message)
         while True:
-            out = StreamOut()
-            out.start()
-            turn = self.backend.run_turn(on_text=out.write)
-            out.finish()
-            if turn.text:
-                print()
+            stream = ui.Stream()
+            stream.start()
+            try:
+                # 中断/报错时也必须停掉 spinner 线程，否则它会继续往屏幕上糊帧
+                turn = self.backend.run_turn(on_text=stream.write)
+            finally:
+                stream.finish()
 
             if not turn.tool_calls:
                 return turn.text
 
-            outputs = self._run_tools(turn.tool_calls)
-            self.backend.add_tool_results(outputs)
+            if stream.wrote_text:
+                print()
+            self.backend.add_tool_results(self._run_tools(turn.tool_calls))
 
     def _run_tools(self, calls) -> list[ToolOutput]:
         outputs = []
         for call in calls:
-            print(f"\033[2m→ {call.name}({_preview(call.input)})\033[0m", flush=True)
+            print(ui.tool_call(call.name, call.input), flush=True)
             result = self.toolbox.run(call.name, call.input)
+            summary = result.summary or result.content.splitlines()[0][:80]
+            print(ui.tool_result(summary, result.detail, is_error=result.is_error))
+            print()
             outputs.append(
                 ToolOutput(id=call.id, content=result.content, is_error=result.is_error)
             )
         return outputs
-
-
-class StreamOut:
-    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-    def __init__(self, *, spinner_delay: float = 0.2, tick: float = 0.01):
-        self._tty = sys.stdout.isatty()
-        self._buf: deque[str] = deque()
-        self._lock = threading.Lock()
-        self._first = False
-        self._done = False
-        self._spinner_delay = spinner_delay
-        self._tick = tick
-        self._start = time.monotonic()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self) -> None:
-        if self._tty:
-            self._thread.start()
-
-    def write(self, text: str) -> None:
-        if not text:
-            return
-        if not self._tty:
-            print(text, end="", flush=True)
-            return
-        with self._lock:
-            self._buf.extend(text)
-
-    def finish(self) -> None:
-        if not self._tty:
-            return
-        with self._lock:
-            self._done = True
-        self._thread.join()
-
-    def _run(self) -> None:
-        frame = 0
-        while not self._first:
-            with self._lock:
-                if self._buf:
-                    self._first = True
-                    break
-                done = self._done
-            if done:
-                return
-            if time.monotonic() - self._start >= self._spinner_delay:
-                sys.stdout.write(f"\r\033[2m{self.FRAMES[frame]} 思考中\033[0m")
-                sys.stdout.flush()
-                frame = (frame + 1) % len(self.FRAMES)
-            time.sleep(0.08)
-
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
-
-        while True:
-            with self._lock:
-                backlog = len(self._buf)
-                n = min(backlog, max(1, backlog // 8))
-                chunk = "".join(self._buf.popleft() for _ in range(n))
-                drained = not self._buf and self._done
-            if chunk:
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
-            if drained:
-                return
-            time.sleep(self._tick)
-
-        if spinning:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
-
-
-def _preview(args: dict) -> str:
-    parts = []
-    for key, value in args.items():
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        text = text.replace("\n", "\\n")
-        if len(text) > 60:
-            text = text[:57] + "..."
-        parts.append(f"{key}={text}")
-    return ", ".join(parts)

@@ -1,5 +1,8 @@
 import json
+import os
 from dataclasses import dataclass, field
+
+from . import pricing
 
 
 @dataclass
@@ -33,12 +36,12 @@ class ProviderSpec:
 PROVIDERS: dict[str, ProviderSpec] = {
     "anthropic": ProviderSpec(
         kind="anthropic",
-        default_model="claude-opus-4-8",
+        default_model="claude-opus-5",
         api_key_env="ANTHROPIC_API_KEY",
     ),
     "deepseek": ProviderSpec(
         kind="openai",
-        default_model="deepseek-chat",
+        default_model="deepseek-v4-flash",
         api_key_env="DEEPSEEK_API_KEY",
         base_url="https://api.deepseek.com",
     ),
@@ -49,6 +52,18 @@ PROVIDERS: dict[str, ProviderSpec] = {
         base_url="https://api.moonshot.ai/v1",
     ),
 }
+
+
+def detect_provider() -> str | None:
+    """按 PROVIDERS 的顺序，挑第一个 API key 已设置的厂商 """
+    for name, spec in PROVIDERS.items():
+        if os.environ.get(spec.api_key_env):
+            return name
+    return None
+
+
+def missing_keys_hint() -> str:
+    return "、".join(spec.api_key_env for spec in PROVIDERS.values())
 
 
 def build_backend(
@@ -73,7 +88,30 @@ def build_backend(
     )
 
 
-class AnthropicBackend:
+class Billing:
+    """两个后端共用的用量与花费统计
+
+    tokens_context 是最近一次请求的规模，tokens_total 是累计计费量
+    价格表里没有这个模型时 priced 置 False，界面上退回显示 token 数
+    """
+
+    def _reset_usage(self) -> None:
+        self.tokens_total = 0
+        self.tokens_context = 0
+        self.cost = 0.0
+        self.priced = True
+
+    def _charge(self, hit: int, miss: int, out: int) -> None:
+        self.tokens_context = hit + miss + out
+        self.tokens_total += self.tokens_context
+        spent = pricing.cost(self.model, hit, miss, out)
+        if spent is None:
+            self.priced = False
+        else:
+            self.cost += spent
+
+
+class AnthropicBackend(Billing):
     MAX_TOKENS = 64_000
     EFFORT = "xhigh"
 
@@ -85,6 +123,22 @@ class AnthropicBackend:
         self.tools = tools
         self.model = model
         self.messages: list[dict] = []
+        # total 是累计计费量（每轮都要重发全部历史，所以会一直涨）；
+        # context 是最近一次请求的规模，也就是"这段对话现在多大"
+        self._reset_usage()
+
+    def reset(self) -> None:
+        self.messages = []
+        self._reset_usage()
+
+    def set_system(self, text: str) -> None:
+        self.system = text
+
+    def list_models(self) -> list[str]:
+        try:
+            return sorted(m.id for m in self.client.models.list(limit=100).data)
+        except Exception:
+            return []
 
     def add_user_message(self, text: str) -> None:
         self.messages.append({"role": "user", "content": text})
@@ -117,6 +171,11 @@ class AnthropicBackend:
             response = stream.get_final_message()
 
         self.messages.append({"role": "assistant", "content": response.content})
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            hit = getattr(usage, "cache_read_input_tokens", 0) or 0
+            miss = (usage.input_tokens or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+            self._charge(hit, miss, usage.output_tokens or 0)
 
         text = "".join(b.text for b in response.content if b.type == "text")
         calls = [
@@ -129,7 +188,7 @@ class AnthropicBackend:
         return TurnResult(text=text, tool_calls=calls)
 
 
-class OpenAICompatBackend:
+class OpenAICompatBackend(Billing):
     MAX_TOKENS = 8_192
 
     def __init__(self, *, system: str, tools: list[dict], model: str, base_url: str | None, api_key_env: str):
@@ -141,15 +200,33 @@ class OpenAICompatBackend:
                 "请先安装：pip install openai"
             ) from exc
 
-        import os
-
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise RuntimeError(f"{api_key_env} 未设置")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.system = system
         self.tools = _to_openai_tools(tools)
         self.messages: list[dict] = [{"role": "system", "content": system}]
+        self._reset_usage()
+
+    def reset(self) -> None:
+        self.messages = [{"role": "system", "content": self.system}]
+        self._reset_usage()
+
+    def set_system(self, text: str) -> None:
+        self.system = text
+        # 历史里的第一条就是 system，就地换掉，对话不受影响
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0] = {"role": "system", "content": text}
+        else:
+            self.messages.insert(0, {"role": "system", "content": text})
+
+    def list_models(self) -> list[str]:
+        try:
+            return sorted(m.id for m in self.client.models.list().data)
+        except Exception:
+            return []
 
     def add_user_message(self, text: str) -> None:
         self.messages.append({"role": "user", "content": text})
@@ -168,11 +245,23 @@ class OpenAICompatBackend:
             tools=self.tools,
             messages=self.messages,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         text = ""
         pending: dict[int, dict] = {}
         for chunk in stream:
+            # 带 usage 的那个收尾 chunk 没有 choices
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                hit = getattr(usage, "prompt_cache_hit_tokens", None)
+                if hit is None:
+                    # 有些兼容接口把命中数放在 prompt_tokens_details.cached_tokens
+                    details = getattr(usage, "prompt_tokens_details", None)
+                    hit = getattr(details, "cached_tokens", 0) if details else 0
+                hit = hit or 0
+                prompt = usage.prompt_tokens or 0
+                self._charge(hit, max(0, prompt - hit), usage.completion_tokens or 0)
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
