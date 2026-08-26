@@ -83,13 +83,17 @@ def main() -> int:
         tag = ui.mode_tag(agent.mode, MODES[agent.mode][0])
         if not agent.ready:
             return "%s  ·  %s" % (tag, "未设置模型")
-        if not agent.tokens:
-            return "%s  ·  %s" % (tag, agent.model)
+        parts = [tag, agent.model]
+        # 上下文显示占满多少，不显示绝对值：每次请求都有一千多 token 的固定底噪，
+        # 绝对数字既吓人又没法据此做任何决定，占比才说明还剩多少余地
+        if agent.context:
+            share = agent.context / max(1, agent.context_limit)
+            parts.append("上下文 %d%%" % max(1, round(share * 100)))
+        # 没配价格就什么都不显示 拿 token 数冒充计费只会和左边那个数重复
         spent = agent.cost
-        # 价格表里没这个模型就别瞎报钱，退回显示 token 数
-        money = pricing.yuan(spent) if spent is not None else "计费 " + ui.tokens(agent.tokens)
-        return "%s  ·  %s  ·  上下文 %s  ·  %s" % (
-            ui.mode_tag(agent.mode, MODES[agent.mode][0]), agent.model, ui.tokens(agent.context), money)
+        if spent:
+            parts.append(pricing.yuan(spent))
+        return "  ·  ".join(parts)
 
     inbox = ui.InputBox(status, on_cycle_mode=agent.cycle_mode)
     while True:

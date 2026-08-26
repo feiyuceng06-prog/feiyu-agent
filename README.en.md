@@ -101,7 +101,9 @@ Slash commands (typing `/` pops up completions):
 | `/clear` | Wipe the conversation and its saved session |
 | `/exit` | Quit |
 
-The two numbers on the top border: **context** is the size of the most recent request, **cost** is what this session has run up so far. They're separate on purpose — the agent resends the whole history every round, so cumulative token counts run several times larger than the conversation itself, and a single number is easy to misread.
+The top border shows **how full the context is** and **what the session has cost so far**.
+
+Context is a percentage, not a token count. Every request carries roughly 1.5k tokens of fixed overhead (tool definitions plus the system prompt), so even a bare "hi" shows a four-figure number — alarming to look at and useless to act on. The percentage tells you what's left. Models with no price configured show no money at all, rather than a token count standing in for one.
 
 Cost comes from the three price fields you fill in during `/key add`; leave them blank and it shows a token count instead. See "Models" below.
 
