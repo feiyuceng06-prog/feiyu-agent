@@ -81,6 +81,7 @@ Type `/` for completion:
 | `/mode` | Permission mode: `default` / `auto` / `plan` / `readonly` |
 | `/allow` | Show or add permission rules |
 | `/sandbox` | bash sandbox: `off` / `workspace` / `strict` |
+| `/jobs` | Look at / stop background commands |
 | `/hooks` | Show which external commands run, and when |
 | `/verify` | Show or set the command run automatically after edits |
 | `/review` | Have a model that never saw the process score the changes |
@@ -94,18 +95,21 @@ Type `/` for completion:
 
 ## What it can do
 
-Eleven tools, each call printed as it happens:
+Twelve tools, each call printed as it happens:
 
 | Tool | Notes |
 |---|---|
-| `bash` | Run a shell command. `cd` persists between calls |
+| `bash` | Run a shell command. `cd` persists between calls; long ones can go to the background |
 | `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root |
 | `list_files` `search` | Glob the tree, grep it with a regex |
 | `web_fetch` | Fetch a page, HTML converted to Markdown |
 | `task` | Send a subagent to find something out and bring back only the conclusion |
 | `todo` | Keep the task list |
 | `remember` | Note something worth keeping across sessions |
+| `job` | Read a background command's new output, or stop it |
 | `exit_plan` | In plan mode, hand you the plan for approval |
+
+**Dev servers, watchers and long builds go to the background** (`background` on `bash`). You get a number back immediately and read new output with `job` — what you already read is not handed over again, so polling does not flood the context. It is told when a command finishes. `/jobs` lets you look and stop them yourself, and quitting feiyu kills them along with whatever they spawned.
 
 **You see what it is writing while the arguments are still streaming**: `⠋ Write feiyu/tools.py · 42 lines so far`. A large file takes ten-odd seconds to generate, and a bare spinner does not tell you whether it is writing or stuck.
 

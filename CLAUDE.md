@@ -10,7 +10,7 @@ verify: python -m unittest discover -s tests -t .
 |---|---|
 | `feiyu/__main__.py` | CLI 参数、主循环、斜杠命令 |
 | `feiyu/agent.py` | `SYSTEM_PROMPT`、`STYLES`、turn 循环、工具分发 |
-| `feiyu/tools.py` | 十一个工具的 schema 与实现，含办公文档抽取 |
+| `feiyu/tools.py` | 十二个工具的 schema 与实现，含办公文档抽取 |
 | `feiyu/providers.py` | anthropic / openai 兼容两种后端，用量与计价 |
 | `feiyu/keys.py` | 模型清单（接口地址/密钥/价格）的存取 |
 | `feiyu/permissions.py` | 命令级权限规则 |
@@ -25,6 +25,7 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
 | `feiyu/files.py` | 记住看过的文件版本，写之前对一次，别盖掉没看见的改动 |
+| `feiyu/jobs.py` | 挂在后台跑的 bash 命令：收输出、报结束、杀进程组 |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -475,9 +476,34 @@ anthropic 那边认 `content_block_start`（拿工具名）+ `input_json_delta`�
 openai 兼容那边本来就在攒 `slot["args"]`，攒完顺手回调。
 **`on_tool` 一律是可选参数**：`subagent` 跑在工作线程里，不能往屏幕上画，就不传。
 
+## 后台跑 bash（0.23.0）
+
+`feiyu/jobs.py`。`bash` 多一个 `background`，新增 `job` 工具（`output` / `kill` / `list`）
+和 `/jobs`。治的是 dev server、watch、长构建把一整轮 turn 卡到超时。
+
+- **必须边跑边收输出**：`Job._drain` 是个 daemon 线程。不收的话管道写满 64KB
+  就把子进程堵死，从外面看跟卡住一模一样。
+- **`take()` 只给没读过的**：模型会反复轮询，每次都灌整份日志的话上下文几轮就满了。
+  超过 `MAX_CHARS`（20 万字）从最早的丢，并且**要告诉模型丢过**——
+  不说的话它会拿一份缺了中间的日志当完整的读。
+- **杀的是进程组**，所以 `Popen(start_new_session=True)` + `os.killpg`：
+  只杀 pid 的话 `npm run dev` 底下那个 node 活得好好的。先 TERM 后 KILL。
+- **后台命令不记 pwd**：它跟后面的命令是并行的，`cd` 跟着它走只会串味。
+  前台那条记 pwd 的机制原样保留。
+- **结束了要主动说一声**（`Jobs.finished_since()` + `Feiyu._note_jobs`）：
+  搭在最后一条 tool_result 上，跟 `verify` 的失败一个套路——两种后端里
+  tool_result 是唯一能安全追加内容的地方。**`reported` 标志必须有**，
+  只说一次，每轮都提醒会把它带跑偏（跟 todo 的 `nudged` 同一个理由）。
+- **退出时 `kill_all`**（`_finish` 里）：留着的话用户关掉 feiyu 之后那些进程还在跑，
+  而他已经没有任何句柄能找到它们了。沙箱里的那些靠 `--die-with-parent` 也会死，
+  但没装 bwrap 的机器上只有这一道。
+- **出厂放行 `Job(*)`**：起那条 bash 时已经确认过了，之后每轮询一次再点一次没人受得了。
+  它只作用在 agent 自己挂起来的进程上。
+
 ## 已知问题（未修，用户知情）
 
 - ~~**写文件会盖掉用户在编辑器里的改动**~~ **0.21.0 已修**：`files.Watcher` + `_check_fresh`。
+- ~~**`bash` 不能后台跑**~~ **0.23.0 已修**：`jobs.py` + `job` 工具。
 - ~~**`bash` 工具没有沙箱**~~ **0.19.0 已修**：`sandbox.py` 用 bubblewrap 把写权限
   关进工作区。**但只有写是真隔离**，读仍然只靠挖空几个目录；没装 bwrap 的机器上
   自动降级成不沙箱（欢迎框会写明）。`cd` 越界弹回照旧只影响下一条命令的起点。

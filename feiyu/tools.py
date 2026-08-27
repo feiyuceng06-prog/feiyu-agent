@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import files, memory, sandbox, todo
+from . import files, jobs as jobs_mod, memory, sandbox, todo
 
 
 TOOL_SCHEMAS = [
@@ -41,8 +41,36 @@ TOOL_SCHEMAS = [
                     "type": "integer",
                     "description": "超时秒数（默认 120） ",
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "挂到后台跑，立刻返回一个编号，不等它结束 "
+                        "用于 dev server、watch、要跑很久的构建 "
+                        "之后用 job 工具看输出或者停掉它 "
+                    ),
+                },
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "job",
+        "description": (
+            "查看或结束 bash 挂到后台的命令 "
+            "output 只给你上次看过之后新打出来的东西，同一段不会重复给你 "
+            "命令已经结束的话会一并告诉你退出码 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["output", "kill", "list"],
+                    "description": "output 看新输出 kill 停掉 list 列出全部 ",
+                },
+                "id": {"type": "integer", "description": "后台命令的编号（list 不用填） "},
+            },
+            "required": ["action"],
         },
     },
     {
@@ -617,6 +645,7 @@ class Toolbox:
         self.todos = todo.Todos()
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
         self.files = files.Watcher()   # 写之前对一下版本，别盖掉模型没看见的改动
+        self.jobs = jobs_mod.Jobs()    # bash 挂到后台的命令
 
     def _resolve(self, path: str) -> Path:
         target = (self.root / path).resolve()
@@ -636,6 +665,8 @@ class Toolbox:
 
     def _tool_bash(self, args: dict) -> ToolResult:
         command = args["command"]
+        if args.get("background"):
+            return self._start_job(command)
         timeout = int(args.get("timeout", 120))
         # 命令末尾把 PWD 写进临时文件，这样 cd 能跨调用保持；
         # 走文件而不是 stdout，免得污染给模型看的输出
@@ -688,6 +719,63 @@ class Toolbox:
             is_error=proc.returncode != 0,
             summary=summary,
             detail=detail,
+        )
+
+    def _start_job(self, command: str) -> ToolResult:
+        """挂后台 不记 pwd：它跟后面的命令是并行的，cd 跟着它走只会串味 """
+        boxed = sandbox.wrap(command, workspace=self.root, cwd=self.cwd)
+        proc = subprocess.Popen(
+            boxed if boxed else command,
+            shell=boxed is None,
+            cwd=None if boxed else self.cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            env=_child_env(),
+            start_new_session=True,   # 自成进程组，之后能连它拉起来的子进程一起杀
+        )
+        job = self.jobs.start(command, proc)
+        return ToolResult(
+            "已挂到后台，编号 %d 用 job 工具看它的输出（action=output, id=%d），"
+            "或者停掉它（action=kill） " % (job.id, job.id),
+            summary="后台启动 #%d" % job.id,
+        )
+
+    def _tool_job(self, args: dict) -> ToolResult:
+        action = args.get("action", "list")
+        if action == "list":
+            items = self.jobs.all()
+            if not items:
+                return ToolResult("没有后台命令 ", summary="没有后台命令")
+            rows = ["#%d  %s  %s" % (j.id, j.status(), j.command) for j in items]
+            return ToolResult("\n".join(rows), summary="%d 个后台命令" % len(items),
+                              detail=_peek(rows, 4))
+
+        job = self.jobs.get(args.get("id"))
+        if job is None:
+            return ToolResult("没有编号为 %s 的后台命令 用 action=list 看有哪些 "
+                              % args.get("id"), is_error=True)
+        if action == "kill":
+            was = job.running
+            job.kill()
+            return ToolResult(
+                "#%d 已停掉 " % job.id if was else "#%d 本来就已经结束了，退出码 %s " % (
+                    job.id, job.code),
+                summary="停掉 #%d" % job.id if was else "#%d 已结束" % job.id,
+            )
+
+        fresh, dropped = job.take()
+        head = "#%d %s " % (job.id, job.status())
+        if dropped:
+            head += "（输出太多，中间丢掉了一段，下面是较新的部分）"
+        body = fresh if fresh.strip() else "（这段时间没有新输出）"
+        lines = [line for line in fresh.splitlines() if line.strip()]
+        return ToolResult(
+            head + "\n" + _truncate(body),
+            summary="#%d %s，新输出 %d 行" % (job.id, job.status(), len(lines)),
+            detail=_peek(lines[-4:], 4),
         )
 
     def _timed_out(self, exc, timeout: int) -> ToolResult:

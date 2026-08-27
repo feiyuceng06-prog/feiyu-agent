@@ -81,6 +81,7 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑一个任务就退出
 | `/mode` | 权限模式：`default` / `auto` / `plan` / `readonly` |
 | `/allow` | 查看或添加权限规则 |
 | `/sandbox` | bash 沙箱：`off` / `workspace` / `strict` |
+| `/jobs` | 看 / 停掉挂在后台跑的命令 |
 | `/hooks` | 看在哪些时机会跑哪些外部命令 |
 | `/verify` | 查看或设置改完自动跑的校验命令 |
 | `/review` | 让一个没看过过程的模型给这次改动打分 |
@@ -94,18 +95,21 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑一个任务就退出
 
 ## 它能做什么
 
-十一个工具，每次调用都打在屏幕上：
+十二个工具，每次调用都打在屏幕上：
 
 | 工具 | 说明 |
 |---|---|
-| `bash` | 执行 shell 命令。`cd` 在多次调用之间保持 |
+| `bash` | 执行 shell 命令。`cd` 在多次调用之间保持，长任务可以挂后台 |
 | `read_file` `write_file` `edit_file` | 读 / 写 / 精确替换。路径始终相对工作区根目录 |
 | `list_files` `search` | 按通配符列目录、按正则搜内容 |
 | `web_fetch` | 抓网页，HTML 转 Markdown |
 | `task` | 派子 agent 去查一件事，只带结论回来 |
 | `todo` | 维护任务清单 |
 | `remember` | 记一条跨会话的长期记忆 |
+| `job` | 看后台命令的新输出、或者停掉它 |
 | `exit_plan` | 计划模式下把方案交给你过目 |
+
+**dev server、watch、跑很久的构建挂后台**（`bash` 的 `background`），立刻拿到一个编号，之后用 `job` 取新输出——取过的不重复给，轮询几次也不会把上下文灌满。命令结束时它会主动收到通知。`/jobs` 可以自己看和停，退出 feiyu 时会连它拉起来的子进程一起杀掉。
 
 **参数还在生成时就能看到它在写什么**：`⠋ Write feiyu/tools.py · 已生成 42 行`。写一个大文件要十几秒，光转个圈看不出它是在写文件还是卡住了。
 

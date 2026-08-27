@@ -21,7 +21,7 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 - 改动之前先用工具了解项目 编辑前先读文件、搜索，不要凭空猜测内容 （改已有文件时 write_file / edit_file 会强制要求你先读过它） 
 - 改动要聚焦 优先用 edit_file，而不是重写整个文件 不要添加任务没要求的功能、\
 抽象或错误处理 
-- 改完代码要验证：用 bash 跑测试或相关命令 
+- 改完代码要验证：用 bash 跑测试或相关命令 要跑很久或者根本不会自己停的命令（dev server、watch、长构建）用 background 挂后台，再用 job 看输出，别让它把一轮卡死 
 - 用户一口气提了好几件事、或者要动三个以上地方时，先用 todo 把清单列出来，
 每做完一步回去改状态 光靠记很容易做到一半就忘了还剩什么 
 - 写的代码要贴合周围的风格、命名和约定 
@@ -470,6 +470,7 @@ class Feiyu:
                 self._fill_missing(turn.tool_calls, outputs)
                 if changed:
                     self._after_tools(changed, outputs)
+                self._note_jobs(outputs)
                 self.backend.add_tool_results(outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
@@ -828,6 +829,23 @@ class Feiyu:
         if not extra:
             return False, ""
         return False, "\n\n（钩子附带的背景信息，不是用户说的话）\n" + "\n".join(extra)
+
+    def _note_jobs(self, outputs: list[ToolOutput]) -> None:
+        """后台命令结束了主动说一声 不说的话它要么彻底忘了这回事，
+        要么每一轮都去 poll 一次 跟校验一样搭在最后一条工具结果上 """
+        if not outputs:
+            return
+        done = self.toolbox.jobs.finished_since()
+        if not done:
+            return
+        notes = "、".join("#%d（`%s`）退出码 %s" % (j.id, j.command, j.code) for j in done)
+        last = outputs[-1]
+        outputs[-1] = ToolOutput(
+            id=last.id,
+            content=last.content + "\n\n---\n\n后台命令已经结束：" + notes
+            + " 用 job（action=output）看它打了什么 ",
+            is_error=last.is_error,
+        )
 
     def _after_tools(self, changed: bool, outputs: list[ToolOutput]) -> None:
         """PostToolUse：没过就把输出并进最后一条工具结果

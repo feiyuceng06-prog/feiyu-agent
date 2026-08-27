@@ -203,6 +203,7 @@ _LABEL = {
     "task": "Task",
     "todo": "Todo",
     "exit_plan": "Plan",
+    "job": "Job",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -216,6 +217,7 @@ _HEADLINE_ARG = {
     "remember": "fact",
     "exit_plan": "plan",
     "task": "prompt",
+    "job": "action",
 }
 
 
@@ -637,6 +639,7 @@ SLASH = {
     "/memory": "查看 / 添加 / 删除这个目录的长期记忆",
     "/hooks": "看在哪些时机会跑哪些外部命令",
     "/sandbox": "bash 沙箱：off / workspace / strict",
+    "/jobs": "看 / 停掉挂在后台跑的命令",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
     "/clear": "清空对话历史和存盘，重新开始",

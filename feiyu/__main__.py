@@ -198,6 +198,8 @@ def main() -> int:
                 print(_hooks(agent))
             elif cmd == "/sandbox":
                 print(_sandbox(arg))
+            elif cmd == "/jobs":
+                print(_jobs(agent, arg))
             else:
                 print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
             print()
@@ -398,6 +400,12 @@ def _help() -> str:
 
 
 def _finish(agent: Feiyu, tracer, code: int) -> int:
+    # 后台命令跟着 feiyu 一起收摊 留着的话用户关掉窗口之后那些进程还在跑，
+    # 而他已经没有任何句柄能找到它们了
+    left = agent.toolbox.jobs.running()
+    if left:
+        agent.toolbox.jobs.kill_all()
+        print(ui.notice("停掉了 %d 个还在跑的后台命令" % len(left)))
     tracer.write("run_end", code=code, tokens=agent.tokens, cost=agent.cost,
                  touched=agent.touched or None, verified=agent.verified_ok)
     return code
@@ -486,6 +494,34 @@ def _sandbox(arg: str) -> str:
                 + ui.paint("grey", "，整个文件系统仍然可读，别当成读也隔离了"))
     rows.append(ui.notice("钩子和 verify: 的命令不进沙箱——那是你自己写的，不是模型产出的 "))
     rows.append(ui.notice("/sandbox <档位> 切换 · FEIYU_SANDBOX 环境变量可以临时压过配置"))
+    return "\n".join(rows)
+
+
+def _jobs(agent: Feiyu, arg: str) -> str:
+    """后台命令跑在你自己机器上，得有个不经过模型也能看和停的地方 """
+    pool = agent.toolbox.jobs
+    if arg in ("kill", "stop"):
+        stopped = len(pool.running())
+        pool.kill_all()
+        return ui.notice("停掉了 %d 个" % stopped) if stopped else ui.notice("没有在跑的")
+    if arg:
+        job = pool.get(arg)
+        if job is None:
+            return ui.error("没有编号为 %s 的后台命令" % arg)
+        job.kill()
+        return ui.notice("已停掉 #%s" % arg)
+
+    items = pool.all()
+    if not items:
+        return ui.notice("没有后台命令 让它跑长任务时会用到（bash 的 background）")
+    rows = []
+    for job in items:
+        tick = ui.paint("brown", " ●") if job.running else ui.paint("grey", " ○")
+        rows.append("   " + tick + " " + ui.bold("#%d" % job.id) + "  "
+                    + ui.paint("grey", ui.clip(job.status() + "  " + job.command,
+                                               ui.width() - 12)))
+    rows.append("")
+    rows.append(ui.notice("/jobs <编号> 停掉一个 · /jobs kill 全停 · 退出时会自动全停"))
     return "\n".join(rows)
 
 
