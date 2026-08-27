@@ -194,6 +194,7 @@ _LABEL = {
     "list_files": "List",
     "search": "Search",
     "web_fetch": "Fetch",
+    "remember": "Remember",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -203,6 +204,8 @@ _HEADLINE_ARG = {
     "list_files": "pattern",
     "search": "regex",
     "web_fetch": "url",
+    # 确认时人只看得到这一行，不把 fact 显出来就等于让人盲签
+    "remember": "fact",
 }
 
 
@@ -515,6 +518,7 @@ SLASH = {
     "/verify": "查看或设置改完自动跑的校验命令",
     "/review": "让一个没看过过程的模型给这次改动打分",
     "/cost": "按任务看最近的 token 和花费",
+    "/memory": "查看 / 添加 / 删除这个目录的长期记忆",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
     "/clear": "清空对话历史和存盘，重新开始",

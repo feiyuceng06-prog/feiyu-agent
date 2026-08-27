@@ -99,6 +99,7 @@ Slash commands (typing `/` pops up completions):
 | `/verify` | Show or set the command run automatically after edits |
 | `/review` | Have a model that never saw the process score the changes |
 | `/cost` | Recent token use and cost, by task |
+| `/memory` | Show / add / drop what it remembers about this directory |
 | `/context` | Show and reload the project conventions file |
 | `/compact` | Squash the history into one summary to save context |
 | `/clear` | Wipe the conversation and its saved session |
@@ -220,6 +221,39 @@ A single task runs at most **25 rounds** of tool calls. At the cap it stops and 
 Interrupting with `esc` is safe: whatever it had already said stays in the history, and any tool call that didn't finish gets an "interrupted by the user" result of its own. The conversation is never left in a state the API rejects — just say your next thing.
 
 For shell commands, `cd` persists across calls: once it cds into a subdirectory, later commands run from there, so it doesn't have to keep writing `cd x && …`. File paths for read/write/edit stay relative to the workspace root regardless.
+
+## Long-term memory
+
+Saved sessions (`--resume`) bring back **the whole transcript**; long-term memory keeps
+**the conclusions that outlived it**, and applies with or without `--resume`.
+
+While working it calls `remember` on things worth keeping — how the build runs, a trap and
+why it exists, a preference you stated, an external dependency you can't infer from the
+code. Next time you start in **the same directory** those go into the system prompt
+automatically, with nothing for you to repeat.
+
+```
+⏺ Remember(tests here must run under pytest -q; conftest defines fixtures)
+  ⎿  remembered
+```
+
+`/memory` lists them, `/memory add <one line>` adds one by hand, `/memory forget <n>` drops
+one, `/memory clear` wipes them.
+
+**This is deliberately separate from `FEIYU.md`.** That file is your hand-written rules and
+the agent has no business editing it; memory is the agent's own notebook, kept in
+`~/.local/state/feiyu/memory/<directory hash>.md` (mode 600) — never inside your repository,
+so it can't be committed by accident. The prompt also states plainly that these notes live
+in no project file, so it won't describe its own notes as "your project conventions".
+
+Capped at 40 entries / 3000 characters; the oldest go first. It travels with every request,
+so it cannot grow without limit.
+
+**Why remembering asks for confirmation**: what `remember` stores can come indirectly from
+a web page (something fetched persuades it to note a line), and what it stores enters
+**every** later system prompt — a persistent injection channel across sessions. So it is
+confirmed in `default` mode like a file write, refused outright in `readonly`, and every
+entry is logged. The confirmation line shows the exact text, so you are never signing blind.
 
 ## Automatic verification
 

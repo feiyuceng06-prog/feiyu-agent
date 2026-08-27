@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from . import ui
-from . import keys, permissions, schema as schema_mod
+from . import keys, memory, permissions, schema as schema_mod
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 from .trace import Trace
@@ -86,9 +86,12 @@ MODES = {
 }
 MODE_ORDER = ("default", "auto", "readonly")
 # confirm 模式下要问一声的：改本地状态的，加上会把内容发到外网的
-GUARDED = {"bash", "write_file", "edit_file", "web_fetch"}
+# remember 也在里面：它写的东西会进以后每一次的系统提示，而内容可能间接来自网页，
+# 不问一声的话就是一条能跨会话的注入通道 好在它很少调，问一次不烦
+GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "remember"}
 # readonly 模式下直接拒绝的 web_fetch 不改任何东西，所以只读模式放行
-WRITES = {"bash", "write_file", "edit_file"}
+# remember 要拒：它不动工作区，但确实往磁盘上留了东西，只读就该是真的什么都不留
+WRITES = {"bash", "write_file", "edit_file", "remember"}
 # 跑完这两个才触发自动校验 bash 也能改文件（sed -i），但把它算进来的话
 # 每次 ls / git status 之后都要跑一遍测试，代价远大于收益
 VERIFY_AFTER = {"write_file", "edit_file"}
@@ -136,7 +139,8 @@ REVIEW_MAX_CHARS = 40_000
 
 class Feiyu:
     def __init__(self, workspace: Path, *, model: str = "", trace: Trace | None = None):
-        self.toolbox = Toolbox(workspace, ask_model=self._ask_model)
+        self.toolbox = Toolbox(workspace, ask_model=self._ask_model,
+                               on_remember=self._refresh_system)
         self.context_file, self.context_text = load_project_context(workspace)
         self.trace = trace or Trace(workspace, enabled=False)
         self.verify = find_verify(self.context_text)
@@ -174,6 +178,8 @@ class Feiyu:
             # 项目约定放最后，比通用指令更具体，冲突时以它为准
             text += "\n\n这个项目在 %s 里写了自己的约定，优先照它来：\n\n%s" % (
                 self.context_file, self.context_text)
+        # 自己记的笔记排在人写的约定后面：约定是规矩，笔记只是背景
+        text += memory.as_prompt(memory.load(self.toolbox.root))
         self.backend.set_system(text)
 
     def reload_context(self) -> None:
@@ -511,6 +517,9 @@ class Feiyu:
             self.trace.write("tool", name=call.name, args=call.input,
                              ok=not result.is_error, summary=summary,
                              ms=round((time.monotonic() - began) * 1000))
+            if call.name == "remember" and not result.is_error:
+                # 它写的东西会进以后每一次系统提示，日志里必须留底
+                self.trace.write("remember", fact=call.input.get("fact"))
             if not result.is_error and call.name in VERIFY_AFTER:
                 changed = True
                 self._remember_touched(call)

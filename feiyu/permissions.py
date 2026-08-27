@@ -28,6 +28,7 @@ RULE_NAME = {
     "list_files": "List",
     "search": "Search",
     "web_fetch": "Fetch",
+    "remember": "Remember",
 }
 
 # 出厂放行的：只暴露路径和版本库状态，读不到任意文件内容

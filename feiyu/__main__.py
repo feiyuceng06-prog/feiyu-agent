@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import keys, permissions, pricing, schema as schema_mod, session, trace, ui
+from . import keys, memory, permissions, pricing, schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import CONTEXT_FILES, MODES, STYLES, Feiyu, find_score
 
@@ -179,6 +179,8 @@ def main() -> int:
                 print(_review(agent, arg))
             elif cmd == "/cost":
                 print(_cost(agent, workspace))
+            elif cmd == "/memory":
+                print(_memory(agent, arg))
             else:
                 print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
             print()
@@ -431,6 +433,48 @@ def _verify(agent: Feiyu, arg: str) -> str:
             % (agent.context_file or "、".join(CONTEXT_FILES)))
     state = {True: "上次通过", False: "上次没过", None: "还没跑过"}[agent.verified_ok]
     return ui.notice("当前校验命令：%s（%s） /verify off 关掉" % (agent.verify, state))
+
+
+def _memory(agent: Feiyu, arg: str) -> str:
+    root = agent.toolbox.root
+    action, _, rest = arg.partition(" ")
+    rest = rest.strip()
+
+    if action in ("clear", "清空"):
+        count = memory.clear(root)
+        agent._refresh_system()
+        return ui.notice("已经全忘了（%d 条）" % count)
+    if action in ("forget", "忘"):
+        if not rest.isdigit():
+            return ui.error("用法：/memory forget <序号>，序号看 /memory")
+        what = memory.forget(root, int(rest))
+        if not what:
+            return ui.error("没有第 %s 条" % rest)
+        agent._refresh_system()
+        return ui.notice("忘掉了：" + ui.clip(what, 60))
+    if action in ("add", "记"):
+        if not rest:
+            return ui.error("用法：/memory add <要记住的一句话>")
+        ok, note = memory.add(root, rest)
+        agent._refresh_system()
+        return (ui.notice if ok else ui.warn)(note)
+    if action:
+        return ui.error("未知用法 /memory %s，可用：/memory、add、forget <序号>、clear" % action)
+
+    items = memory.load(root)
+    if not items:
+        return ui.notice(
+            "这个目录还没有记住任何东西 它干活时觉得值得留到下次的事会自己记，"
+            "也可以 /memory add <一句话> 手动加 ")
+    rows = [ui.notice("这个目录记住的事（每次开工自动带上）")]
+    for i, (when, what) in enumerate(items, 1):
+        rows.append("   " + ui.paint("grey", "%2d. " % i) + ui.clip(what, ui.width() - 12))
+        rows.append("       " + ui.paint("grey", when))
+    used = sum(len(what) for _, what in items)
+    rows += ["", ui.notice("%d / %d 条 · %d / %d 字 · 存在 %s" % (
+        len(items), memory.MAX_ITEMS, used, memory.MAX_CHARS, memory.DIR))]
+    rows.append(ui.notice("/memory forget <序号> 删一条 · /memory clear 全清"))
+    return "\n".join(rows)
 
 
 def _cost(agent: Feiyu, workspace) -> str:

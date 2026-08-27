@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
+from . import memory
+
 
 TOOL_SCHEMAS = [
     {
@@ -127,6 +129,25 @@ TOOL_SCHEMAS = [
                 "max_chars": {"type": "integer", "description": "不填 prompt 时最多返回多少字符（默认 15000） "},
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "remember",
+        "description": (
+            "把一件值得留到下次的事实记下来 下次在这个目录里开工时会自动带上，"
+            "不用用户再说一遍 "
+            "适合记：这个项目的构建/测试怎么跑、某个坑和它的原因、用户明确表达过的偏好、"
+            "外部依赖的版本或地址这类不看代码就不知道的事 "
+            "不要记：代码里读一遍就知道的结构、这次任务的过程和进展、"
+            "很快就会过时的临时状态 "
+            "记的是结论，一句话说完，别把整段输出塞进来 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "string", "description": "要记住的那一句话 "},
+            },
+            "required": ["fact"],
         },
     },
     {
@@ -494,9 +515,10 @@ def _diff(old_text: str, new_text: str, keep: int = 6) -> list[tuple[str, str]]:
 
 
 class Toolbox:
-    def __init__(self, root: Path, ask_model=None):
+    def __init__(self, root: Path, ask_model=None, on_remember=None):
         self.root = root.resolve()
         self.ask_model = ask_model      # (提示词) -> 回答，用于 web_fetch 的 prompt 模式
+        self.on_remember = on_remember  # 记了新东西就回调，让系统提示当场重拼
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
 
     def _resolve(self, path: str) -> Path:
@@ -707,6 +729,13 @@ class Toolbox:
             head + shown + tail,
             summary="%s 抓到 %d 字%s" % (ctype or "未知类型", len(shown), "（已截断）" if clipped else ""),
         )
+
+    def _tool_remember(self, args: dict) -> ToolResult:
+        ok, note = memory.add(self.root, args.get("fact") or "")
+        if ok and self.on_remember:
+            self.on_remember()
+        return ToolResult(note, is_error=not ok,
+                          summary="记住了" if ok else "没记：" + note[:40])
 
     def _tool_search(self, args: dict) -> ToolResult:
         rx = re.compile(args["regex"])
