@@ -1,3 +1,4 @@
+import concurrent.futures
 import difflib
 import re
 import subprocess
@@ -106,6 +107,14 @@ WRITES = {"bash", "write_file", "edit_file", "remember"}
 # 跑完这两个才触发自动校验 bash 也能改文件（sed -i），但把它算进来的话
 # 每次 ls / git status 之后都要跑一遍测试，代价远大于收益
 VERIFY_AFTER = {"write_file", "edit_file"}
+
+# 能同时跑的：只读、互不影响、也不动 Toolbox 上的共享状态
+# bash 不在里面——它共享 self.cwd，两条并发的 cd 会互相盖掉；
+# 写类工具不在里面——同一批里改同一个文件就是竞态；
+# todo / exit_plan / remember 都改 agent 自己的状态，也不能并发
+PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch"}
+# 上限拦一下：一批十个 web_fetch 同时打同一个站点不礼貌，线程也不是免费的
+MAX_PARALLEL = 4
 
 
 # 不告诉它跑在什么模型上的话，被问起来它会自己编一个（实测 deepseek 会说自己是 Claude）
@@ -605,7 +614,65 @@ class Feiyu:
 
         返回这一批里最后一次真的改到代码的 (工具名, 主参数)，没改到就是 None
         PostToolUse 的 matcher 要拿它来匹配
+
+        **整批都是只读工具时才并行**，只要掺进一个写类或 bash 就整批串行 
+        判断放在批一级而不是逐个挑，是因为「读三个文件、然后按内容写一个」
+        这种批次里，写那步依赖前面读的结果，挑着并行等于乱序执行
         """
+        if len(calls) > 1 and all(
+                c.name in PARALLEL_SAFE and not c.error for c in calls):
+            self._run_parallel(calls, outputs)
+            return None
+        return self._run_serial(calls, outputs)
+
+    def _run_parallel(self, calls, outputs: list[ToolOutput]) -> None:
+        """先按顺序过一遍闸（确认要读 stdin，只能在主线程），再一起跑
+
+        打印也全在主线程、按调用顺序来 让工作线程自己打印的话，
+        输出会交叉成一团看不懂的东西
+        """
+        approved = []
+        for call in calls:
+            print(ui.tool_call(call.name, call.input), flush=True)
+            blocked = self._pre_tool(call) or self._deny_reason(call)
+            approved.append((call, blocked))
+
+        began = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
+            futures = [
+                (call, None if blocked else pool.submit(self.toolbox.run, call.name, call.input))
+                for call, blocked in approved
+            ]
+            # 按调用顺序取结果：任务本身是并发跑的，这里只是让输出有个定序
+            for (call, blocked), (_, future) in zip(approved, futures):
+                if blocked:
+                    target = ui.tool_target(call.name, call.input)
+                    print(ui.tool_result(
+                        "%s — 没有执行" % ui.clip(target, 40) if target else "没有执行",
+                        [], is_error=True))
+                    print()
+                    outputs.append(ToolOutput(id=call.id, content=blocked, is_error=True))
+                    continue
+                result = future.result()
+                summary = result.summary or result.content.splitlines()[0][:80]
+                # 并行时四条结果一起出来，不带上作用对象就分不清谁是谁
+                target = ui.tool_target(call.name, call.input)
+                shown = "%s — %s" % (ui.clip(target, 40), summary) if target else summary
+                print(ui.tool_result(shown, result.detail, is_error=result.is_error))
+                print()
+                self.trace.write("tool", name=call.name, args=call.input,
+                                 ok=not result.is_error, summary=summary, parallel=True)
+                outputs.append(
+                    ToolOutput(id=call.id, content=result.content, is_error=result.is_error))
+        self.trace.write("parallel", count=len(calls),
+                         ms=round((time.monotonic() - began) * 1000))
+
+    def _deny_reason(self, call) -> str:
+        """并行那条路上的权限判定 只读工具没有"本轮都允许"可言，所以不带 allow_all """
+        ok, _, _, reason = self._gate(call, False)
+        return "" if ok else reason
+
+    def _run_serial(self, calls, outputs: list[ToolOutput]):
         allow_all = False
         changed = None
         for call in calls:

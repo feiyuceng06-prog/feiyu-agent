@@ -112,6 +112,35 @@ Context is a percentage, not a token count. Every request carries roughly 1.5k t
 
 Cost comes from the three price fields you fill in during `/key add`; leave them blank and it shows a token count instead. See "Models" below.
 
+### Parallel reads
+
+When a batch of calls is **entirely read-only**, they run at the same time:
+
+```
+⏺ Read(mod1.py)
+⏺ Read(mod2.py)
+⏺ Read(mod3.py)
+⏺ Read(mod4.py)
+  ⎿  mod1.py — 3 lines
+  ⎿  mod2.py — 3 lines
+  ⎿  mod3.py — 3 lines
+  ⎿  mod4.py — 3 lines
+```
+
+`read_file`, `list_files`, `search` and `web_fetch` count as read-only, four at a time.
+Fetching four pages goes from one-after-another to one wait, which is very noticeable.
+
+**One `bash` or file write in the batch and the whole batch goes back to serial.** The
+decision is made per batch rather than per call: in a batch like "read three files, then
+write one based on them", the write depends on the reads, so cherry-picking what to
+parallelise would just execute things out of order. `bash` can never be parallel anyway —
+its `cd` persists across calls, and two concurrent `cd`s would clobber each other.
+
+Confirmation prompts always happen one at a time on the main thread, and results are
+returned to the model in call order (which one finishes first is not deterministic, but the
+order must be). Interrupt with `esc` partway through and the calls that never ran still get
+results — the history stays intact.
+
 ### Permission modes
 
 `shift+tab` cycles through them, or use `/mode <name>`. The current mode shows on the left of the input box's top border.

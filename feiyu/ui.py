@@ -212,6 +212,12 @@ _HEADLINE_ARG = {
 }
 
 
+def tool_target(name: str, args: dict) -> str:
+    """这次调用作用在什么上 并行时几条结果一起出来，光看 summary 分不清谁是谁 """
+    key = _HEADLINE_ARG.get(name)
+    return str(args.get(key, "")).replace("\n", " ") if key else ""
+
+
 def tool_call(name: str, args: dict) -> str:
     label = _LABEL.get(name, name)
     key = _HEADLINE_ARG.get(name)
