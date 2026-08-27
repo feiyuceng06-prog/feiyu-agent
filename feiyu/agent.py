@@ -410,7 +410,8 @@ class Feiyu:
             stream.start()
             try:
                 # 中断/报错时也必须停掉 spinner 线程，否则它会继续往屏幕上糊帧
-                turn = self.backend.run_turn(on_text=stream.write)
+                turn = self.backend.run_turn(on_text=stream.write,
+                                             on_tool=stream.progress)
             except KeyboardInterrupt:
                 # 流到一半被打断，run_turn 没来得及把 assistant 写进历史
                 # 不补的话已经说出口的话丢掉，而且角色不再交替

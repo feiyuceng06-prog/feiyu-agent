@@ -20,6 +20,7 @@ class FakeBackend(OpenAICompatBackend):
         self.script = list(script)
         self.truncated = truncated
         self.asked = []
+        self.progress = []      # 喂出去的 (工具名, 半截参数)，用来验参数流接没接上
         self._reset_usage()
 
     def set_system(self, text):
@@ -32,10 +33,17 @@ class FakeBackend(OpenAICompatBackend):
         self.asked.append(prompt)
         return "这是摘要"
 
-    def run_turn(self, on_text):
+    def run_turn(self, on_text, on_tool=None):
         text, calls = self.script.pop(0) if self.script else ("说完了", [])
         if text:
             on_text(text)
+        for c in calls:
+            # 真后端是一段一段喂的，这里喂两段，够验证「参数流上得来」
+            raw = json.dumps(c.input, ensure_ascii=False)
+            for cut in (len(raw) // 2, len(raw)):
+                self.progress.append((c.name, raw[:cut]))
+                if on_tool:
+                    on_tool(c.name, raw[:cut])
         entry = {"role": "assistant", "content": text or None}
         if calls:
             entry["tool_calls"] = [

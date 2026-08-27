@@ -4,6 +4,7 @@
 怎么画由这个模块决定
 """
 
+import json
 import os
 import re
 import shutil
@@ -224,6 +225,31 @@ def tool_target(name: str, args: dict) -> str:
     return str(args.get(key, "")).replace("\n", " ") if key else ""
 
 
+# 参数还在流式生成时，从没收完的 JSON 里抠出目标 这几个键就是 _HEADLINE_ARG 的键
+_ARG_HINT = re.compile(
+    r'"(path|command|url|regex|pattern|prompt|fact|plan)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+# 参数短的时候没什么可报的进度，别抖着一个「已生成 1 行」
+_PROGRESS_MIN = 200
+
+
+def tool_progress(name: str, partial: str) -> str:
+    """工具参数流式生成时的一行状态 只出纯文本，上色是 Stream 的事 """
+    head = ""
+    found = _ARG_HINT.search(partial)
+    if found:
+        try:
+            head = json.loads('"%s"' % found.group(2))
+        except ValueError:
+            head = found.group(2)
+        head = head.replace("\n", " ").strip()
+    label = tool_label(name)
+    text = "%s %s" % (label, head) if head else label
+    if len(partial) >= _PROGRESS_MIN:
+        # 数的是 JSON 里的 \n 转义，也就是最终会写进文件的行数
+        text += " · 已生成 %d 行" % (partial.count("\\n") + 1)
+    return text
+
+
 def tool_call(name: str, args: dict) -> str:
     label = _LABEL.get(name, name)
     key = _HEADLINE_ARG.get(name)
@@ -294,6 +320,10 @@ class Stream:
     # 离右边界还有这么多列时才开始攒词 攒词是为了在词边界折行，
     # 但攒着就意味着整个词一起蹦出来，所以只在真的可能要折行的地方攒
     WRAP_MARGIN = 24
+    # 状态行的重画间隔；IDLE_TICK 是没东西可放时的轮询间隔 ——
+    # 转得比重画快，是为了正文一来就能接上，又不必按吐字的节奏空转
+    STATUS_TICK = 0.12
+    IDLE_TICK = 0.03
 
     def __init__(self, *, spinner_delay: float = 0.25, tick: float = 0.008):
         self._tty = sys.stdout.isatty()
@@ -307,6 +337,9 @@ class Stream:
         self._col = 0
         self._word = ""
         self._limit = width()
+        self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
+        self._status_drawn = False
+        self._status_at = 0.0
         self.wrote_text = False
         self.text = ""      # 中断时要靠它把已经说出口的话补回历史
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -326,6 +359,14 @@ class Stream:
             return
         with self._lock:
             self._buf.append(text)
+
+    def progress(self, name: str, partial: str) -> None:
+        """工具参数还在流式生成 存下就走：上游每个 delta 都会调一次，
+        在这儿拼标签等于对越来越长的参数反复做正则，拼留到重画时（12 Hz）做 """
+        if not self._tty:
+            return
+        with self._lock:
+            self._status = (name, partial)
 
     def finish(self) -> None:
         if not self._tty:
@@ -394,44 +435,59 @@ class Stream:
 
     def _run(self) -> None:
         frame = 0
-        while True:
-            with self._lock:
-                pending = bool(self._buf)
-                done = self._done
-            if pending:
-                break
-            if done:
-                self._clear_spinner()
-                return
-            if time.monotonic() - self._begin >= self._delay:
-                elapsed = int(time.monotonic() - self._begin)
-                label = paint("brown", FRAMES[frame]) + paint("grey", f" 思考中… ({elapsed}s · esc 中断)")
-                sys.stdout.write("\r\033[K" + label)
-                sys.stdout.flush()
-                frame = (frame + 1) % len(FRAMES)
-            time.sleep(0.12)
-
-        self._clear_spinner()
         pending = ""
         while True:
             with self._lock:
                 pending += "".join(self._buf)
                 self._buf.clear()
-                done = self._done
+                done, status = self._done, self._status
             if pending:
+                self._hide_status()
                 # 上游是一阵一阵来的 按积压量的比例匀速放出去，别整块蹦；
                 # 收尾时放快些，免得话说完了字还在慢慢爬
                 share = 3 if done else 6
                 take = max(4 if done else 1, -(-len(pending) // share))
                 self._emit(pending[:take])
                 pending = pending[take:]
-            if done and not pending:
+                time.sleep(self._tick)
+                continue
+            if done:
+                self._hide_status()
                 return
-            time.sleep(self._tick)
+            if self._should_draw(status) and \
+                    time.monotonic() - self._status_at >= self.STATUS_TICK:
+                frame = self._draw_status(frame, status)
+            time.sleep(self.IDLE_TICK)
 
-    def _clear_spinner(self) -> None:
+    def _should_draw(self, status) -> bool:
+        """正文开始之后只有工具参数在生成时才画状态行 ——
+        不然正文两个 chunk 之间的每个空档都会插进来一行，字被切成一段一段的 """
+        if time.monotonic() - self._begin < self._delay:
+            return False
+        return bool(status) or not self.wrote_text
+
+    def _draw_status(self, frame: int, status: str) -> int:
+        if not self._status_drawn and not self._fresh_line:
+            # 正文停在半行上，状态行得另起一行画，不然会把说过的话擦掉
+            self._flush_word()
+            sys.stdout.write("\n")
+            self._fresh_line, self._col = True, 0
+        elapsed = int(time.monotonic() - self._begin)
+        tail = " (%ds · esc 中断)" % elapsed
+        text = tool_progress(*status) if status else "思考中…"
+        body = clip(text, max(8, self._limit - visible(tail) - 4))
+        sys.stdout.write("\r\033[K" + paint("brown", FRAMES[frame]) + paint("grey", " " + body + tail))
+        sys.stdout.flush()
+        self._status_drawn = True
+        self._status_at = time.monotonic()
+        return (frame + 1) % len(FRAMES)
+
+    def _hide_status(self) -> None:
+        if not self._status_drawn:
+            return      # 没画过就别擦：光标这会儿多半停在正文中间
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
+        self._status_drawn = False
 
 
 # ---- turn 期间按 esc 中断 ----

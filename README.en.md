@@ -107,6 +107,8 @@ Eleven tools, each call printed as it happens:
 | `remember` | Note something worth keeping across sessions |
 | `exit_plan` | In plan mode, hand you the plan for approval |
 
+**You see what it is writing while the arguments are still streaming**: `⠋ Write feiyu/tools.py · 42 lines so far`. A large file takes ten-odd seconds to generate, and a bare spinner does not tell you whether it is writing or stuck.
+
 A single task runs at most **25 rounds** of tool calls; at the cap it stops and says so, and one more message picks it up again.
 
 **When a batch of calls is entirely read-only they run at the same time** (`read_file` / `list_files` / `search` / `web_fetch` / `task`, four at a time). One `bash` or file write in the batch and the whole batch goes back to serial — the write usually depends on what the reads found.

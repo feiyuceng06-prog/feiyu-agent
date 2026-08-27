@@ -448,6 +448,33 @@ openai 还是可选依赖，硬 import 会把 anthropic-only 的装法弄坏。
 默认记进 Watcher（那些用例测的是编辑语义，不该被这道闸挡住），
 `seen=False` 才是「文件在那儿但 agent 没读过」。
 
+## 工具参数的流式进度（0.22.0）
+
+写一个大文件那十几秒里，屏幕上原来只有 spinner —— 分不清它在生成参数还是卡住了。
+现在两个后端在参数流上来时回调 `on_tool(工具名, 到目前为止的参数)`，
+`agent.send()` 把 `Stream.progress` 传下去，状态行变成
+`⠋ Write feiyu/tools.py · 已生成 42 行 (7s · esc 中断)`。
+
+- **回调只存原始值，标签留到重画时才拼**（`Stream._status` 存的是元组，
+  `_draw_status` 才调 `ui.tool_progress`）。上游每个 delta 都会回调一次，
+  在回调里做正则扫描是对越来越长的参数反复扫，O(n²)；重画是 12 Hz，扫多少次都无所谓。
+- **`Stream._run` 从「spinner 阶段 → 正文阶段」两段式改成一个循环**。
+  关键是 `_should_draw()`：**正文开始之后，只有工具参数在生成时才画状态行**。
+  不加这条的话，正文两个 chunk 之间的每个空档（8ms 一次）都会插进来一行，
+  字被切成一段一段的。
+- **`_hide_status()` 必须先看 `_status_drawn`**：没画过就写 `\r\033[K`，
+  擦掉的是正文那半行。原来的 `_clear_spinner` 无条件擦是安全的，因为那时
+  spinner 只可能出现在正文之前。
+- 正文停在半行上时，状态行**先补一个 `\n` 再画**（`_draw_status` 开头那段），
+  否则会把说过的话盖掉。擦掉之后 `_fresh_line` 仍是 True，`finish()` 就不会再补换行，
+  工具调用行照旧紧接着正文——这一点用 pty + pyte 三个场景都回放确认过。
+- `IDLE_TICK`（0.03）和 `_tick`（0.008）分开：正文在放的时候按 `_tick` 走，
+  没东西可放时按 `IDLE_TICK` 轮询，不必按吐字的节奏空转几十秒。
+
+anthropic 那边认 `content_block_start`（拿工具名）+ `input_json_delta`（拿 `partial_json`），
+openai 兼容那边本来就在攒 `slot["args"]`，攒完顺手回调。
+**`on_tool` 一律是可选参数**：`subagent` 跑在工作线程里，不能往屏幕上画，就不传。
+
 ## 已知问题（未修，用户知情）
 
 - ~~**写文件会盖掉用户在编辑器里的改动**~~ **0.21.0 已修**：`files.Watcher` + `_check_fresh`。

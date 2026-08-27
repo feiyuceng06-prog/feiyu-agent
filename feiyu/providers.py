@@ -186,7 +186,7 @@ class AnthropicBackend(Billing):
         ]
         self.messages.append({"role": "user", "content": blocks})
 
-    def run_turn(self, on_text) -> TurnResult:
+    def run_turn(self, on_text, on_tool=None) -> TurnResult:
         with self.client.messages.stream(
             model=self.model,
             max_tokens=self.MAX_TOKENS,
@@ -196,9 +196,18 @@ class AnthropicBackend(Billing):
             tools=self.tools,
             messages=self.messages,
         ) as stream:
+            name, partial = "", ""
             for event in stream:
-                if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                if event.type == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    name = _field(block, "name") if _field(block, "type") == "tool_use" else ""
+                    partial = ""
+                elif event.type == "content_block_delta" and event.delta.type == "text_delta":
                     on_text(event.delta.text)
+                elif (event.type == "content_block_delta"
+                      and event.delta.type == "input_json_delta" and on_tool and name):
+                    partial += event.delta.partial_json or ""
+                    on_tool(name, partial)
             response = stream.get_final_message()
 
         self.messages.append({"role": "assistant", "content": response.content})
@@ -299,7 +308,7 @@ class OpenAICompatBackend(Billing):
                 {"role": "tool", "tool_call_id": o.id, "content": content}
             )
 
-    def run_turn(self, on_text) -> TurnResult:
+    def run_turn(self, on_text, on_tool=None) -> TurnResult:
         stream = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.MAX_TOKENS,
@@ -339,6 +348,8 @@ class OpenAICompatBackend(Billing):
                     slot["name"] = tc.function.name
                 if tc.function and tc.function.arguments:
                     slot["args"] += tc.function.arguments
+                if on_tool and slot["name"]:
+                    on_tool(slot["name"], slot["args"])
 
         ordered = [pending[i] for i in sorted(pending)]
 

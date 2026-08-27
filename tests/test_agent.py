@@ -89,7 +89,7 @@ class TestInterruptKeepsHistoryValid(Base):
 
     def test_模型正说话时被打断(self):
         b = self.use([])
-        def boom(on_text):
+        def boom(on_text, on_tool=None):
             on_text("我正在读 build.mjs")
             raise KeyboardInterrupt()
         b.run_turn = boom
@@ -101,7 +101,7 @@ class TestInterruptKeepsHistoryValid(Base):
 
     def test_一个字都没说就被打断(self):
         b = self.use([])
-        def boom(on_text):
+        def boom(on_text, on_tool=None):
             raise KeyboardInterrupt()
         b.run_turn = boom
         with self.assertRaises(KeyboardInterrupt):
@@ -127,6 +127,25 @@ class TestInterruptKeepsHistoryValid(Base):
         b.add_user_message("下一句")
         roles = [m["role"] for m in b.messages]
         self.assertEqual(roles, ["system", "user", "assistant", "tool", "user"])
+
+
+class TestToolArgProgress(Base):
+    """写一个大文件那十几秒里，参数流要接到 Stream 上，不能只有 spinner """
+
+    def test_把_stream_的_progress_传下去(self):
+        seen = []
+        b = self.use([("", [call("c1", "write_file", path="a.py", content="x")]), ("好", [])])
+        real = b.run_turn
+        def run_turn(on_text, on_tool=None):
+            seen.append(on_tool)
+            return real(on_text, on_tool)
+        b.run_turn = run_turn
+        self.tools_ok()
+        quiet(self.agent.send, "写个文件")
+        self.assertTrue(seen)
+        for fn in seen:
+            self.assertEqual(getattr(fn, "__name__", ""), "progress")
+            fn("write_file", '{"path": "a.py"')      # 拿真参数调一下，别在真跑时才崩
 
 
 class TestToolLoop(Base):
@@ -534,13 +553,13 @@ class TestStreamRetry(Base):
         state = {"n": 0}
         b = self.use([("答完了", [])])
         real = b.run_turn
-        def run_turn(on_text):
+        def run_turn(on_text, on_tool=None):
             if state["n"] < times:
                 state["n"] += 1
                 if text:
                     on_text(text)
                 raise exc_factory()
-            return real(on_text)
+            return real(on_text, on_tool)
         b.run_turn = run_turn
         return b, state
 

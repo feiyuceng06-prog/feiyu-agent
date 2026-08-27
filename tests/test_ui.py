@@ -109,6 +109,75 @@ class TestStream(unittest.TestCase):
         self.assertFalse(s.wrote_text)
 
 
+class TestToolProgress(unittest.TestCase):
+    """工具参数流式生成时的那行状态 参数是没收完的 JSON """
+
+    def test_只有工具名时也能出一行(self):
+        self.assertEqual(ui.tool_progress("read_file", '{"pa'), "Read")
+
+    def test_路径一到齐就显出来(self):
+        self.assertIn("a/b.py", ui.tool_progress("write_file", '{"path": "a/b.py", "content": "x'))
+
+    def test_命令也认(self):
+        self.assertIn("npm test", ui.tool_progress("bash", '{"command": "npm test"}'))
+
+    def test_短参数不报行数(self):
+        self.assertNotIn("已生成", ui.tool_progress("write_file", '{"path": "a.py", "content": "x'))
+
+    def test_长参数报到目前为止的行数(self):
+        partial = '{"path": "a.py", "content": "' + "x = 1\\n" * 60
+        self.assertIn("已生成 61 行", ui.tool_progress("write_file", partial))
+
+    def test_转义按_JSON_解(self):
+        out = ui.tool_progress("write_file", '{"path": "a\\u002fb.py", "content": "')
+        self.assertIn("a/b.py", out)
+
+    def test_值里的换行压成空格(self):
+        out = ui.tool_progress("bash", '{"command": "a\\nb"}')
+        self.assertNotIn("\n", out)
+
+    def test_坏转义不崩(self):
+        ui.tool_progress("write_file", '{"path": "a\\uZZZZ", "content": "')
+
+
+class TestStreamStatus(unittest.TestCase):
+    """状态行什么时候画 正文开始之后乱画会把话切成一段一段的 """
+
+    def make(self):
+        s = ui.Stream()
+        s._begin = 0.0          # 越过 spinner_delay，否则一律不画
+        return s
+
+    def test_还没说话时画思考中(self):
+        self.assertTrue(self.make()._should_draw(None))
+
+    def test_延迟没到不画(self):
+        s = ui.Stream()
+        self.assertFalse(s._should_draw(None))
+
+    def test_正文开始后没有工具参数就不画(self):
+        s = self.make()
+        s.wrote_text = True
+        self.assertFalse(s._should_draw(None))
+
+    def test_正文开始后有工具参数才画(self):
+        s = self.make()
+        s.wrote_text = True
+        self.assertTrue(s._should_draw(("write_file", '{"path": "a.py"')))
+
+    def test_没画过就不擦(self):
+        s = self.make()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            s._hide_status()
+        self.assertEqual(buf.getvalue(), "")     # 擦了的话会把正文那半行抹掉
+
+    def test_非终端时_progress_不做事(self):
+        s = ui.Stream()
+        s.progress("write_file", '{"path": "a.py"')
+        self.assertIsNone(s._status)
+
+
 class TestSlashCommands(unittest.TestCase):
     """0.5.0 用区间切片重写 _model 时把夹在中间的 _mode 一起删掉了，
     /mode 崩了才发现 每个命令都要有分支、有实现 """

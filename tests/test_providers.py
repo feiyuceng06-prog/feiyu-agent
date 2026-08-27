@@ -135,6 +135,72 @@ class TestOpenAITranscript(unittest.TestCase):
         self.assertEqual(self.b.messages[1]["content"], "没事")
 
 
+class _Fn:
+    def __init__(self, name=None, arguments=None):
+        self.name, self.arguments = name, arguments
+
+
+class _TC:
+    def __init__(self, index, tid=None, name=None, arguments=None):
+        self.index, self.id, self.function = index, tid, _Fn(name, arguments)
+
+
+class _Delta:
+    def __init__(self, content=None, tool_calls=None):
+        self.content, self.tool_calls = content, tool_calls
+
+
+class _Choice:
+    def __init__(self, delta, finish=None):
+        self.delta, self.finish_reason = delta, finish
+
+
+class _Chunk:
+    def __init__(self, delta, finish=None):
+        self.choices, self.usage = [_Choice(delta, finish)], None
+
+
+class TestOpenAIStream(unittest.TestCase):
+    """参数是一段一段来的，边来边往上报 —— 写一个大文件那十几秒不能只有 spinner """
+
+    def backend(self, chunks):
+        b = object.__new__(providers.OpenAICompatBackend)
+        b.model, b.system, b.tools = "m", "s", []
+        b.messages = [{"role": "system", "content": "s"}]
+        b._reset_usage()
+        b.client = type("C", (), {"chat": type("Ch", (), {"completions": type("Cp", (), {
+            "create": staticmethod(lambda **kw: iter(chunks))})()})()})()
+        return b
+
+    def test_参数边流边上报(self):
+        chunks = [
+            _Chunk(_Delta(tool_calls=[_TC(0, "c1", "write_file", '{"path": "a.py"')])),
+            _Chunk(_Delta(tool_calls=[_TC(0, arguments=', "content": "x = 1')])),
+            _Chunk(_Delta(tool_calls=[_TC(0, arguments='"}')]), finish="tool_calls"),
+        ]
+        seen = []
+        turn = self.backend(chunks).run_turn(on_text=lambda t: None,
+                                             on_tool=lambda n, p: seen.append((n, p)))
+        self.assertEqual(len(seen), 3)
+        self.assertEqual({n for n, _ in seen}, {"write_file"})
+        # 每次报的都是「到目前为止」的完整片段，越来越长
+        self.assertEqual([len(p) for _, p in seen], sorted(len(p) for _, p in seen))
+        self.assertEqual(turn.tool_calls[0].input, {"path": "a.py", "content": "x = 1"})
+
+    def test_不传回调也照常跑(self):
+        chunks = [_Chunk(_Delta(tool_calls=[_TC(0, "c1", "bash", '{"command": "ls"}')]),
+                         finish="tool_calls")]
+        turn = self.backend(chunks).run_turn(on_text=lambda t: None)
+        self.assertEqual(turn.tool_calls[0].input, {"command": "ls"})
+
+    def test_正文照常走_on_text(self):
+        chunks = [_Chunk(_Delta(content="你好")), _Chunk(_Delta(content="世界"), finish="stop")]
+        said = []
+        turn = self.backend(chunks).run_turn(on_text=said.append)
+        self.assertEqual("".join(said), "你好世界")
+        self.assertEqual(turn.text, "你好世界")
+
+
 class TestBilling(unittest.TestCase):
     def setUp(self):
         self.b = OpenAICompatBackend.__new__(OpenAICompatBackend)
