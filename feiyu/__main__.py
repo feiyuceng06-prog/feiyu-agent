@@ -321,7 +321,9 @@ def _key(agent: Feiyu, arg: str) -> str:
         rows.append("   " + ui.bold(name))
         rows.append(
             "      "
-            + ui.paint("grey", "%s   %s   %s" % (e["model"], e.get("base_url") or "(厂商默认地址)", keys.mask(e["key"])))
+            + ui.paint("grey", "%s   %s   %s%s" % (
+                e["model"], e.get("base_url") or "(厂商默认地址)", keys.mask(e["key"]),
+                "   看得了图" if e.get("vision") else ""))
         )
     rows += ["", ui.notice("/key add 添加 · /key rm <名字> 删除 · /model <名字> 切过去")]
     return "\n".join(rows)
@@ -343,6 +345,8 @@ def _key_add() -> str:
         model = ask("模型 id: ")
         secret = ask("API key: ", secret=True)
         kind = ask("接口类型 openai / anthropic [openai]: ").lower() or "openai"
+        # 探测不出来，只能问 标错了的后果是发图过去接口直接报错
+        vision = ask("这个模型能看图吗 y/N: ").lower().startswith("y")
         print(ui.notice("下面三项是价格，人民币每百万 token，留空就只显示 token 数不算钱"))
         price = _ask_price(ask)
     except (KeyboardInterrupt, EOFError):
@@ -352,8 +356,11 @@ def _key_add() -> str:
         return ui.error("模型 id 和 key 都不能为空，已取消")
     if kind not in ("openai", "anthropic"):
         return ui.error(f"接口类型只能是 openai 或 anthropic，收到 {kind}，已取消")
-    keys.add(name, base_url=base_url, model=model, key=secret, kind=kind, price=price)
+    keys.add(name, base_url=base_url, model=model, key=secret, kind=kind,
+             price=price, vision=vision)
     tail = "，已带价格" if price else "，未填价格（界面上显示 token 数）"
+    if vision:
+        tail += "，标了能看图"
     return ui.notice(f"已保存{tail} 用 /model {name} 切过去")
 
 

@@ -346,6 +346,7 @@ class Feiyu:
             fresh.cost = old.cost
             fresh.priced = old.priced
         self.backend = fresh
+        self.toolbox.vision = getattr(fresh, "vision", False)
         self.name = name
         self.context_limit = int(entry.get("limit") or DEFAULT_CONTEXT_LIMIT)
         keys.set_last(name)
@@ -775,7 +776,8 @@ class Feiyu:
                 changed = (call.name, permissions.subject(call.name, call.input))
                 self._remember_touched(call)
             outputs.append(
-                ToolOutput(id=call.id, content=result.content, is_error=result.is_error)
+                ToolOutput(id=call.id, content=result.content,
+                           is_error=result.is_error, image=result.image)
             )
         return changed
 

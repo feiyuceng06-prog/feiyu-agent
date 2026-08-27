@@ -9,6 +9,8 @@ import json
 import os
 import time
 
+from .providers import without_images
+
 DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
     "feiyu",
@@ -41,7 +43,8 @@ def save(workspace, agent) -> None:
         "model": agent.name,
         "style": agent.style,
         "mode": agent.mode,
-        "messages": _plain(b.messages),
+        # 图片不进存盘：一张就是几十万字，恢复回来也未必是当初那张
+        "messages": without_images(_plain(b.messages)),
         "todos": agent.toolbox.todos.items,
         "tokens_total": b.tokens_total,
         "tokens_context": b.tokens_context,

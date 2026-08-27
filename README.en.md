@@ -100,7 +100,7 @@ Twelve tools, each call printed as it happens:
 | Tool | Notes |
 |---|---|
 | `bash` | Run a shell command. `cd` persists between calls; long ones can go to the background |
-| `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root |
+| `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root; images go straight to the model |
 | `list_files` `search` | Glob the tree, grep it with a regex |
 | `web_fetch` | Fetch a page, HTML converted to Markdown |
 | `task` | Send a subagent to find something out and bring back only the conclusion |
@@ -108,6 +108,8 @@ Twelve tools, each call printed as it happens:
 | `remember` | Note something worth keeping across sessions |
 | `job` | Read a background command's new output, or stop it |
 | `exit_plan` | In plan mode, hand you the plan for approval |
+
+**Hand it a screenshot**: `read_file` on png / jpg / gif / webp passes the image to the model, downscaled first if it is over 1568px (bigger only costs more, it does not read better). Whether a model can see images is part of its own entry (`/key add` asks), and one that is not marked simply says so rather than sending the image and letting the API reject it. Images are kept out of the saved session and out of summaries.
 
 **Dev servers, watchers and long builds go to the background** (`background` on `bash`). You get a number back immediately and read new output with `job` — what you already read is not handed over again, so polling does not flood the context. It is told when a command finishes. `/jobs` lets you look and stop them yourself, and quitting feiyu kills them along with whatever they spawned.
 

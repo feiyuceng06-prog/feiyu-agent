@@ -26,6 +26,7 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
 | `feiyu/files.py` | 记住看过的文件版本，写之前对一次，别盖掉没看见的改动 |
 | `feiyu/jobs.py` | 挂在后台跑的 bash 命令：收输出、报结束、杀进程组 |
+| `feiyu/images.py` | 图片缩到上限之内再 base64，只有 read_file 用 |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -500,9 +501,31 @@ openai 兼容那边本来就在攒 `slot["args"]`，攒完顺手回调。
 - **出厂放行 `Job(*)`**：起那条 bash 时已经确认过了，之后每轮询一次再点一次没人受得了。
   它只作用在 agent 自己挂起来的进程上。
 
+## 读图片（0.24.0）
+
+`feiyu/images.py` + `Toolbox._read_image`。`read_file` 碰到 png/jpg/gif/webp
+就把图交给模型，`ToolResult.image` / `ToolOutput.image` 一路带到后端。
+
+- **能不能看图是每条模型配置自带的一项**（`keys.FIELDS` 的 `vision`，`/key add` 问一句）。
+  **不要写内置的「哪些模型支持视觉」表**，理由跟不要写内置价格表一样：
+  各家 id 退役很勤，写死的表迟早给出错的答案。探测也不行——只能真发一张图过去试。
+  没标的模型走的是「明说不认图」，不是「发出去让接口报错」：后者是 400，
+  一轮对话就废了。
+- **两种后端形状不一样**：anthropic 的图可以直接躺在 `tool_result` 的 content 列表里；
+  **openai 兼容的 `tool` 角色 content 只能是纯文本**，图得另起一条 `user` 跟在
+  所有 tool 结果**之后**（放中间会破坏 tool_call 的配对）。
+- **`without_images()` 是必须的**：图片进了历史就一直在，`transcript()`（压缩前
+  渲染成文本）和 `session.save` 都会把几十万字的 base64 原样带上——摘要会被冲垮，
+  存盘一张图就几 MB。剥成一句 `IMAGE_NOTE`，结构不动所以配对和角色交替都不受影响。
+- **缩图的两个上限**：长边 `MAX_EDGE = 1568`（1568×1568 约 1600 token，边长翻倍
+  就是四倍的钱），字节 `MAX_BYTES`。一轮缩完还超字节就接着缩，别在那儿放弃。
+  **有透明通道必须走 PNG**，转 JPEG 会把透明的地方糊成黑块。
+- 子 agent 的 Toolbox 也要 `box.vision = backend.vision`，不然它读图永远说不认。
+
 ## 已知问题（未修，用户知情）
 
 - ~~**写文件会盖掉用户在编辑器里的改动**~~ **0.21.0 已修**：`files.Watcher` + `_check_fresh`。
+- ~~**不能读图片**~~ **0.24.0 已修**：`images.py`，按模型配置的 `vision` 开关。
 - ~~**`bash` 不能后台跑**~~ **0.23.0 已修**：`jobs.py` + `job` 工具。
 - ~~**`bash` 工具没有沙箱**~~ **0.19.0 已修**：`sandbox.py` 用 bubblewrap 把写权限
   关进工作区。**但只有写是真隔离**，读仍然只靠挖空几个目录；没装 bwrap 的机器上

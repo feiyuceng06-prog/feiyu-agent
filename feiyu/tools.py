@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import files, jobs as jobs_mod, memory, sandbox, todo
+from . import files, images, jobs as jobs_mod, memory, sandbox, todo
 
 
 TOOL_SCHEMAS = [
@@ -79,6 +79,7 @@ TOOL_SCHEMAS = [
             "读取工作区内的文件 文本文件返回带 1 起始行号的内容，方便你在编辑时引用行 "
             "docx / xlsx / pptx / odt / ods / odp / pdf 会自动抽成纯文本（只有文字，"
             "排版和图片不保留，也无法用 edit_file 改回去） "
+            "png / jpg / gif / webp 会直接把图交给你看（需要模型支持视觉，不支持时会明说） "
             "其他二进制格式会明确报错，不会返回乱码 "
         ),
         "input_schema": {
@@ -603,6 +604,7 @@ class ToolResult:
     is_error: bool = False
     summary: str = ""                             # 给人看的一行
     detail: list[tuple[str, str]] = field(default_factory=list)  # (kind, 文本)，kind 为 '-'/'+'/''
+    image: tuple[str, str] | None = None          # (media_type, base64)，read_file 读图时才有
 
 
 _TODO_MARK = {todo.DONE: "✓", todo.DOING: "▸", todo.PENDING: "·"}
@@ -646,6 +648,7 @@ class Toolbox:
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
         self.files = files.Watcher()   # 写之前对一下版本，别盖掉模型没看见的改动
         self.jobs = jobs_mod.Jobs()    # bash 挂到后台的命令
+        self.vision = False            # 当前模型认不认图片，由 agent 按模型配置写进来
 
     def _resolve(self, path: str) -> Path:
         target = (self.root / path).resolve()
@@ -812,6 +815,9 @@ class Toolbox:
     def _tool_read_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
 
+        if images.kind(target):
+            return self._read_image(target, args["path"])
+
         extracted = read_document(target)
         if extracted is not None:
             text = _truncate(extracted.strip())
@@ -841,6 +847,24 @@ class Toolbox:
             _truncate(numbered) or "（空文件）",
             summary=f"读取 {len(chunk)} 行" if chunk else "空文件",
         )
+
+    def _read_image(self, target, shown: str) -> ToolResult:
+        """图片直接交给模型看 能不能看是按模型配置来的，没标就别送出去 """
+        if not self.vision:
+            return ToolResult(
+                "当前模型没有标记成能看图 要么 /key 里给它加上 vision，"
+                "要么换一个支持视觉的模型 也可以让用户直接描述图里有什么 ",
+                is_error=True,
+                summary="这个模型不认图片",
+            )
+        try:
+            media, data, note = images.load(target)
+        except Exception as exc:
+            return ToolResult("这张图打不开：%s: %s " % (type(exc).__name__, exc),
+                              is_error=True, summary="图片打不开")
+        self.files.record(target)
+        return ToolResult("（下面是 %s，%s）" % (shown, note), summary="看图 %s" % note,
+                          image=(media, data))
 
     def _check_fresh(self, target, shown: str):
         """写之前对一次版本 没读过、或者读过之后内容变了，都先拦下 """

@@ -50,6 +50,7 @@ def run(prompt: str, *, entry: dict, workspace, trace=None) -> tuple[str, list, 
     backend = build_backend(entry, system=SYSTEM, tools=schemas)
     # 自己的 Toolbox：cwd、清单这些状态跟主 agent 和别的子 agent 都不共享
     box = Toolbox(workspace)
+    box.vision = getattr(backend, "vision", False)
     backend.add_user_message(prompt)
 
     lines: list[tuple[str, str]] = []

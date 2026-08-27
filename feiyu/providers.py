@@ -24,6 +24,26 @@ def _field(block, name: str, default: str = ""):
     return getattr(block, name, default)
 
 
+# 图片进了历史就一直在 摘要和存盘里只留这句，base64 原样带上是几十万字的垃圾
+IMAGE_NOTE = "（这里有一张图，原始数据没有保留）"
+
+
+def without_images(value):
+    """把 content 里的图片块换成一句说明，其余原样
+
+    两种后端的形状都认：anthropic 是 tool_result 里的 image 块，
+    openai 兼容是跟在后面那条 user 消息里的 image_url
+    """
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if kind in ("image", "image_url"):
+            return {"type": "text", "text": IMAGE_NOTE}
+        return {k: without_images(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [without_images(v) for v in value]
+    return value
+
+
 def _brief(value, limit: int = 200) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     text = " ".join(text.split())
@@ -50,6 +70,7 @@ class ToolOutput:
     id: str
     content: str
     is_error: bool = False
+    image: tuple[str, str] | None = None      # (media_type, base64)
 
 
 def build_backend(entry: dict, *, system: str, tools: list[dict]):
@@ -62,6 +83,8 @@ def build_backend(entry: dict, *, system: str, tools: list[dict]):
         base_url=entry.get("base_url"),
         api_key=entry["key"],
     )
+    # 能不能看图没法探测，只能按用户在 /key add 里填的来
+    backend.vision = bool(entry.get("vision"))
     # 用户在 /key add 里填的价格优先于内置价格表
     backend.rates = _as_rates(entry.get("price"))
     return backend
@@ -145,7 +168,7 @@ class AnthropicBackend(Billing):
                     rows.append("assistant 调用 %s(%s)" % (
                         _field(block, "name"), _brief(_field(block, "input", {}))))
                 elif kind == "tool_result":
-                    rows.append("工具返回：" + _brief(_field(block, "content")))
+                    rows.append("工具返回：" + _brief(without_images(_field(block, "content"))))
         return "\n".join(rows)
 
     def ask(self, prompt: str, max_tokens: int = 2000) -> str:
@@ -179,12 +202,24 @@ class AnthropicBackend(Billing):
             {
                 "type": "tool_result",
                 "tool_use_id": o.id,
-                "content": o.content,
+                "content": self._result_content(o),
                 "is_error": o.is_error,
             }
             for o in outputs
         ]
         self.messages.append({"role": "user", "content": blocks})
+
+    @staticmethod
+    def _result_content(o: ToolOutput):
+        """图片可以直接躺在 tool_result 里，不用另起一条消息 """
+        if not o.image:
+            return o.content
+        media, data = o.image
+        return [
+            {"type": "text", "text": o.content},
+            {"type": "image",
+             "source": {"type": "base64", "media_type": media, "data": data}},
+        ]
 
     def run_turn(self, on_text, on_tool=None) -> TurnResult:
         with self.client.messages.stream(
@@ -268,7 +303,7 @@ class OpenAICompatBackend(Billing):
                 continue
             if msg.get("content"):
                 label = "工具返回" if msg["role"] == "tool" else msg["role"]
-                rows.append("%s：%s" % (label, _brief(msg["content"], 400)))
+                rows.append("%s：%s" % (label, _brief(without_images(msg["content"]), 400)))
             for call in msg.get("tool_calls") or []:
                 rows.append("assistant 调用 %s(%s)" % (
                     call["function"]["name"], _brief(call["function"]["arguments"])))
@@ -307,6 +342,16 @@ class OpenAICompatBackend(Billing):
             self.messages.append(
                 {"role": "tool", "tool_call_id": o.id, "content": content}
             )
+        # tool 角色的 content 只能是纯文本，图片只能另起一条 user 跟在后面
+        # 放在所有 tool 结果之后，配对关系不受影响
+        shots = [o for o in outputs if o.image]
+        if shots:
+            parts = []
+            for o in shots:
+                parts.append({"type": "text", "text": o.content})
+                parts.append({"type": "image_url", "image_url": {
+                    "url": "data:%s;base64,%s" % o.image}})
+            self.messages.append({"role": "user", "content": parts})
 
     def run_turn(self, on_text, on_tool=None) -> TurnResult:
         stream = self.client.chat.completions.create(
