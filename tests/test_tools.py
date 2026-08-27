@@ -19,10 +19,15 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def write(self, name, text):
+    def write(self, name, text, seen=True):
+        """seen=False 模拟「文件在那儿但 agent 没读过」，用来测新鲜度那道闸 """
         p = self.root / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
+        if seen:
+            self.box.files.record(p)
+        else:
+            self.box.files.forget(p)
         return p
 
 
@@ -101,7 +106,7 @@ class TestWriteEdit(Base):
         self.write("a.py", "x = 1\nx = 1\n")
         out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
         self.assertTrue(out.is_error)
-        self.assertIn("2 处", out.content)
+        self.assertIn("2 处", out.content)  # 匹配多处要报数
         self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "x = 1\nx = 1\n")
 
     def test_找不到就报错(self):
@@ -122,6 +127,109 @@ class TestWriteEdit(Base):
         out = self.box.run("write_file", {"path": "../evil.py", "content": "x"})
         self.assertTrue(out.is_error)
         self.assertFalse((self.root.parent / "evil.py").exists())
+
+    def test_replace_all_全换(self):
+        self.write("a.py", "x = 1\nx = 1\nx = 1\n")
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1",
+                                         "new_str": "x = 2", "replace_all": True})
+        self.assertFalse(out.is_error)
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "x = 2\nx = 2\nx = 2\n")
+        self.assertIn("3 处", out.summary)
+
+    def test_匹配多处时提示_replace_all(self):
+        self.write("a.py", "x = 1\nx = 1\n")
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
+        self.assertIn("replace_all", out.content)
+
+    def test_新旧一样直接拒(self):
+        self.write("a.py", "x = 1\n")
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 1"})
+        self.assertTrue(out.is_error)
+
+    def test_空_old_str_直接拒(self):
+        self.write("a.py", "x = 1\n")
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "", "new_str": "y"})
+        self.assertTrue(out.is_error)
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "x = 1\n")
+
+    def test_编辑不存在的文件给出明确指引(self):
+        out = self.box.run("edit_file", {"path": "没有.py", "old_str": "a", "new_str": "b"})
+        self.assertTrue(out.is_error)
+        self.assertIn("write_file", out.content)
+
+
+class TestFreshness(Base):
+    """写之前对版本：没读过、读过之后被改过，都要拦下 """
+
+    def test_没读过就覆盖被拦(self):
+        self.write("a.py", "重要内容", seen=False)
+        out = self.box.run("write_file", {"path": "a.py", "content": "新的"})
+        self.assertTrue(out.is_error)
+        self.assertIn("read_file", out.content)
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "重要内容")
+
+    def test_没读过就编辑被拦(self):
+        self.write("a.py", "x = 1\n", seen=False)
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
+        self.assertTrue(out.is_error)
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "x = 1\n")
+
+    def test_读过之后就能写(self):
+        self.write("a.py", "x = 1\n", seen=False)
+        self.box.run("read_file", {"path": "a.py"})
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
+        self.assertFalse(out.is_error)
+
+    def test_读过之后被外部改动就拦下(self):
+        p = self.write("a.py", "x = 1\ny = 2\n", seen=False)
+        self.box.run("read_file", {"path": "a.py"})
+        p.write_text("x = 1\ny = 2\n用户自己加的一行\n", encoding="utf-8")
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 9"})
+        self.assertTrue(out.is_error)
+        self.assertIn("改动", out.content)
+        self.assertIn("用户自己加的一行", p.read_text(encoding="utf-8"))
+
+    def test_覆盖同样要挡外部改动(self):
+        p = self.write("a.py", "旧的", seen=False)
+        self.box.run("read_file", {"path": "a.py"})
+        p.write_text("用户改过的", encoding="utf-8")
+        out = self.box.run("write_file", {"path": "a.py", "content": "新的"})
+        self.assertTrue(out.is_error)
+        self.assertEqual(p.read_text(encoding="utf-8"), "用户改过的")
+
+    def test_重新读一遍就解除(self):
+        p = self.write("a.py", "x = 1\n", seen=False)
+        self.box.run("read_file", {"path": "a.py"})
+        p.write_text("x = 1\nz = 3\n", encoding="utf-8")
+        self.assertTrue(self.box.run(
+            "edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 9"}).is_error)
+        self.box.run("read_file", {"path": "a.py"})
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 9"})
+        self.assertFalse(out.is_error)
+        self.assertEqual(p.read_text(encoding="utf-8"), "x = 9\nz = 3\n")
+
+    def test_自己写完还能接着编辑(self):
+        self.box.run("write_file", {"path": "a.py", "content": "x = 1\n"})
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
+        self.assertFalse(out.is_error)
+
+    def test_新建文件不受影响(self):
+        out = self.box.run("write_file", {"path": "全新.py", "content": "x = 1\n"})
+        self.assertFalse(out.is_error)
+
+    def test_内容没变的_touch_不算改动(self):
+        p = self.write("a.py", "x = 1\n", seen=False)
+        self.box.run("read_file", {"path": "a.py"})
+        os.utime(p, (0, 0))
+        p.write_text("x = 1\n", encoding="utf-8")
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
+        self.assertFalse(out.is_error)
+
+    def test_读不了的二进制不要求先读(self):
+        p = self.root / "a.bin"
+        p.write_bytes(b"\x00\x01\x02\x00")
+        out = self.box.run("write_file", {"path": "a.bin", "content": "文本"})
+        self.assertFalse(out.is_error)
 
 
 class TestListSearch(Base):

@@ -111,6 +111,8 @@ A single task runs at most **25 rounds** of tool calls; at the cap it stops and 
 
 **When a batch of calls is entirely read-only they run at the same time** (`read_file` / `list_files` / `search` / `web_fetch` / `task`, four at a time). One `bash` or file write in the batch and the whole batch goes back to serial — the write usually depends on what the reads found.
 
+**It has to read a file before it may change it**, and if the file moved on after that read — you edited it in your editor, a formatter rewrote it — the write is refused until it reads again. This gate covers the one failure that actually loses work: overwriting a whole file from a copy it fetched minutes ago, silently wiping out whatever landed in between.
+
 Interrupting with `esc` is safe: whatever it had already said stays in the history, and any call that didn't finish gets an "interrupted by the user" result, so the conversation is never left broken.
 
 ### Subagents

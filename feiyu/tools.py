@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import memory, sandbox, todo
+from . import files, memory, sandbox, todo
 
 
 TOOL_SCHEMAS = [
@@ -68,6 +68,7 @@ TOOL_SCHEMAS = [
         "description": (
             "在工作区内创建或覆盖一个文本文件，父目录会自动创建 "
             "如果只是改动已有文件的一部分，优先用 edit_file "
+            "覆盖已有文件之前必须先 read_file 读过它，否则会被拒绝 "
         ),
         "input_schema": {
             "type": "object",
@@ -81,15 +82,21 @@ TOOL_SCHEMAS = [
     {
         "name": "edit_file",
         "description": (
-            "替换已有文件里的一段精确文本 old_str 必须在文件中恰好出现一次，"
-            "否则编辑会被拒绝 多带一些上下文，让 old_str 唯一 "
+            "替换已有文件里的一段精确文本 默认 old_str 必须在文件中恰好出现一次，"
+            "否则编辑会被拒绝 多带一些上下文，让 old_str 唯一；"
+            "确实要把每一处都换掉时加上 replace_all "
+            "编辑之前必须先 read_file 读过这个文件，否则会被拒绝 "
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "相对工作区根目录的文件路径 "},
-                "old_str": {"type": "string", "description": "要替换的精确文本（必须唯一） "},
+                "old_str": {"type": "string", "description": "要替换的精确文本（默认必须唯一） "},
                 "new_str": {"type": "string", "description": "替换后的文本 "},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "把出现的每一处都替换掉，而不是要求 old_str 唯一（默认 false） ",
+                },
             },
             "required": ["path", "old_str", "new_str"],
         },
@@ -609,6 +616,7 @@ class Toolbox:
         self.spawn = spawn      # (问题) -> (结论, 过程行)，建后端要模型配置，是 agent 的事
         self.todos = todo.Todos()
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
+        self.files = files.Watcher()   # 写之前对一下版本，别盖掉模型没看见的改动
 
     def _resolve(self, path: str) -> Path:
         target = (self.root / path).resolve()
@@ -720,6 +728,7 @@ class Toolbox:
         if extracted is not None:
             text = _truncate(extracted.strip())
             kind = target.suffix.lower().lstrip(".")
+            self.files.record(target)
             return ToolResult(
                 "（从 %s 里抽出的文本，排版和图片没有保留）\n\n%s" % (kind, text or "（没抽到文字）"),
                 summary="读取 %s，%d 行文本" % (kind, len(text.splitlines())),
@@ -734,6 +743,7 @@ class Toolbox:
                 summary="二进制文件，无法直接读",
             )
 
+        self.files.record(target, raw)
         lines = raw.decode("utf-8", errors="replace").splitlines()
         offset = max(1, int(args.get("offset", 1)))
         limit = int(args.get("limit", len(lines)))
@@ -744,27 +754,79 @@ class Toolbox:
             summary=f"读取 {len(chunk)} 行" if chunk else "空文件",
         )
 
+    def _check_fresh(self, target, shown: str):
+        """写之前对一次版本 没读过、或者读过之后内容变了，都先拦下 """
+        if not target.is_file():
+            return None
+        if not self.files.seen(target):
+            if _looks_binary(target.read_bytes()):
+                return None      # 读都读不了的格式，没法要求它先读
+            return ToolResult(
+                f"{shown} 已经存在，但你这次会话里还没读过它 "
+                "先 read_file 看一遍再改，免得盖掉你没看见的内容 ",
+                is_error=True,
+                summary="没读过就要写，已拦下",
+            )
+        if self.files.stale(target):
+            return ToolResult(
+                f"{shown} 在你读过它之后被改动过 "
+                "可能是用户在编辑器里改的，也可能是你自己用 bash 或钩子改的 "
+                "先 read_file 重新读一遍再动手，否则会盖掉这些改动 ",
+                is_error=True,
+                summary="文件已被改动，已拦下",
+            )
+        return None
+
     def _tool_write_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
+        existed = target.is_file()
+        if existed:
+            blocked = self._check_fresh(target, args["path"])
+            if blocked is not None:
+                return blocked
         target.parent.mkdir(parents=True, exist_ok=True)
-        existed = target.exists()
-        target.write_text(args["content"], encoding="utf-8")
-        n = args["content"].count("\n") + 1
+        content = args["content"]
+        target.write_text(content, encoding="utf-8")
+        self.files.record(target, content.encode("utf-8"))
+        n = content.count("\n") + 1
         verb = "覆盖" if existed else "新建"
         return ToolResult(f"已写入 {n} 行到 {args['path']}", summary=f"{verb} {n} 行")
 
     def _tool_edit_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
-        text = target.read_text(encoding="utf-8")
+        if not target.is_file():
+            return ToolResult(f"{args['path']} 不存在 要新建文件用 write_file ", is_error=True)
+        blocked = self._check_fresh(target, args["path"])
+        if blocked is not None:
+            return blocked
         old, new = args["old_str"], args["new_str"]
+        if not old:
+            return ToolResult("old_str 是空的 要新建文件用 write_file ", is_error=True)
+        if old == new:
+            return ToolResult("old_str 和 new_str 一模一样，这次编辑什么都不会改 ", is_error=True)
+        text = target.read_text(encoding="utf-8")
         count = text.count(old)
         if count == 0:
-            return ToolResult("文件中找不到 old_str", is_error=True)
-        if count > 1:
-            return ToolResult(f"old_str 匹配到 {count} 处，请让它唯一", is_error=True)
-        updated = text.replace(old, new, 1)
+            return ToolResult(
+                "文件中找不到 old_str 先 read_file 看一眼当前内容再改，"
+                "注意缩进和空白必须完全一致 ",
+                is_error=True,
+            )
+        every = bool(args.get("replace_all"))
+        if count > 1 and not every:
+            return ToolResult(
+                f"old_str 匹配到 {count} 处 多带几行上下文让它唯一，"
+                "或者加 replace_all: true 把这 %d 处全换掉 " % count,
+                is_error=True,
+            )
+        updated = text.replace(old, new) if every else text.replace(old, new, 1)
         target.write_text(updated, encoding="utf-8")
-        return ToolResult(f"已编辑 {args['path']}", summary="已修改 1 处", detail=_diff(text, updated))
+        self.files.record(target, updated.encode("utf-8"))
+        return ToolResult(
+            f"已编辑 {args['path']}，替换 {count} 处" if every else f"已编辑 {args['path']}",
+            summary=f"已修改 {count} 处",
+            detail=_diff(text, updated),
+        )
 
     def _tool_list_files(self, args: dict) -> ToolResult:
         pattern = args.get("pattern", "**/*")

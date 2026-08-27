@@ -24,6 +24,7 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
 | `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
+| `feiyu/files.py` | 记住看过的文件版本，写之前对一次，别盖掉没看见的改动 |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -415,8 +416,41 @@ openai 还是可选依赖，硬 import 会把 anthropic-only 的装法弄坏。
 顺带清掉的：`_BLOCK_TAGS`（死常量）、`permissions.json` / `sandbox.json` 没按 0600 存、
 `_web_cache` 无上限（TTL 只在读时检查，过期条目永远不清，存的是整页正文）。
 
+## 写文件之前要对版本（0.21.0）
+
+`feiyu/files.py` 的 `Watcher` 记住 agent **看过**的每个文件（mtime_ns + size + sha256），
+`read_file` 成功后记一次，`write_file` / `edit_file` 写完也记一次。
+`Toolbox._check_fresh()` 在两个写工具的最前面拦两种情况：
+
+- **没读过就要覆盖已有文件** —— 它多半是凭印象重写，会把不知道存在的内容删掉。
+- **读过之后文件变了** —— 用户在编辑器里改了、格式化工具改了、它自己用 `sed -i` 改了。
+  这条是**唯一会真的丢用户数据**的路径：`write_file` 整份覆盖，中间那些改动无声消失。
+  （`edit_file` 多半会因为 `old_str` 对不上而失败，但对不上是运气，不是保护。）
+
+几个刻意的选择：
+
+- **比对内容不只比 mtime**：`stale()` 先比 (mtime_ns, size)，一样就直接放行；不一样才去
+  算 sha256。格式化工具和 `git checkout` 回同一版本都会改 mtime 不改内容，
+  只看 mtime 的话每次跑完 `verify:` 都要重读一遍，纯属白花钱。
+- **新建文件不拦**：没有可丢的东西。目标不存在时 `_check_fresh` 直接返回 None。
+- **读不了的二进制不要求先读**：`read_file` 会拒绝它们，要求先读等于永远写不了。
+  这一条只对 `write_file` 生效，是权宜之计不是保护。
+- **Watcher 活在 `Toolbox` 里、只活在这次进程里**。`--resume` 回来是一张白纸，
+  它得重读一遍——这正是想要的，隔了一个会话的内容本来就不该信。
+- 报错措辞里要写明「可能是你自己用 bash 或钩子改的」。只说「用户改的」的话，
+  跑完 `verify: black .` 被拦下时它会一头雾水地反复重试。
+
+`edit_file` 同时补上的三件：`replace_all`（默认仍然要求唯一，匹配多处的报错里
+**要提到这个参数**，否则它只会去加上下文）、空 `old_str` 直接拒（`"".count()` 返回
+行数 +1，不拦的话报错会很莫名）、`old_str == new_str` 直接拒（白跑一轮还会触发 verify）。
+
+测试在 `tests/test_tools.py::TestFreshness`。`Base.write()` 多了个 `seen=` 参数：
+默认记进 Watcher（那些用例测的是编辑语义，不该被这道闸挡住），
+`seen=False` 才是「文件在那儿但 agent 没读过」。
+
 ## 已知问题（未修，用户知情）
 
+- ~~**写文件会盖掉用户在编辑器里的改动**~~ **0.21.0 已修**：`files.Watcher` + `_check_fresh`。
 - ~~**`bash` 工具没有沙箱**~~ **0.19.0 已修**：`sandbox.py` 用 bubblewrap 把写权限
   关进工作区。**但只有写是真隔离**，读仍然只靠挖空几个目录；没装 bwrap 的机器上
   自动降级成不沙箱（欢迎框会写明）。`cd` 越界弹回照旧只影响下一条命令的起点。
