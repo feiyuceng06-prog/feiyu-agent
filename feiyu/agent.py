@@ -204,20 +204,55 @@ class Feiyu:
             try:
                 # 中断/报错时也必须停掉 spinner 线程，否则它会继续往屏幕上糊帧
                 turn = self.backend.run_turn(on_text=stream.write)
+            except KeyboardInterrupt:
+                # 流到一半被打断，run_turn 没来得及把 assistant 写进历史
+                # 不补的话已经说出口的话丢掉，而且角色不再交替
+                self._note_interrupted(stream.text)
+                raise
             finally:
                 stream.finish()
 
+            if turn.truncated:
+                print(ui.warn("这一轮的输出撞上了长度上限，是半截的"))
+                print()
             if not turn.tool_calls:
                 self._maybe_compact()
                 return turn.text
 
             if stream.wrote_text:
                 print()
-            self.backend.add_tool_results(self._run_tools(turn.tool_calls))
+            outputs: list[ToolOutput] = []
+            try:
+                self._run_tools(turn.tool_calls, outputs)
+            finally:
+                # 每个 tool_use 都必须配一条结果，中断也不例外 少一条的话
+                # 历史里就留下没配对的调用，之后每次请求都会被接口 400 掉
+                self._fill_missing(turn.tool_calls, outputs)
+                self.backend.add_tool_results(outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
                 return self._stop_runaway(rounds)
             self._maybe_compact(mid_turn=True)
+
+    INTERRUPTED = (
+        "用户按 esc 打断了这次调用，它没有跑完，可能已经改了一部分东西 "
+        "不要自动重试，先说一句你停在哪儿，等用户给下一步 "
+    )
+
+    def _note_interrupted(self, said: str) -> None:
+        """把打断前已经说出口的话写回历史，保住角色交替 """
+        text = (said or "").strip()
+        self.backend.messages.append({
+            "role": "assistant",
+            "content": (text + "\n\n[用户在这里打断了]") if text else "[回答被用户打断]",
+        })
+
+    def _fill_missing(self, calls, outputs: list) -> None:
+        done = {o.id for o in outputs}
+        outputs.extend(
+            ToolOutput(id=c.id, content=self.INTERRUPTED, is_error=True)
+            for c in calls if c.id not in done
+        )
 
     # 放行 / 拒绝的三种结果：(是否放行, 是否从此全放, 给人看的短语, 给模型看的说明)
     _PASS = (True, False, "", "")
@@ -305,11 +340,16 @@ class Feiyu:
         return (False, False, "用户拒绝",
                 "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
 
-    def _run_tools(self, calls) -> list[ToolOutput]:
-        outputs = []
+    def _run_tools(self, calls, outputs: list[ToolOutput]) -> None:
+        """结果追加进 outputs 中断时调用方要靠它知道跑到哪一个了 """
         allow_all = False
         for call in calls:
             print(ui.tool_call(call.name, call.input), flush=True)
+            if call.error:
+                print(ui.tool_result("参数没解析出来", [], is_error=True))
+                print()
+                outputs.append(ToolOutput(id=call.id, content=call.error, is_error=True))
+                continue
             ok, always, label, reason = self._gate(call, allow_all)
             allow_all = allow_all or always
             if not ok:
@@ -324,4 +364,3 @@ class Feiyu:
             outputs.append(
                 ToolOutput(id=call.id, content=result.content, is_error=result.is_error)
             )
-        return outputs

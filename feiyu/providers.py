@@ -13,6 +13,13 @@ SUMMARY_PROMPT = (
 )
 
 
+def _field(block, name: str, default: str = ""):
+    """存盘恢复回来的 content block 是 dict，SDK 直出的是对象 两种都要能取值 """
+    if isinstance(block, dict):
+        return block.get(name, default)
+    return getattr(block, name, default)
+
+
 def _brief(value, limit: int = 200) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     text = " ".join(text.split())
@@ -24,12 +31,14 @@ class ToolCall:
     id: str
     name: str
     input: dict
+    error: str = ""      # 参数没解析出来时填这里，工具不会真的跑
 
 
 @dataclass
 class TurnResult:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    truncated: bool = False      # 撞上 max_tokens，这轮的输出是半截的
 
 
 @dataclass
@@ -123,14 +132,14 @@ class AnthropicBackend(Billing):
                 rows.append("%s：%s" % (msg["role"], content))
                 continue
             for block in content:
-                kind = block.get("type") if isinstance(block, dict) else getattr(block, "type", "")
+                kind = _field(block, "type")
                 if kind == "text":
-                    rows.append("assistant：" + (getattr(block, "text", "") or ""))
+                    rows.append("assistant：" + (_field(block, "text") or ""))
                 elif kind == "tool_use":
                     rows.append("assistant 调用 %s(%s)" % (
-                        getattr(block, "name", ""), _brief(getattr(block, "input", {}))))
+                        _field(block, "name"), _brief(_field(block, "input", {}))))
                 elif kind == "tool_result":
-                    rows.append("工具返回：" + _brief(block.get("content", "")))
+                    rows.append("工具返回：" + _brief(_field(block, "content")))
         return "\n".join(rows)
 
     def ask(self, prompt: str, max_tokens: int = 2000) -> str:
@@ -201,7 +210,8 @@ class AnthropicBackend(Billing):
         ]
         if response.stop_reason == "refusal" and not text:
             text = "[已拒绝继续处理该请求 ]"
-        return TurnResult(text=text, tool_calls=calls)
+        return TurnResult(text=text, tool_calls=calls,
+                          truncated=response.stop_reason == "max_tokens")
 
 
 class OpenAICompatBackend(Billing):
@@ -294,6 +304,7 @@ class OpenAICompatBackend(Billing):
         )
 
         text = ""
+        finish = ""
         pending: dict[int, dict] = {}
         for chunk in stream:
             # 带 usage 的那个收尾 chunk 没有 choices
@@ -309,6 +320,7 @@ class OpenAICompatBackend(Billing):
                 self._charge(hit, max(0, prompt - hit), usage.completion_tokens or 0)
             if not chunk.choices:
                 continue
+            finish = chunk.choices[0].finish_reason or finish
             delta = chunk.choices[0].delta
             if getattr(delta, "content", None):
                 on_text(delta.content)
@@ -336,11 +348,11 @@ class OpenAICompatBackend(Billing):
             ]
         self.messages.append(assistant)
 
-        calls = [
-            ToolCall(id=s["id"], name=s["name"], input=_parse_args(s["args"]))
-            for s in ordered
-        ]
-        return TurnResult(text=text, tool_calls=calls)
+        calls = []
+        for slot in ordered:
+            parsed, bad = _parse_args(slot["args"])
+            calls.append(ToolCall(id=slot["id"], name=slot["name"], input=parsed, error=bad))
+        return TurnResult(text=text, tool_calls=calls, truncated=finish == "length")
 
 
 def _to_openai_tools(schemas: list[dict]) -> list[dict]:
@@ -357,10 +369,19 @@ def _to_openai_tools(schemas: list[dict]) -> list[dict]:
     ]
 
 
-def _parse_args(raw: str) -> dict:
+def _parse_args(raw: str) -> tuple[dict, str]:
+    """返回 (参数, 出错说明) 解析不了时说明非空，调用方不要真的去跑这个工具
+
+    参数是流式拼起来的，撞上 max_tokens 就会断在 JSON 中间 直接当成空参数跑，
+    工具只会报一句 KeyError，模型不知道自己被截断了，多半原样重试一遍
+    """
     if not raw:
-        return {}
+        return {}, ""
     try:
-        return json.loads(raw)
+        return json.loads(raw), ""
     except json.JSONDecodeError:
-        return {}
+        return {}, (
+            "这次调用的参数不是完整的 JSON，多半是输出太长被截断了 "
+            "工具没有执行 重来一次，把内容拆成几次写，"
+            "或者改用 edit_file 只替换要改的那一段 "
+        )

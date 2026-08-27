@@ -39,6 +39,28 @@
 - `accept_handler` 必须 `return True`，否则 buffer 被 reset，scrollback 里留下空框。
 - 自定义 up/down 键要加 `filter=~has_completions`，不然补全菜单开着时选不动。
 
+## 测试（0.12.0 起）
+
+`tests/`，标准库 `unittest`，**不引测试框架**：
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+`tests/fakes.py` 提供 `FakeBackend`（按脚本逐轮返回，不打真实 API）和
+`unpaired(messages)`——**这个是主力断言**：返回历史里没配上结果的 `tool_use` id，
+非空就是接口会 400 的形状。
+
+写新用例时：
+
+- `permissions` / `keys` / `session` 的存储路径都是 **import 时算好的**，
+  测试里要换掉模块上的 `STORE` / `STATE` / `DIR`，不然会读写用户真正的密钥和规则。
+- `ui._COLOR` 按 `isatty` 定，测试里不是终端就一律不上色，
+  颜色相关的断言会**空转**——要断言宽度先把 `ui._COLOR` 设成 True。
+- agent 会往屏幕上画东西，用 `contextlib.redirect_stdout` 挡掉。
+- 改完跑一遍「回退验证」：`git stash push feiyu/` 之后再跑，
+  该失败的用例得真的失败，否则这条用例只是在描述现状，抓不住回归。
+
 ## 验证方式
 
 改了 TUI **不要只跑单元断言**，必须看真实渲染：
@@ -70,6 +92,9 @@
 - 存盘：每轮存一次到 `~/.local/state/feiyu/sessions/<workspace-hash>.json`（0600）。
   **anthropic 的 messages 里是 SDK 对象**，存之前要 `model_dump()` 摊平（`session._plain`）。
   恢复时系统提示重新拼，不用存盘里的那份。
+  **反过来也要认**：`transcript()` 里的 content block 恢复后是 dict、直出时是对象，
+  统一走 `providers._field()`。0.11.0 那版对 dict 用 `getattr` 取值，
+  `--resume` 之后压缩会拿到一份没有 assistant 文本、工具名全空的记录，摘要基本是废的。
 
 ## web_fetch
 
@@ -95,12 +120,20 @@ ods 还要处理 `number-columns-repeated`（连续空列会被压成一个单�
 1.5k 固定底噪，绝对数字既吓人又指导不了任何决定（用户两次因为这个来问）。
 没配价格就不显示金额，**不要拿 token 数冒充计费**，那会和左边的上下文重复。
 
-## 权限（0.10.0，照 Claude Code 的模型）
+## 权限（0.10.0，照 Claude Code 的模型；0.12.0 改成按段判定）
 
 `permissions.verdict(tool, args)` → allow / deny / ask，`_gate` 按这个走。
 规则语法跟 Claude Code 一致：`Bash(ls:*)` / `Bash(git status)` / `Read(*)`。
 存 `~/.config/feiyu/permissions.json`，**deny 优先**。确认时按 `[s]` 走
 `permissions.suggest()` 生成规则并写盘（git/npm 这类两段式命令会带上第二个词）。
+
+**bash 必须先 `segments()` 切段再判定**，每段都被 allow 命中才放行，任一段撞 deny 就整条拒。
+规则是前缀匹配的，不切段的话 `ls -la && rm -rf x` 会顺着 `Bash(ls:*)` 直接跑掉——
+0.11.0 及以前就是这个行为，`echo x && rm -rf ~` 一声不问。
+切在 `&&` `||` `;` `|` 和重定向处；`2>&1` 这类只接管描述符的先用 `_FD_DUP` 抹掉，
+`/dev/null` 当无害目标跳过，否则 `cmd > /dev/null 2>&1` 会天天问。
+`$(...)`/反引号（`_SUBSTITUTION`）一律降级成 ask，前缀匹配看不见里面藏了什么。
+引号里的元字符也会被切开，结果是多问一次——**只往这个方向错**。
 
 **出厂 allow 刻意不含 `cat`/`head`/`grep`** —— 它们能读工作区外任意文件，
 等于绕开 `_resolve` 的目录限制。加进去是用户的知情选择。
@@ -120,6 +153,39 @@ POSIX only。Windows 原生跑不了的四处：`install.sh`（bash）、`_tool_
 （`$?`/`pwd`/`exit $var` 是 POSIX sh）、`EscInterrupt`（termios，`os.name` 已判断所以是静默失效）、
 `ui.confirm`（guard 没启用时一律返回 "no"，**等于 confirm 模式在 Windows 上全拒**）。
 另外 `0o600` 在 Windows 上是空操作，密钥文件没保护。macOS 全部可用。
+
+## `main()` 有三条路径，公共装配要放在早退之前（0.12.0）
+
+`main()` 依次是：一次性任务（`args.prompt`）→ 管道（stdin 不是终端）→ 交互 TUI，
+前两条都是 `return`。**三条路径都要用的东西必须装在第一个 `return` 上面**。
+0.11.0 把 `agent.approve` 装在 TUI 那一段里，结果 `feiyu "改一下 x"` 的
+`self.approve` 一直是 None，`_gate` 走 `if self.approve else "no"`，
+**每个写操作都被当成「用户拒绝」**——README 里演示的一次性用法根本改不动文件。
+`ui.STYLE_NAMES` / `MODE_NAMES` / `MODEL_NAMES` 只喂补全，留在 TUI 段没问题。
+
+## 中断必须让历史保持自洽（0.12.0）
+
+`esc` 走 `EscInterrupt` 往主线程扔 KeyboardInterrupt，可能落在两个位置，两个都要接住：
+
+- **落在 `run_turn` 里**（模型正在流式输出）：assistant 消息还没进历史，
+  已经说出口的话会丢，角色也不再交替 → `_note_interrupted(stream.text)` 把
+  `ui.Stream.text` 攒下的原文补成一条 assistant。
+- **落在 `_run_tools` 里**（工具正在跑）：`tool_use` 已经在历史里但没有配对的结果 →
+  `_run_tools` 改成把结果 append 进调用方传进来的 list，`send()` 用 `finally` 调
+  `_fill_missing()` 给剩下的 call 补 `INTERRUPTED` 结果，再 `add_tool_results`。
+
+**少一条配对结果不是「下次凑合能跑」，是会话彻底废掉**：DeepSeek 实测直接 400
+`An assistant message with 'tool_calls' must be followed by tool messages...`，
+而且 `__main__` 的 `session.save` 在 `_run_turn` 吃掉 KeyboardInterrupt 之后照常执行，
+损坏状态会被写进存盘，`--resume` 再捞回来。用户只剩 `/clear` 一条路。
+
+## 截断要说出来（0.12.0）
+
+`TurnResult.truncated`：anthropic 看 `stop_reason == "max_tokens"`，
+openai 看 `finish_reason == "length"`，`send()` 里 `ui.warn` 提示一句。
+`_parse_args` 返回 `(参数, 出错说明)` 而不是静默的 `{}`——流式拼起来的 tool 参数撞上
+上限就断在 JSON 中间，当空参数跑下去只会报个 `KeyError`，模型不知道自己被截断了，
+多半原样重试。说明填进 `ToolCall.error`，`_run_tools` 见到就不执行、直接回错。
 
 ## 已知问题（未修，用户知情）
 

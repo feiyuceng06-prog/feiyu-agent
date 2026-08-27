@@ -50,6 +50,11 @@ def main() -> int:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
 
+    # 一次性任务也要能答应确认 装在早退分支后面的话 approve 一直是 None，
+    # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
+    # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
+    agent.approve = lambda name, args: ui.confirm("要执行 %s 吗？" % ui.tool_label(name))
+
     if args.prompt:
         _run_turn(agent, " ".join(args.prompt))
         return 0
@@ -59,7 +64,6 @@ def main() -> int:
     ui.STYLE_NAMES[:] = list(STYLES)
     ui.MODE_NAMES[:] = list(MODES)
     ui.MODEL_NAMES = lambda: list(keys.load())
-    agent.approve = lambda name, args: ui.confirm("要执行 %s 吗？" % ui.tool_label(name))
     ui.enter_screen()
     saved = session.load(workspace)
     resumed = bool(args.resume and saved and agent.restore(saved))

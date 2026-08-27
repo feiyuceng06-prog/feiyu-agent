@@ -58,6 +58,24 @@ DENY_PATHS = re.compile(
 
 _RULE = re.compile(r"^\s*(\w+)\s*\((.*)\)\s*$", re.S)
 
+# 规则是按前缀匹配的，所以一条命令必须先切成段，每段单独过规则
+# 不切的话 `ls -la && rm -rf x` 会顺着 Bash(ls:*) 一路放行（0.11.0 及以前就是这样）
+# 重定向也要切开：`echo x > ~/.bashrc` 里危险的是目标而不是 echo
+_FD_DUP = re.compile(r"\d?>&\d?|&>")          # 2>&1 这类只接管描述符，不碰文件
+_SEPARATOR = re.compile(r"&&|\|\||[;&|<>\n]")
+# 命令替换里能藏任何东西，前缀匹配看不见，一律降级成问一声
+_SUBSTITUTION = re.compile(r"\$\(|`|\$\{|<\(")
+# 唯一无害的重定向目标：写不进东西也读不出东西
+_HARMLESS = {"/dev/null"}
+
+
+def segments(command: str) -> list[str]:
+    """把一条 shell 命令切成若干段 引号里的元字符也会被切开，
+    结果是多问一声而不是多放行一条，宁可这个方向错 """
+    plain = _FD_DUP.sub(" ", command)
+    parts = (" ".join(p.split()) for p in _SEPARATOR.split(plain))
+    return [p for p in parts if p and p not in _HARMLESS]
+
 
 def load() -> dict:
     try:
@@ -116,14 +134,25 @@ def matches(rule: str, tool: str, text: str) -> bool:
 
 
 def verdict(tool: str, args: dict) -> str:
-    """返回 allow / deny / ask """
+    """返回 allow / deny / ask
+
+    bash 按段判定：任意一段撞上 deny 就拒，**每一段**都被 allow 命中才放行
+    """
     text = subject(tool, args)
-    if tool == "bash" and DENY_PATHS.search(text):
-        return "deny"
     rules = load()
-    if any(matches(r, tool, text) for r in rules["deny"]):
+    if tool != "bash":
+        if any(matches(r, tool, text) for r in rules["deny"]):
+            return "deny"
+        return "allow" if any(matches(r, tool, text) for r in rules["allow"]) else "ask"
+
+    if DENY_PATHS.search(text):
         return "deny"
-    if any(matches(r, tool, text) for r in rules["allow"]):
+    parts = segments(text)
+    if any(matches(r, "bash", part) for part in parts for r in rules["deny"]):
+        return "deny"
+    if not parts or _SUBSTITUTION.search(text):
+        return "ask"
+    if all(any(matches(r, "bash", part) for r in rules["allow"]) for part in parts):
         return "allow"
     return "ask"
 
@@ -133,7 +162,8 @@ def suggest(tool: str, args: dict) -> str:
     name = RULE_NAME.get(tool, tool)
     if tool != "bash":
         return "%s(*)" % name
-    words = (args.get("command") or "").split()
+    parts = segments(args.get("command") or "")
+    words = parts[0].split() if parts else []
     if not words:
         return "%s(*)" % name
     # git status / npm run 这类两段式命令，带上第二个词更准

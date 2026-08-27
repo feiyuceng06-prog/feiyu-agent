@@ -265,6 +265,7 @@ class Stream:
         self._word = ""
         self._limit = width()
         self.wrote_text = False
+        self.text = ""      # 中断时要靠它把已经说出口的话补回历史
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -275,6 +276,7 @@ class Stream:
         if not text:
             return
         self.wrote_text = True
+        self.text += text
         if not self._tty:
             sys.stdout.write(text)
             sys.stdout.flush()
