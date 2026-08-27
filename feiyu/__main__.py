@@ -1,10 +1,12 @@
 import argparse
+import contextlib
+import json
 import sys
 from pathlib import Path
 
-from . import keys, permissions, pricing, session, ui
+from . import keys, permissions, pricing, schema as schema_mod, session, trace, ui
 from . import __version__
-from .agent import CONTEXT_FILES, MODES, STYLES, Feiyu
+from .agent import CONTEXT_FILES, MODES, STYLES, Feiyu, find_score
 
 
 def main() -> int:
@@ -29,6 +31,17 @@ def main() -> int:
         help="启动时用 /key 清单里的哪一条（默认上次用的） ",
     )
     parser.add_argument(
+        "--json-schema",
+        metavar="文件",
+        default=None,
+        help="跑完按这个 JSON schema 输出结果 只有 JSON 进 stdout，其余进 stderr ",
+    )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="跑完再开一个只看产出的模型给改动打分 ",
+    )
+    parser.add_argument(
         "prompt",
         nargs="*",
         help="直接跑一个任务，跑完就退出 ",
@@ -44,11 +57,23 @@ def main() -> int:
     if args.model and args.model not in keys.load():
         print(f"错误：/key 清单里没有 {args.model}", file=sys.stderr)
         return 2
+    spec = None
+    if args.json_schema:
+        try:
+            spec = schema_mod.load(args.json_schema)
+        except (OSError, ValueError) as exc:
+            print(f"错误：读不了 schema —— {exc}", file=sys.stderr)
+            return 2
+
+    tracer = trace.Trace(workspace)
     try:
-        agent = Feiyu(workspace, model=chosen)
+        agent = Feiyu(workspace, model=chosen, trace=tracer)
     except (ValueError, RuntimeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
+    tracer.write("run_start", version=__version__, model=agent.model,
+                 name=agent.name, mode=agent.mode, verify=agent.verify or None,
+                 task=" ".join(args.prompt) if args.prompt else None)
 
     # 一次性任务也要能答应确认 装在早退分支后面的话 approve 一直是 None，
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
@@ -56,10 +81,24 @@ def main() -> int:
     agent.approve = lambda name, args: ui.confirm("要执行 %s 吗？" % ui.tool_label(name))
 
     if args.prompt:
-        _run_turn(agent, " ".join(args.prompt))
-        return 0
+        task = " ".join(args.prompt)
+        if spec is None:
+            _run_turn(agent, task)
+            _print_review(agent, task, args.review)
+            return _finish(agent, tracer, 0)
+        # schema 模式下 stdout 只能有 JSON，人看的东西整体挪到 stderr
+        with contextlib.redirect_stdout(sys.stderr):
+            _run_turn(agent, task)
+            _print_review(agent, task, args.review)
+            value, problems = agent.finish_json(spec)
+        if problems:
+            print("错误：输出不满足 schema\n  " + "\n  ".join(problems), file=sys.stderr)
+            return _finish(agent, tracer, 1)
+        json.dump(value, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return _finish(agent, tracer, 0)
     if not sys.stdin.isatty():
-        return _piped(agent)
+        return _finish(agent, tracer, _piped(agent))
 
     ui.STYLE_NAMES[:] = list(STYLES)
     ui.MODE_NAMES[:] = list(MODES)
@@ -106,14 +145,14 @@ def main() -> int:
         except KeyboardInterrupt:
             continue
         except EOFError:
-            return 0
+            return _finish(agent, tracer, 0)
         if not text:
             continue
         if text.startswith("/"):
             cmd, _, arg = text.partition(" ")
             arg = arg.strip()
             if cmd == "/exit":
-                return 0
+                return _finish(agent, tracer, 0)
             if cmd == "/help":
                 print(_help())
             elif cmd == "/clear":
@@ -134,6 +173,12 @@ def main() -> int:
                 print(_allow(arg))
             elif cmd == "/style":
                 print(_style(agent, arg))
+            elif cmd == "/verify":
+                print(_verify(agent, arg))
+            elif cmd == "/review":
+                print(_review(agent, arg))
+            elif cmd == "/cost":
+                print(_cost(agent, workspace))
             else:
                 print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
             print()
@@ -325,10 +370,91 @@ def _style(agent: Feiyu, arg: str) -> str:
 def _help() -> str:
     rows = [ui.notice("命令")]
     for cmd, desc in ui.SLASH.items():
-        rows.append("    " + ui.bold(cmd.ljust(8)) + ui.paint("grey", desc))
+        # 最长的命令 /compact / /context 正好 8 个字符，ljust(8) 会让名字和说明贴在一起
+        rows.append("    " + ui.bold(cmd.ljust(10)) + ui.paint("grey", desc))
     rows.append("")
     rows.append(ui.notice("按键    ⏎ 发送 · \\⏎ 换行 · shift+tab 切模式 · esc 中断当前回答 · ctrl-d 退出"))
     rows.append(ui.notice("版本    feiyu " + __version__))
+    return "\n".join(rows)
+
+
+def _finish(agent: Feiyu, tracer, code: int) -> int:
+    tracer.write("run_end", code=code, tokens=agent.tokens, cost=agent.cost,
+                 touched=agent.touched or None, verified=agent.verified_ok)
+    return code
+
+
+def _print_review(agent: Feiyu, task: str, wanted: bool) -> None:
+    if not wanted:
+        return
+    print(ui.notice("让一个没看过过程的模型给这次改动打分…"))
+    verdict = agent.review(task)
+    if not verdict:
+        print(ui.warn("没有可评的改动"))
+        return
+    print()
+    print(_review_body(verdict))
+
+
+def _review_body(verdict: str) -> str:
+    score = find_score(verdict)
+    rows = ["\n".join("  " + ui.paint("grey", line) for line in verdict.split("\n"))]
+    if score is not None:
+        # 调色板里没有绿色，也别为这一处新加一个——blue 在这套配色里就是"没问题"
+        color = "blue" if score >= 8 else ("amber" if score >= 6 else "red")
+        rows += ["", "  " + ui.paint(color, "评分 %g / 10" % score)]
+    return "\n".join(rows)
+
+
+def _review(agent: Feiyu, arg: str) -> str:
+    if not agent.ready:
+        return ui.error("还没有模型")
+    print(ui.notice("让一个没看过过程的模型给这次改动打分…"))
+    verdict = agent.review(arg or "（沿用这次对话里的任务）")
+    if not verdict:
+        return ui.warn("没有可评的改动 有 git 的话看的是 git diff HEAD，"
+                       "没有就看这次改过的文件")
+    return _review_body(verdict)
+
+
+def _verify(agent: Feiyu, arg: str) -> str:
+    if arg in ("off", "关"):
+        agent.verify = ""
+        return ui.notice("已关掉自动校验")
+    if arg:
+        agent.verify = arg
+        return ui.notice("改完代码会自动跑：" + arg)
+    if not agent.verify:
+        return ui.notice(
+            "没有配校验命令 在 %s 里单起一行写 `verify: npm test`，"
+            "或者 /verify <命令> 临时设一个 改完代码就会自动跑，不过就把报错交给它自己修 "
+            % (agent.context_file or "、".join(CONTEXT_FILES)))
+    state = {True: "上次通过", False: "上次没过", None: "还没跑过"}[agent.verified_ok]
+    return ui.notice("当前校验命令：%s（%s） /verify off 关掉" % (agent.verify, state))
+
+
+def _cost(agent: Feiyu, workspace) -> str:
+    runs = trace.summarize(trace.read(days=7, workspace=str(workspace)))
+    if not runs:
+        return ui.notice("最近七天这个目录没有记录 日志在 " + trace.DIR)
+    rows = [ui.notice("最近七天 · 这个目录 · 按任务")]
+    total_tokens = total_cost = 0.0
+    priced = False
+    import time as _time
+    for run in sorted(runs.values(), key=lambda r: r["start"])[-10:]:
+        when = _time.strftime("%m-%d %H:%M", _time.localtime(run["start"]))
+        money = pricing.yuan(run["cost"]) if run["priced"] else "—"
+        task = ui.clip(run["task"] or "（交互）", 34)
+        rows.append("   " + ui.paint("grey", "%s  %-36s %5s轮 %7s %9s" % (
+            when, task, run["turns"], ui.tokens(run["tokens"]), money)))
+        total_tokens += run["tokens"]
+        total_cost += run["cost"]
+        priced = priced or run["priced"]
+    rows += ["", "   " + ui.bold("合计  %s  %s" % (
+        ui.tokens(int(total_tokens)), pricing.yuan(total_cost) if priced else "未配价格"))]
+    if agent.ready and agent.tokens:
+        rows.append("   " + ui.paint("grey", "本次会话 %s" % ui.tokens(agent.tokens)))
+    rows += ["", ui.notice("完整日志 %s · FEIYU_NO_LOG=1 可以关掉记录" % trace.DIR)]
     return "\n".join(rows)
 
 

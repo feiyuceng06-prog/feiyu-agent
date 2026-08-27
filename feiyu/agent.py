@@ -1,9 +1,14 @@
+import difflib
+import re
+import subprocess
+import time
 from pathlib import Path
 
 from . import ui
-from . import keys, permissions
+from . import keys, permissions, schema as schema_mod
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
+from .trace import Trace
 
 SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编程 agent 你帮用户\
 开发、调试、重构和理解代码 
@@ -37,6 +42,26 @@ MAX_ROUNDS = 25
 CONTEXT_FILES = ("FEIYU.md", "AGENTS.md", "CLAUDE.md")
 MAX_CONTEXT_CHARS = 8000
 
+# 约定文件里单起一行的 `verify: <命令>`，改完代码自动跑它
+# 要求顶格且整行只有这一句，免得正文里随口提一嘴 verify 就被当成配置
+VERIFY_LINE = re.compile(r"^verify:[ \t]*`?([^`\n]+?)`?[ \t]*$", re.M | re.I)
+# 校验输出回灌给模型时截多长 报错通常在头尾，中间的堆栈没那么重要
+VERIFY_MAX_CHARS = 4000
+VERIFY_TIMEOUT = 300
+
+
+SCORE_LINE = re.compile(r"评分[:：]\s*(\d+(?:\.\d+)?)\s*/\s*10")
+
+
+def find_score(text: str) -> float | None:
+    hit = SCORE_LINE.search(text or "")
+    return float(hit.group(1)) if hit else None
+
+
+def find_verify(text: str) -> str:
+    hit = VERIFY_LINE.search(text or "")
+    return hit.group(1).strip() if hit else ""
+
 
 def load_project_context(workspace: Path) -> tuple[str, str]:
     """返回 (文件名, 内容)，找不到返回两个空串 """
@@ -64,6 +89,9 @@ MODE_ORDER = ("default", "auto", "readonly")
 GUARDED = {"bash", "write_file", "edit_file", "web_fetch"}
 # readonly 模式下直接拒绝的 web_fetch 不改任何东西，所以只读模式放行
 WRITES = {"bash", "write_file", "edit_file"}
+# 跑完这两个才触发自动校验 bash 也能改文件（sed -i），但把它算进来的话
+# 每次 ls / git status 之后都要跑一遍测试，代价远大于收益
+VERIFY_AFTER = {"write_file", "edit_file"}
 
 
 # 不告诉它跑在什么模型上的话，被问起来它会自己编一个（实测 deepseek 会说自己是 Claude）
@@ -91,10 +119,30 @@ STYLES = {
     ),
 }
 
+REVIEW_PROMPT = """你是独立的验收人 下面是一个编程 agent 接到的任务和它最后交出的改动 \
+你**没有**参与过这个任务，也看不到它的思考过程——这是故意的，你只看产出 
+
+按这几点给结论：
+1. 任务要求的事情做到了没有 有没有漏掉的部分 
+2. 改动本身有没有 bug、有没有破坏原有行为 
+3. 有没有做任务没要求的事（多加的功能、多写的抽象、没必要的重构）
+
+最后单起一行给一个 0-10 的总分，写成 `评分: N/10` 8 分以上表示可以交付 
+挑毛病要具体到文件和行为，别写"建议进一步完善"这种空话 没问题就直说没问题 """
+
+# 评分 agent 看到的产出：优先 git diff，没有版本库就退回列改过的文件
+REVIEW_MAX_CHARS = 40_000
+
+
 class Feiyu:
-    def __init__(self, workspace: Path, *, model: str = ""):
+    def __init__(self, workspace: Path, *, model: str = "", trace: Trace | None = None):
         self.toolbox = Toolbox(workspace, ask_model=self._ask_model)
         self.context_file, self.context_text = load_project_context(workspace)
+        self.trace = trace or Trace(workspace, enabled=False)
+        self.verify = find_verify(self.context_text)
+        self.verified_ok = None      # 最近一次校验过没有：True/False/None（没跑过）
+        self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
+        self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
         self.mode = "default"
         self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
@@ -130,6 +178,7 @@ class Feiyu:
 
     def reload_context(self) -> None:
         self.context_file, self.context_text = load_project_context(self.toolbox.root)
+        self.verify = find_verify(self.context_text)
         self._refresh_system()
 
     @property
@@ -207,11 +256,15 @@ class Feiyu:
             except KeyboardInterrupt:
                 # 流到一半被打断，run_turn 没来得及把 assistant 写进历史
                 # 不补的话已经说出口的话丢掉，而且角色不再交替
+                self.trace.write("interrupt", where="stream")
                 self._note_interrupted(stream.text)
                 raise
             finally:
                 stream.finish()
 
+            self.trace.write("turn", round=rounds, tokens=self.context,
+                             cost=self.cost, truncated=turn.truncated or None,
+                             calls=[c.name for c in turn.tool_calls] or None)
             if turn.truncated:
                 print(ui.warn("这一轮的输出撞上了长度上限，是半截的"))
                 print()
@@ -222,12 +275,15 @@ class Feiyu:
             if stream.wrote_text:
                 print()
             outputs: list[ToolOutput] = []
+            changed = False
             try:
-                self._run_tools(turn.tool_calls, outputs)
+                changed = self._run_tools(turn.tool_calls, outputs)
             finally:
                 # 每个 tool_use 都必须配一条结果，中断也不例外 少一条的话
                 # 历史里就留下没配对的调用，之后每次请求都会被接口 400 掉
                 self._fill_missing(turn.tool_calls, outputs)
+                if changed:
+                    self._append_verify(outputs)
                 self.backend.add_tool_results(outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
@@ -287,6 +343,87 @@ class Feiyu:
         self.backend.tokens_context = 0
         return summary
 
+    def changes(self) -> str:
+        """这次运行的最终产出 有 git 就拿 diff，没有就把改过的文件读出来 """
+        try:
+            done = subprocess.run(
+                ["git", "diff", "HEAD"], cwd=self.toolbox.root,
+                capture_output=True, text=True, timeout=30,
+            )
+            if done.returncode == 0 and done.stdout.strip():
+                return done.stdout[:REVIEW_MAX_CHARS]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if not self.touched:
+            return ""
+        parts = []
+        for path in self.touched:
+            try:
+                after = self._resolve_text(path)
+            except (OSError, ValueError) as exc:
+                parts.append("===== %s =====\n（读不出来：%s）" % (path, exc))
+                continue
+            before = self.before.get(path, "")
+            diff = "".join(difflib.unified_diff(
+                before.splitlines(keepends=True), after.splitlines(keepends=True),
+                fromfile=path + "（改动前）", tofile=path + "（改动后）"))
+            parts.append(diff or "===== %s =====\n（内容没变）" % path)
+        return "\n\n".join(parts)[:REVIEW_MAX_CHARS]
+
+    def review(self, task: str) -> str:
+        """开一个只看产出的模型给这次改动打分
+
+        **必须是全新的后端实例**：复用 self.backend 的话它带着整段对话历史，
+        等于让它自己批改自己的作业，分数没有参考价值
+        """
+        if self.backend is None:
+            return ""
+        body = self.changes()
+        if not body.strip():
+            return ""
+        entry = keys.load().get(self.name)
+        if entry is None:
+            return ""
+        judge = build_backend(entry, system=REVIEW_PROMPT, tools=[])
+        prompt = "%s\n\n===== 任务 =====\n%s\n\n===== 交出的改动 =====\n%s" % (
+            REVIEW_PROMPT, task or "（没有记录任务描述）", body)
+        try:
+            verdict = (judge.ask(prompt, max_tokens=4000) or "").strip()
+        except Exception as exc:
+            return "评分没跑成：%s" % exc
+        self.trace.write("review", score=find_score(verdict), chars=len(body))
+        return verdict
+
+    def finish_json(self, spec: dict) -> tuple[object, list[str]]:
+        """任务做完后再要一轮，让它按 schema 吐 JSON 返回 (值, 问题列表)
+
+        单起一轮不带工具的请求，而不是一开始就要求它边干活边想着输出格式——
+        后者会让它在整个任务里都分心去凑格式
+        """
+        if self.backend is None:
+            return None, ["还没有可用的模型"]
+        self.backend.add_user_message(schema_mod.describe(spec))
+        for attempt in range(schema_mod.MAX_REPAIR + 1):
+            stream = ui.Stream()
+            stream.start()
+            try:
+                turn = self.backend.run_turn(on_text=stream.write)
+            finally:
+                stream.finish()
+            value, bad = schema_mod.extract(turn.text)
+            problems = [bad] if bad else schema_mod.validate(value, spec)
+            self.trace.write("json", attempt=attempt, ok=not problems,
+                             problems=problems or None)
+            if not problems:
+                return value, []
+            if attempt == schema_mod.MAX_REPAIR:
+                return value, problems
+            print(ui.warn("输出不合 schema，让它重出一次：%s" % "；".join(problems[:3])))
+            self.backend.add_user_message(
+                "刚才那份输出不满足 schema：\n- %s\n\n重新只输出一个合规的 JSON 对象，"
+                "不要解释 " % "\n- ".join(problems))
+        return None, ["重试了 %d 次仍然不合 schema" % schema_mod.MAX_REPAIR]
+
     def _stop_runaway(self, rounds: int) -> str:
         """连续调了太多轮工具还没收敛，收手 历史补一条 assistant 让角色保持交替 """
         note = (
@@ -340,14 +477,19 @@ class Feiyu:
         return (False, False, "用户拒绝",
                 "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
 
-    def _run_tools(self, calls, outputs: list[ToolOutput]) -> None:
-        """结果追加进 outputs 中断时调用方要靠它知道跑到哪一个了 """
+    def _run_tools(self, calls, outputs: list[ToolOutput]) -> bool:
+        """结果追加进 outputs 中断时调用方要靠它知道跑到哪一个了
+
+        返回这一批里有没有真的改到代码——改了才值得跑校验
+        """
         allow_all = False
+        changed = False
         for call in calls:
             print(ui.tool_call(call.name, call.input), flush=True)
             if call.error:
                 print(ui.tool_result("参数没解析出来", [], is_error=True))
                 print()
+                self.trace.write("tool", name=call.name, ok=False, why="参数没解析出来")
                 outputs.append(ToolOutput(id=call.id, content=call.error, is_error=True))
                 continue
             ok, always, label, reason = self._gate(call, allow_all)
@@ -355,12 +497,90 @@ class Feiyu:
             if not ok:
                 print(ui.tool_result(label, [], is_error=True))
                 print()
+                self.trace.write("tool", name=call.name, args=call.input,
+                                 ok=False, why=label)
                 outputs.append(ToolOutput(id=call.id, content=reason, is_error=True))
                 continue
+            if call.name in VERIFY_AFTER:
+                self._snapshot(call)
+            began = time.monotonic()
             result = self.toolbox.run(call.name, call.input)
             summary = result.summary or result.content.splitlines()[0][:80]
             print(ui.tool_result(summary, result.detail, is_error=result.is_error))
             print()
+            self.trace.write("tool", name=call.name, args=call.input,
+                             ok=not result.is_error, summary=summary,
+                             ms=round((time.monotonic() - began) * 1000))
+            if not result.is_error and call.name in VERIFY_AFTER:
+                changed = True
+                self._remember_touched(call)
             outputs.append(
                 ToolOutput(id=call.id, content=result.content, is_error=result.is_error)
             )
+        return changed
+
+    def _remember_touched(self, call) -> None:
+        """记下改过哪些文件 /review 拿它当"最终产出"的清单 """
+        path = call.input.get("path")
+        if path and path not in self.touched:
+            self.touched.append(path)
+
+    def _snapshot(self, call) -> None:
+        """动手之前存一份原样 没有 git 的工作区靠它算出真正的 diff
+
+        不存的话 changes() 只能把改完的整个文件交出去，评分的模型看不到
+        改动前是什么样，会把"文件本来就只有一个函数"读成"它把别的都删了"——
+        实测踩过，评分因此被判到 4/10
+        """
+        path = call.input.get("path")
+        if not path or path in self.before:
+            return
+        try:
+            self.before[path] = self._resolve_text(path)
+        except (OSError, ValueError):
+            self.before[path] = ""
+
+    def _resolve_text(self, path: str) -> str:
+        target = self.toolbox._resolve(path)
+        return target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+
+    def _append_verify(self, outputs: list[ToolOutput]) -> None:
+        """改完代码就跑一遍校验命令，结果并进最后一条工具结果
+
+        挂在工具结果里而不是另起一条 user 消息：两种后端的消息结构不通用，
+        而 tool_result 是唯一两边都能安全追加内容的地方
+        """
+        if not self.verify or not outputs:
+            return
+        print(ui.notice("跑一遍校验：%s" % self.verify))
+        began = time.monotonic()
+        try:
+            done = subprocess.run(
+                self.verify, shell=True, cwd=self.toolbox.root,
+                capture_output=True, text=True, timeout=VERIFY_TIMEOUT,
+            )
+            code, out = done.returncode, (done.stdout or "") + (done.stderr or "")
+        except subprocess.TimeoutExpired:
+            code, out = -1, "校验命令超过 %d 秒还没结束" % VERIFY_TIMEOUT
+        except OSError as exc:
+            code, out = -1, "校验命令跑不起来：%s" % exc
+        ms = round((time.monotonic() - began) * 1000)
+        self.trace.write("verify", command=self.verify, code=code, ms=ms)
+        self.verified_ok = code == 0
+        if code == 0:
+            print(ui.notice("校验通过（%.1fs）" % (ms / 1000)))
+            print()
+            return
+        print(ui.warn("校验没过，退出码 %d 已经把报错交给它自己修" % code))
+        print()
+        tail = out if len(out) <= VERIFY_MAX_CHARS else out[:VERIFY_MAX_CHARS // 2] + \
+            "\n\n…（中间省略）…\n\n" + out[-VERIFY_MAX_CHARS // 2:]
+        last = outputs[-1]
+        outputs[-1] = ToolOutput(
+            id=last.id,
+            content=last.content + (
+                "\n\n---\n\n改动之后自动跑了校验命令 `%s`，**没有通过**（退出码 %d）"
+                "先把它修好再往下做，别绕过去 输出如下：\n\n%s" % (self.verify, code, tail)
+            ),
+            is_error=True,
+        )

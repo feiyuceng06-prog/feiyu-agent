@@ -318,3 +318,174 @@ class TestModes(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVerifyConfig(unittest.TestCase):
+    def test_单起一行才算配置(self):
+        self.assertEqual(agent_mod.find_verify("# 项目\n\nverify: npm test\n\n别的"), "npm test")
+
+    def test_剥掉反引号(self):
+        self.assertEqual(agent_mod.find_verify("verify: `pytest -q`"), "pytest -q")
+
+    def test_行中间提一嘴不算(self):
+        # 正文里随口说到 verify: 不该被当成配置
+        self.assertEqual(agent_mod.find_verify("我们用 verify: 这个词表示校验"), "")
+
+    def test_大小写不敏感(self):
+        self.assertEqual(agent_mod.find_verify("Verify: make check"), "make check")
+
+    def test_没配就是空串(self):
+        self.assertEqual(agent_mod.find_verify("什么都没有"), "")
+        self.assertEqual(agent_mod.find_verify(""), "")
+
+    def test_从约定文件里读出来(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "FEIYU.md").write_text("verify: make test\n", encoding="utf-8")
+            self.assertEqual(Feiyu(Path(tmp)).verify, "make test")
+
+
+class TestVerifyLoop(Base):
+    def setUp(self):
+        super().setUp()
+        self.use([("", [call("c1", "write_file", path="a.py", content="x")]), ("好了", [])])
+        self.tools_ok()
+
+    def test_只有写文件才触发(self):
+        # bash 也能改文件，但每次 ls / git status 后都跑测试代价太大
+        self.assertIn("write_file", agent_mod.VERIFY_AFTER)
+        self.assertIn("edit_file", agent_mod.VERIFY_AFTER)
+        self.assertNotIn("bash", agent_mod.VERIFY_AFTER)
+
+    def test_通过时不打扰模型(self):
+        b = self.agent.backend
+        self.agent.verify = "true"
+        quiet(self.agent.send, "写个文件")
+        self.assertTrue(self.agent.verified_ok)
+        self.assertNotIn("没有通过", self.tool_results(b)[0])
+
+    def test_没过就把报错回灌(self):
+        b = self.agent.backend
+        self.agent.verify = "echo 三个测试挂了 >&2; exit 1"
+        quiet(self.agent.send, "写个文件")
+        self.assertFalse(self.agent.verified_ok)
+        result = self.tool_results(b)[0]
+        self.assertIn("没有通过", result)
+        self.assertIn("三个测试挂了", result)
+
+    def test_没过的结果标成错误(self):
+        b = self.agent.backend
+        self.agent.verify = "exit 1"
+        quiet(self.agent.send, "写个文件")
+        self.assertTrue(b.messages[-2]["content"].startswith("错误")
+                        or "没有通过" in self.tool_results(b)[0])
+
+    def test_回灌之后历史仍然配对(self):
+        b = self.agent.backend
+        self.agent.verify = "exit 1"
+        quiet(self.agent.send, "写个文件")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_没配就不跑(self):
+        self.agent.verify = ""
+        quiet(self.agent.send, "写个文件")
+        self.assertIsNone(self.agent.verified_ok)
+
+    def test_命令跑不起来也不崩(self):
+        self.agent.verify = "绝对没有这个命令 --xyz"
+        quiet(self.agent.send, "写个文件")
+        self.assertFalse(self.agent.verified_ok)
+
+    def test_只读工具不触发(self):
+        self.use([("", [call("c1", "read_file", path="a.py")]), ("好了", [])])
+        self.tools_ok()
+        self.agent.verify = "exit 1"
+        quiet(self.agent.send, "读个文件")
+        self.assertIsNone(self.agent.verified_ok)
+
+    def test_被拒的写不触发(self):
+        self.agent.mode = "default"
+        self.agent.approve = lambda n, a: "no"
+        self.agent.verify = "exit 1"
+        quiet(self.agent.send, "写个文件")
+        self.assertIsNone(self.agent.verified_ok)
+
+
+class TestReviewHelpers(Base):
+    def test_评分能认出来(self):
+        self.assertEqual(agent_mod.find_score("结论如下\n\n评分: 8/10"), 8.0)
+        self.assertEqual(agent_mod.find_score("评分：9.5/10"), 9.5)
+        self.assertIsNone(agent_mod.find_score("还行吧"))
+
+    def test_没有改动就不评(self):
+        self.use([])
+        self.assertEqual(self.agent.review("任务"), "")
+
+    def test_没有_git_时算出真的_diff(self):
+        # 只给改完的整份文件，评分的模型看不到改动前的样子，
+        # 会把"这文件本来就只有一个函数"读成"它把别的都删了"（实测踩过）
+        (Path(self.tmp.name) / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+        self.agent.touched = ["a.py"]
+        self.agent.before = {"a.py": "x = 0\ny = 2\n"}
+        body = self.agent.changes()
+        self.assertIn("-x = 0", body)
+        self.assertIn("+x = 1", body)
+        self.assertNotIn("-y = 2", body)        # 没动的行不该出现在减号里
+
+    def test_新建的文件整份都是新增(self):
+        (Path(self.tmp.name) / "新.py").write_text("a\n", encoding="utf-8")
+        self.agent.touched = ["新.py"]
+        self.agent.before = {"新.py": ""}
+        self.assertIn("+a", self.agent.changes())
+
+    def test_读不出来的文件不崩(self):
+        self.agent.touched = ["没有这个.py"]
+        self.assertIn("没有这个.py", self.agent.changes())
+
+    def test_动手前会存一份原样(self):
+        (Path(self.tmp.name) / "a.py").write_text("原来的\n", encoding="utf-8")
+        self.use([("", [call("c1", "edit_file", path="a.py",
+                             old_str="原来的", new_str="改过的")]), ("好", [])])
+        self.tools_ok()
+        quiet(self.agent.send, "改一下")
+        self.assertEqual(self.agent.before["a.py"], "原来的\n")
+
+    def test_写文件会记进改动清单(self):
+        self.use([("", [call("c1", "write_file", path="a.py", content="x")]), ("好", [])])
+        self.tools_ok()
+        quiet(self.agent.send, "写个文件")
+        self.assertEqual(self.agent.touched, ["a.py"])
+
+    def test_同一个文件不重复记(self):
+        self.use([("", [call("c1", "write_file", path="a.py", content="x"),
+                        call("c2", "edit_file", path="a.py", old_str="x", new_str="y")]),
+                  ("好", [])])
+        self.tools_ok()
+        quiet(self.agent.send, "改两次")
+        self.assertEqual(self.agent.touched, ["a.py"])
+
+
+class TestFinishJson(Base):
+    SPEC = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+
+    def test_一次就对(self):
+        self.use([('{"ok": true}', [])])
+        self.assertEqual(quiet(self.agent.finish_json, self.SPEC), ({"ok": True}, []))
+
+    def test_裹了代码块也认(self):
+        self.use([('```json\n{"ok": false}\n```', [])])
+        self.assertEqual(quiet(self.agent.finish_json, self.SPEC)[0], {"ok": False})
+
+    def test_不合规会让它重出(self):
+        b = self.use([('{"ok": "yes"}', []), ('{"ok": true}', [])])
+        value, problems = quiet(self.agent.finish_json, self.SPEC)
+        self.assertEqual(value, {"ok": True})
+        self.assertEqual(problems, [])
+
+    def test_一直不合规就报出问题(self):
+        self.use([('{"不对": 1}', [])] * (4))
+        value, problems = quiet(self.agent.finish_json, self.SPEC)
+        self.assertTrue(problems)
+
+    def test_没有模型时报错(self):
+        self.agent.backend = None
+        self.assertTrue(quiet(self.agent.finish_json, self.SPEC)[1])

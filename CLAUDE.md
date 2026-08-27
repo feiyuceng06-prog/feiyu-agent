@@ -1,6 +1,8 @@
 # Feiyu Agent — 给 Claude 的项目约定
 
-跑在终端里的编程 agent。约 1400 行 Python，无框架。
+跑在终端里的编程 agent。约 3200 行 Python，无框架。
+
+verify: python -m unittest discover -s tests -t .
 
 ## 结构
 
@@ -15,6 +17,8 @@
 | `feiyu/ui.py` | **所有给人看的输出**：配色、框、流式渲染、输入区 |
 | `feiyu/pricing.py` | 花费换算，只有两个函数 |
 | `feiyu/session.py` | 会话存盘 / 恢复 |
+| `feiyu/trace.py` | 结构化日志（JSONL）与按任务的花费汇总 |
+| `feiyu/schema.py` | 结构化输出：抠 JSON + 最小 schema 校验 |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -186,6 +190,53 @@ openai 看 `finish_reason == "length"`，`send()` 里 `ui.warn` 提示一句。
 `_parse_args` 返回 `(参数, 出错说明)` 而不是静默的 `{}`——流式拼起来的 tool 参数撞上
 上限就断在 JSON 中间，当空参数跑下去只会报个 `KeyError`，模型不知道自己被截断了，
 多半原样重试。说明填进 `ToolCall.error`，`_run_tools` 见到就不执行、直接回错。
+
+## 可观测性（0.13.0）
+
+`trace.Trace` 每件事写一行 JSONL 到 `~/.local/state/feiyu/logs/<日期>.jsonl`，**0600**
+（里面有命令原文和文件路径）。按天分文件、每行带 `run` id：查"刚才为什么干了怪事"
+按 run 过滤，算"这周花了多少"按天汇总。`kind` 有 run_start / turn / tool / verify /
+review / json / interrupt / run_end。`/cost` 按 run 汇总——**一次运行就是一个任务**，
+这是能对上"这次干活花了多少"的粒度。
+
+**写日志绝不能弄崩主流程**：`Trace.write` 把所有异常咽掉。`FEIYU_NO_LOG=1` 关掉。
+参数值截到 300 字（`MAX_VALUE`），不记文件内容——排查要的是"调了什么"。
+
+## 自动校验（0.13.0）
+
+约定文件里单起一行 `verify: <命令>`（`VERIFY_LINE`，要求顶格且整行只有这一句，
+免得正文里提一嘴 verify 就被当配置）。`/verify` 可以临时改或关掉。
+
+**只有 `write_file` / `edit_file` 触发**（`VERIFY_AFTER`）。bash 也能改文件（`sed -i`），
+但把它算进来的话每次 `ls` / `git status` 之后都要跑一遍测试——实测就是这样，
+一个任务里跑了两遍。代价远大于收益。
+
+没通过时把报错**并进最后一条 tool_result**，不另起 user 消息：两种后端的消息结构
+不通用，tool_result 是唯一两边都能安全追加内容的地方，而且不会破坏配对。
+
+## 评分 agent（0.13.0）
+
+`/review` 或 `--review`。**必须 `build_backend` 建全新实例**，复用 `self.backend`
+等于让它带着整段对话自己批改自己的作业。
+
+`changes()` 优先 `git diff HEAD`，没有版本库就用 `self.before`（动手前存的原样）
+和当前内容算 `difflib.unified_diff`。**不要退回"把改完的整份文件交出去"**——
+评分的模型看不到改动前的样子，会把"这文件本来就只有一个函数"读成"它把别的都删了"。
+实测同一个改动：给整份文件评 4/10，给真 diff 评 10/10。
+
+## 结构化输出（0.13.0）
+
+`--json-schema <文件>`：任务跑完**单起一轮不带工具的请求**让它按 schema 吐 JSON
+（不是一开始就要求它边干活边凑格式，那会让它整个任务都分心）。不合规最多重来
+`MAX_REPAIR` 次，把具体问题回给它。
+
+`schema.py` 只实现 type / required / properties / items / enum / additionalProperties，
+**不引 jsonschema**。注意 `True` 是 `int` 的子类，schema 写 integer 时要单独挡掉 bool。
+`extract()` 要剥 ```json 代码块和"好的，结果如下"这类前言。
+
+**stdout 只能有 JSON**：用 `contextlib.redirect_stdout(sys.stderr)` 包住整个跑任务
+的过程，最后往真 stdout 写 JSON。比逐处改 `print` 目标可靠——`ui.Stream` 也是在调用
+时才读 `sys.stdout`，一起被重定向。
 
 ## 已知问题（未修，用户知情）
 

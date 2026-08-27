@@ -96,6 +96,9 @@ Slash commands (typing `/` pops up completions):
 | `/key` | Add / list / remove model configs: `/key add`, `/key`, `/key rm <name>` |
 | `/mode` | Switch permission mode: `default` / `auto` / `readonly` |
 | `/allow` | Show or add permission rules |
+| `/verify` | Show or set the command run automatically after edits |
+| `/review` | Have a model that never saw the process score the changes |
+| `/cost` | Recent token use and cost, by task |
 | `/context` | Show and reload the project conventions file |
 | `/compact` | Squash the history into one summary to save context |
 | `/clear` | Wipe the conversation and its saved session |
@@ -217,6 +220,78 @@ A single task runs at most **25 rounds** of tool calls. At the cap it stops and 
 Interrupting with `esc` is safe: whatever it had already said stays in the history, and any tool call that didn't finish gets an "interrupted by the user" result of its own. The conversation is never left in a state the API rejects — just say your next thing.
 
 For shell commands, `cd` persists across calls: once it cds into a subdirectory, later commands run from there, so it doesn't have to keep writing `cd x && …`. File paths for read/write/edit stay relative to the workspace root regardless.
+
+## Automatic verification
+
+Put a line of its own in the project context file:
+
+```
+verify: npm test
+```
+
+From then on it runs that command every time it writes or edits a file. **If it fails, the
+output goes straight back to the model to fix**, without you watching over it. `/verify`
+shows the current command, `/verify <command>` changes it for the session, `/verify off`
+turns it off.
+
+Only `write_file` and `edit_file` trigger it. `bash` can change files too, but counting it
+would mean running the test suite after every `ls` and `git status` — far more cost than
+it's worth.
+
+## Independent review
+
+`/review`, or `--review` on a one-shot task:
+
+```bash
+feiyu --review "finish the error handling in parser.py"
+```
+
+Afterwards it opens **a second model** and shows it only the task and the final diff — it
+never took part in the task and cannot see the reasoning, which is the point: no marking
+your own homework. It reports on completeness, bugs, and scope creep, and ends with a
+score out of 10.
+
+With git it reads `git diff HEAD`; without a repository it diffs the before/after contents
+it recorded itself.
+
+**This costs an extra API call**, so it is manual — never automatic every turn.
+
+## Structured output
+
+To feed the result into another program, hand it a JSON schema:
+
+```bash
+feiyu --json-schema review.schema.json "check calc.py for bugs" > out.json
+```
+
+The task runs as usual (tools, confirmations, verification all unchanged); one extra turn
+at the end produces the JSON. **stdout carries nothing but the JSON** — the interface and
+logs all go to stderr — so it pipes straight into anything. Output that doesn't match the
+schema is sent back with the specific problems, twice at most; if it still doesn't match,
+the exit code is non-zero.
+
+Supported keywords are `type`, `required`, `properties`, `items`, `enum` and
+`additionalProperties` — enough for this, and no `jsonschema` dependency added for it.
+
+## Logs and cost
+
+Every event is one JSONL line in `~/.local/state/feiyu/logs/<date>.jsonl` (mode 600): each
+tool call and its arguments, the permission verdict, how long it took, per-turn token
+usage, verification and review results. To work out why it did that odd thing an hour ago,
+filter by the `run` field.
+
+`/cost` totals the last seven days by task:
+
+```
+   08-27 00:14  fix error handling in parser.py     5 turns    8.2k     ¥0.031
+   08-27 09:02  add a --json flag to the CLI       12 turns   31.5k     ¥0.118
+
+   total  39.7k  ¥0.149
+```
+
+Models with no price configured show token counts only. `FEIYU_NO_LOG=1` disables logging
+entirely. **The logs contain command text and file paths**, stored 600 like the session
+files — but they are not encrypted.
 
 ## A note on safety
 
