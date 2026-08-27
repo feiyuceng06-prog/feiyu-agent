@@ -146,8 +146,9 @@ class _TC:
 
 
 class _Delta:
-    def __init__(self, content=None, tool_calls=None):
+    def __init__(self, content=None, tool_calls=None, reasoning=None):
         self.content, self.tool_calls = content, tool_calls
+        self.reasoning_content = reasoning
 
 
 class _Choice:
@@ -192,6 +193,23 @@ class TestOpenAIStream(unittest.TestCase):
                          finish="tool_calls")]
         turn = self.backend(chunks).run_turn(on_text=lambda t: None)
         self.assertEqual(turn.tool_calls[0].input, {"command": "ls"})
+
+    def test_思考过程原样带回历史(self):
+        # DeepSeek v4 思考模式下不回传就是 400，第二轮请求直接发不出去
+        chunks = [_Chunk(_Delta(reasoning="先想一想")),
+                  _Chunk(_Delta(reasoning="再想想")),
+                  _Chunk(_Delta(content="答案"), finish="stop")]
+        b = self.backend(chunks)
+        b.run_turn(on_text=lambda t: None)
+        self.assertEqual(b.messages[-1]["reasoning_content"], "先想一想再想想")
+        self.assertEqual(b.messages[-1]["content"], "答案")
+
+    def test_没有思考过程就不带这个字段(self):
+        # 不认这个字段的接口收到它可能会报错，没吐过就别塞
+        chunks = [_Chunk(_Delta(content="答案"), finish="stop")]
+        b = self.backend(chunks)
+        b.run_turn(on_text=lambda t: None)
+        self.assertNotIn("reasoning_content", b.messages[-1])
 
     def test_正文照常走_on_text(self):
         chunks = [_Chunk(_Delta(content="你好")), _Chunk(_Delta(content="世界"), finish="stop")]

@@ -522,6 +522,21 @@ openai 兼容那边本来就在攒 `slot["args"]`，攒完顺手回调。
   **有透明通道必须走 PNG**，转 JPEG 会把透明的地方糊成黑块。
 - 子 agent 的 Toolbox 也要 `box.vision = backend.vision`，不然它读图永远说不认。
 
+## 0.25.0 两处
+
+**思考模型的 `reasoning_content` 必须原样回传。**DeepSeek v4 的思考模式下，
+assistant 消息里少了这个字段，**下一轮请求直接 400**：`The reasoning_content in
+the thinking mode must be passed back to the API`。也就是说凡是它想过一次，
+这轮之后的对话就全断了——实测撞到过。`run_turn` 现在攒 `delta.reasoning_content`，
+**只在它真吐过的时候**才往 assistant 消息上挂（不认这个字段的接口收到多余字段可能报错，
+而吐过它的一定是同一个接口）。anthropic 那边不用管：`response.content` 里
+本来就带 thinking 块，整个 append 回去了。
+
+**`--mode`。**`feiyu "任务"` 和管道模式下 `ui.confirm` 一律返回 no（没人能回答），
+等于每个写操作都被拒——README 里演示的一次性用法照样动不了文件，只是这次卡在
+另一个地方。加了 `--mode {default,auto,plan,readonly}`，**走 `agent.set_mode()`
+不要直接赋值**（要重拼系统提示）。装配点在第一个 `return` 之前，三条路径都吃得到。
+
 ## 已知问题（未修，用户知情）
 
 - ~~**写文件会盖掉用户在编辑器里的改动**~~ **0.21.0 已修**：`files.Watcher` + `_check_fresh`。

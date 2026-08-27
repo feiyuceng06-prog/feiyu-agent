@@ -364,6 +364,7 @@ class OpenAICompatBackend(Billing):
         )
 
         text = ""
+        reasoning = ""
         finish = ""
         pending: dict[int, dict] = {}
         for chunk in stream:
@@ -385,6 +386,11 @@ class OpenAICompatBackend(Billing):
             if getattr(delta, "content", None):
                 on_text(delta.content)
                 text += delta.content
+            # 思考过程要原样带回去 DeepSeek v4 的思考模式下不回传就是 400：
+            # "The `reasoning_content` in the thinking mode must be passed back"
+            # 只有它自己吐过才会带上，所以不会往不认这个字段的接口上乱塞
+            if getattr(delta, "reasoning_content", None):
+                reasoning += delta.reasoning_content
             for tc in getattr(delta, "tool_calls", None) or []:
                 slot = pending.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                 if tc.id:
@@ -399,6 +405,8 @@ class OpenAICompatBackend(Billing):
         ordered = [pending[i] for i in sorted(pending)]
 
         assistant: dict = {"role": "assistant", "content": text or None}
+        if reasoning:
+            assistant["reasoning_content"] = reasoning
         if ordered:
             assistant["tool_calls"] = [
                 {

@@ -8,7 +8,7 @@ from . import hooks as hooks_mod
 from . import keys, memory, permissions, pricing, sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
-from .agent import CONTEXT_FILES, MODES, STYLES, Feiyu, find_score
+from .agent import CONTEXT_FILES, MODE_ORDER, MODES, STYLES, Feiyu, find_score
 
 
 def main() -> int:
@@ -31,6 +31,12 @@ def main() -> int:
         "--model",
         default=None,
         help="启动时用 /key 清单里的哪一条（默认上次用的） ",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=MODE_ORDER,
+        default=None,
+        help="权限模式 一次性任务和管道模式下没人能回答确认，要它自己动手就得写 auto ",
     )
     parser.add_argument(
         "--json-schema",
@@ -85,6 +91,8 @@ def main() -> int:
     # 项目钩子是仓库里带下来的命令，第一次见到（和内容变了之后）必须让用户点头
     agent.approve_hooks = lambda path, count: ui.ask_yes_no(
         "%s 里有 %d 条项目钩子，它们会在这台机器上执行 要启用吗？" % (hooks_mod.PROJECT, count))
+    if args.mode:
+        agent.set_mode(args.mode)      # 一律走 set_mode：它要重拼系统提示
     note = agent.load_hooks()
 
     if note:

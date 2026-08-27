@@ -47,7 +47,7 @@ feiyu -r                          # 接着上次在这个目录里的对话
 feiyu "给 CLI 加一个 --json 参数"    # 跑一个任务就退出
 ```
 
-另有 `--json-schema <文件>`（按 schema 输出，见「接进别的程序」）、`--review`（跑完让另一个模型打分）、`-V`。
+另有 `--mode`（`default` / `auto` / `plan` / `readonly`——一次性任务和管道里没人能回答确认，要它自己动手就写 `--mode auto`）、`--json-schema <文件>`（按 schema 输出，见「接进别的程序」）、`--review`（跑完让另一个模型打分）、`-V`。
 
 ## 界面
 

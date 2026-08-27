@@ -47,7 +47,7 @@ feiyu -r                          # resume the last conversation in this directo
 feiyu "add a --json flag to the CLI"   # run one task and exit
 ```
 
-Also `--json-schema <file>` (structured output, see "Piping it into other programs"), `--review` (score the changes afterwards) and `-V`.
+Also `--mode` (`default` / `auto` / `plan` / `readonly` — nobody is there to answer a confirmation in a one-shot task or a pipe, so pass `--mode auto` if you want it to act on its own), `--json-schema <file>` (structured output, see "Piping it into other programs"), `--review` (score the changes afterwards) and `-V`.
 
 ## The interface
 
