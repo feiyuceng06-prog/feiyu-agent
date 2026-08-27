@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import memory, todo
+from . import memory, sandbox, todo
 
 
 TOOL_SCHEMAS = [
@@ -637,11 +637,15 @@ class Toolbox:
             command,
             shlex.quote(pwd_file),
         )
+        # 沙箱里的 /tmp 是自己的 tmpfs，记 pwd 的那个文件得单独放行写入，
+        # 否则外面读不到，cd 就跨不了调用
+        boxed = sandbox.wrap(wrapped, workspace=self.root, cwd=self.cwd,
+                             writable=[pwd_file])
         try:
             proc = subprocess.run(
-                wrapped,
-                shell=True,
-                cwd=self.cwd,
+                boxed if boxed else wrapped,
+                shell=boxed is None,
+                cwd=None if boxed else self.cwd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -654,6 +658,9 @@ class Toolbox:
             except OSError:
                 pass
         out = (proc.stdout or "") + (proc.stderr or "")
+        if boxed and proc.returncode != 0 and "Read-only file system" in out:
+            out += ("\n\n（bash 跑在沙箱里，工作区以外一律只读 "
+                    "要动工作区外的东西，跟用户说一声让他自己做，或者让他 /sandbox off ）")
         out = _truncate(out)
         body = out if out.strip() else "（无输出）"
         lines = [line for line in out.splitlines() if line.strip()]

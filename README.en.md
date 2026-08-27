@@ -101,6 +101,7 @@ Slash commands (typing `/` pops up completions):
 | `/cost` | Recent token use and cost, by task |
 | `/memory` | Show / add / drop what it remembers about this directory |
 | `/hooks` | Show which external commands run, and when |
+| `/sandbox` | bash sandbox: `off` / `workspace` / `strict` |
 | `/context` | Show and reload the project conventions file |
 | `/compact` | Squash the history into one summary to save context |
 | `/clear` | Wipe the conversation and its saved session |
@@ -485,6 +486,44 @@ filter by the `run` field.
 Models with no price configured show token counts only. `FEIYU_NO_LOG=1` disables logging
 entirely. **The logs contain command text and file paths**, stored 600 like the session
 files — but they are not encrypted.
+
+## The bash sandbox
+
+With `bubblewrap` installed this is on by default, and the `bash` tool runs inside it:
+
+| Level | Behaviour |
+|---|---|
+| `off` | no sandbox; reads and writes anywhere |
+| `workspace` | read-only outside the workspace, credential directories emptied, network on (default) |
+| `strict` | as above, plus no network |
+
+`/sandbox` shows the current state, `/sandbox strict` switches, and `FEIYU_SANDBOX=off`
+overrides the config for one run. On Arch: `pacman -S bubblewrap`. Without it the sandbox
+degrades to off and the welcome box says so.
+
+What it looks like:
+
+```
+⏺ Bash(ls > ~/filelist.txt)
+  ⎿  /bin/sh: /home/Feiyu/filelist.txt: Read-only file system
+```
+
+**Writes are genuinely isolated.** This is the kernel's mount namespace, not string
+matching, so there is nothing to get around: everything outside the workspace and `/tmp` is
+read-only, and `~/.ssh`, `~/.gnupg`, `~/.aws` plus feiyu's own `~/.config/feiyu` (your API
+keys) and `~/.local/state/feiyu` (transcripts, logs, long-term memory) are replaced with
+empty directories.
+
+**Reads are only blanked in a few places — that is not isolation.** The rest of the
+filesystem is still readable, and the blank-list is a stopgap in the same way `DENY_PATHS`
+is. Real read isolation would mean mounting only what is allowed, which breaks most build
+tooling. Don't describe this as "reads are covered too".
+
+When something is blocked the error tells the model it hit the sandbox, so it usually
+writes inside the workspace instead or suggests `/sandbox off` rather than retrying blindly.
+
+**Hooks and the `verify:` command do not run in the sandbox** — you wrote those in your own
+config; they are not model output.
 
 ## A note on safety
 

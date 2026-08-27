@@ -142,7 +142,8 @@ def tool_label(name: str) -> str:
     return _LABEL.get(name, name)
 
 
-def welcome(workspace, name: str, model: str, version: str, style: str, mode: str, project: str) -> str:
+def welcome(workspace, name: str, model: str, version: str, style: str, mode: str,
+            project: str, sandbox: str = "") -> str:
     home = os.path.expanduser("~")
     shown = str(workspace)
     if shown.startswith(home):
@@ -155,6 +156,9 @@ def welcome(workspace, name: str, model: str, version: str, style: str, mode: st
         paint("grey", "风格      ") + style,
         paint("grey", "模式      ") + mode,
         paint("grey", "项目约定  ") + project,
+        # 用户有权知道 bash 到底关没关起来 关着的时候要显眼
+        paint("grey", "bash 沙箱 ") + (sandbox if sandbox.startswith("\033")
+                                        else paint("amber", sandbox)),
         "",
         paint("grey", "⏎ 发送   \\⏎ 换行   esc 中断   /help 更多"),
     ]
@@ -576,6 +580,7 @@ SLASH = {
     "/cost": "按任务看最近的 token 和花费",
     "/memory": "查看 / 添加 / 删除这个目录的长期记忆",
     "/hooks": "看在哪些时机会跑哪些外部命令",
+    "/sandbox": "bash 沙箱：off / workspace / strict",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
     "/clear": "清空对话历史和存盘，重新开始",

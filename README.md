@@ -101,6 +101,7 @@ feiyu "给命令行加一个 --json 参数，并更新测试"
 | `/cost` | 按任务看最近的 token 和花费 |
 | `/memory` | 查看 / 添加 / 删除这个目录的长期记忆 |
 | `/hooks` | 看在哪些时机会跑哪些外部命令 |
+| `/sandbox` | bash 沙箱：`off` / `workspace` / `strict` |
 | `/context` | 查看并重新加载项目约定文件 |
 | `/compact` | 把历史压缩成一段摘要，省上下文 |
 | `/clear` | 清空对话历史和存盘，重新开始 |
@@ -457,6 +458,40 @@ schema 支持 `type` / `required` / `properties` / `items` / `enum` / `additiona
 
 没配价格的模型只显示 token 数。`FEIYU_NO_LOG=1` 完全关掉记录。
 **日志里有命令原文和文件路径**，跟会话存盘一样按 600 存，但它不是加密的。
+
+## bash 沙箱
+
+装了 `bubblewrap` 的话默认就开着，`bash` 工具跑在里面：
+
+| 档位 | 行为 |
+|---|---|
+| `off` | 不沙箱，想读写哪儿就读写哪儿 |
+| `workspace` | 工作区外只读，密钥目录挖空，联网照旧（默认） |
+| `strict` | 同上，另外断网 |
+
+`/sandbox` 看当前状态，`/sandbox strict` 切换，`FEIYU_SANDBOX=off` 可以临时压过配置。
+Arch 上装它：`pacman -S bubblewrap`。没装就自动降级成不沙箱，欢迎框里会写明。
+
+实际效果：
+
+```
+⏺ Bash(ls > ~/文件清单.txt)
+  ⎿  /bin/sh: /home/Feiyu/文件清单.txt: Read-only file system
+```
+
+**写是真隔离。**靠的是内核的 mount namespace 而不是字符串匹配，绕不过去——工作区
+和 `/tmp` 之外全部只读，`~/.ssh`、`~/.gnupg`、`~/.aws` 以及 feiyu 自己的
+`~/.config/feiyu`（里面是你的 API key）、`~/.local/state/feiyu`（对话原文、日志、
+长期记忆）都被盖成空目录。
+
+**读只是挖空了几个目录，不是隔离。**整个文件系统仍然可读，挖空清单跟 `DENY_PATHS`
+一样是权宜之计。真要做读隔离得改成只挂载允许的目录，那会让一大半构建工具跑不起来。
+别把它说成「读也管住了」。
+
+被挡下时报错会告诉模型这是沙箱限制，它通常会改成写在工作区里、或者建议你
+`/sandbox off`，不会闷头重试。
+
+**钩子和 `verify:` 的命令不进沙箱**——那是你自己写在配置里的，不是模型产出的。
 
 ## 安全须知
 

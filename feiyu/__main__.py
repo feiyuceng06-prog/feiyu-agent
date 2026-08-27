@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 from . import hooks as hooks_mod
-from . import keys, memory, permissions, pricing, schema as schema_mod, session, trace, ui
+from . import keys, memory, permissions, pricing, sandbox as sandbox_mod
+from . import schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import CONTEXT_FILES, MODES, STYLES, Feiyu, find_score
 
@@ -116,8 +117,12 @@ def main() -> int:
     resumed = bool(args.resume and saved and agent.restore(saved))
 
     project = f"{agent.context_file}（{len(agent.context_text)} 字）" if agent.context_text else "无"
+    boxed, why = sandbox_mod.effective()
+    shown = (ui.paint("grey", "%s · 工作区外只读%s" % (
+        boxed, "、断网" if boxed == "strict" else ""))
+        if boxed != "off" else "关闭" + ("（%s）" % why if why else ""))
     print(ui.welcome(workspace, agent.name, agent.model, __version__,
-                     STYLES[agent.style][0], MODES[agent.mode][0], project))
+                     STYLES[agent.style][0], MODES[agent.mode][0], project, shown))
     print()
     if not agent.ready:
         print(ui.warn("还没有模型 用 /key add 添加一个（接口地址 + 密钥 + 模型 id）"))
@@ -191,6 +196,8 @@ def main() -> int:
                 print(_memory(agent, arg))
             elif cmd == "/hooks":
                 print(_hooks(agent))
+            elif cmd == "/sandbox":
+                print(_sandbox(arg))
             else:
                 print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
             print()
@@ -443,6 +450,43 @@ def _verify(agent: Feiyu, arg: str) -> str:
             % (agent.context_file or "、".join(CONTEXT_FILES)))
     state = {True: "上次通过", False: "上次没过", None: "还没跑过"}[agent.verified_ok]
     return ui.notice("当前校验命令：%s（%s） /verify off 关掉" % (agent.verify, state))
+
+
+_SANDBOX_DESC = {
+    "off": "不沙箱，bash 想读写哪儿就读写哪儿",
+    "workspace": "工作区外只读，密钥目录挖空，联网照旧",
+    "strict": "同 workspace，另外断网",
+}
+
+
+def _sandbox(arg: str) -> str:
+    if arg:
+        if arg not in sandbox_mod.LEVELS:
+            return ui.error("只能是 %s" % " / ".join(sandbox_mod.LEVELS))
+        sandbox_mod.set_level(arg)
+        mode, why = sandbox_mod.effective()
+        if mode != arg:
+            return ui.warn("设成 %s 了，但现在生效不了：%s" % (arg, why))
+        return ui.notice("bash 沙箱：%s —— %s" % (arg, _SANDBOX_DESC[arg]))
+
+    mode, why = sandbox_mod.effective()
+    rows = []
+    for name in sandbox_mod.LEVELS:
+        tick = ui.paint("brown", " ●") if name == mode else "  "
+        label = ui.bold(name.ljust(11)) if name == mode else ui.paint("grey", name.ljust(11))
+        rows.append("   " + tick + " " + label + ui.paint("grey", _SANDBOX_DESC[name]))
+    rows.append("")
+    if why:
+        rows.append(ui.warn("现在没在沙箱里跑：" + why))
+    else:
+        rows.append(ui.notice("靠 bubblewrap 的 mount namespace，不是字符串匹配"))
+    # 终端不渲染 markdown，强调只能靠 ui.bold
+    rows.append("  " + ui.bold("写是真隔离") + ui.paint("grey", "，工作区外一律只读"))
+    rows.append("  " + ui.bold("读只是挖空了几个目录")
+                + ui.paint("grey", "，整个文件系统仍然可读，别当成读也隔离了"))
+    rows.append(ui.notice("钩子和 verify: 的命令不进沙箱——那是你自己写的，不是模型产出的 "))
+    rows.append(ui.notice("/sandbox <档位> 切换 · FEIYU_SANDBOX 环境变量可以临时压过配置"))
+    return "\n".join(rows)
 
 
 def _hooks(agent: Feiyu) -> str:
