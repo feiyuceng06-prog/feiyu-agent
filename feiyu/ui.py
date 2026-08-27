@@ -195,6 +195,8 @@ _LABEL = {
     "search": "Search",
     "web_fetch": "Fetch",
     "remember": "Remember",
+    "todo": "Todo",
+    "exit_plan": "Plan",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -206,6 +208,7 @@ _HEADLINE_ARG = {
     "web_fetch": "url",
     # 确认时人只看得到这一行，不把 fact 显出来就等于让人盲签
     "remember": "fact",
+    "exit_plan": "plan",
 }
 
 
@@ -222,9 +225,34 @@ def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool) 
     tint = "red" if is_error else "grey"
     lines = ["  " + paint(tint, f"{ELBOW}  {clip(summary, width() - 6)}")]
     for kind, text in detail:
-        color = {"-": "red", "+": "blue"}.get(kind, "grey")
+        color = {"-": "red", "+": "blue",
+                 "done": "grey", "doing": "brown", "pending": "grey"}.get(kind, "grey")
         lines.append("     " + paint(color, clip(text, width() - 5)))
     return "\n".join(lines)
+
+
+def plan(text: str) -> str:
+    """方案要用户看着点头，所以给它一条竖边，跟普通的灰字区分开 """
+    body = []
+    for line in (text or "（没写方案）").split("\n"):
+        for piece in wrap(line, width() - 6) or [""]:
+            body.append("  " + paint("brown", "│ ") + piece)
+    return "\n".join(body)
+
+
+def wrap(line: str, limit: int) -> list[str]:
+    """按显示宽度折行 CJK 算两格，所以不能用 textwrap """
+    out, row, used = [], "", 0
+    for ch in line:
+        w = get_cwidth(ch)
+        if used + w > limit and row:
+            out.append(row)
+            row, used = "", 0
+        row += ch
+        used += w
+    if row:
+        out.append(row)
+    return out
 
 
 def notice(text: str) -> str:

@@ -120,11 +120,52 @@ Cost comes from the three price fields you fill in during `/key add`; leave them
 |---|---|
 | `default` | Anything on the allow list runs; everything else asks first (startup default) |
 | `auto` | Every tool call runs immediately, no interruption |
+| `plan` | It may only look and think; nothing is touched until you approve the plan |
 | `readonly` | Only reading, listing, searching and web fetches; writes and commands are refused |
 
 When it asks you get four choices: `y` run / `n` skip / `a` allow the rest of this turn / **`s` don't ask again** (saved as a permission rule).
 
 A refused call reports the reason back to the model, which usually adapts or asks you what you'd prefer — it doesn't get stuck.
+
+### Plan mode
+
+When a change is big enough that you want to see the intent first, `shift+tab` to plan
+mode, or `/mode plan`.
+
+In this mode it can read, search and run read-only commands; writes and commands are
+refused. Once it has seen enough it lays out the plan and hands it to you:
+
+```
+  │ One file only, parser.py:
+  │ 1. add a _fail(msg) helper that raises ValueError
+  │ 2. replace the three raise sites with calls to it
+  │ 3. verify the messages still match
+  Go ahead with this plan?  [y] run  [n] skip …
+```
+
+Approve and it switches back to default mode and carries on; decline and it takes your
+feedback and comes back with a revised plan — it never declares "starting now" on its own.
+
+### Task list
+
+When you ask for several things at once, or the work touches more than a couple of places,
+it writes the list down first:
+
+```
+⏺ Todo()
+  ⎿  0 / 4 done
+     ▸ read util.py and the existing structure
+     · strip whitespace in parse
+     · add a join function
+     · write test_util.py covering both
+```
+
+The list is not only for you to look at: **if it tries to finish while items are still
+open, it gets pulled back** — either to finish them, or to say why it can't. Declaring
+victory with three of five things done is the classic failure of tools like this, and this
+is what answers it. It nudges once, so it can't get stuck in a loop.
+
+The list is saved with the session, so `--resume` brings it back.
 
 ### Permission rules
 

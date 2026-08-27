@@ -12,6 +12,12 @@ from feiyu import session
 from tests.fakes import FakeBackend
 
 
+class Boxish:
+    def __init__(self):
+        from feiyu.todo import Todos
+        self.todos = Todos()
+
+
 class Agentish:
     """session.save 只用到这几样，不必真起一个 Feiyu """
     def __init__(self, backend, name="fake"):
@@ -20,6 +26,7 @@ class Agentish:
         self.style = "concise"
         self.mode = "readonly"
         self.ready = True
+        self.toolbox = Boxish()
 
 
 class Base(unittest.TestCase):
@@ -41,6 +48,12 @@ class TestRoundTrip(Base):
                        {"role": "assistant", "content": "在"}]
         b.tokens_total, b.tokens_context, b.cost, b.priced = 500, 300, 1.25, True
         return b
+
+    def test_清单也一起存(self):
+        a = Agentish(self.make())
+        a.toolbox.todos.replace([{"text": "改 parser", "status": "doing"}])
+        session.save(self.ws, a)
+        self.assertEqual(session.load(self.ws)["todos"][0]["text"], "改 parser")
 
     def test_存了能读回来(self):
         session.save(self.ws, Agentish(self.make()))

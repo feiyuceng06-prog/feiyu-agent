@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import ui
 from . import hooks as hooks_mod
-from . import keys, memory, permissions, schema as schema_mod
+from . import keys, memory, permissions, schema as schema_mod, todo as todo_mod
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 from .trace import Trace
@@ -19,6 +19,8 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 - 改动要聚焦 优先用 edit_file，而不是重写整个文件 不要添加任务没要求的功能、\
 抽象或错误处理 
 - 改完代码要验证：用 bash 跑测试或相关命令 
+- 用户一口气提了好几件事、或者要动三个以上地方时，先用 todo 把清单列出来，
+每做完一步回去改状态 光靠记很容易做到一半就忘了还剩什么 
 - 写的代码要贴合周围的风格、命名和约定 
 - 执行会改变状态的命令（删除、git push、安装）之前，先确认有足够依据支持这个\
 具体操作 
@@ -90,9 +92,10 @@ def load_project_context(workspace: Path) -> tuple[str, str]:
 MODES = {
     "default": ("默认", "允许列表里的直接跑，其余问你一声"),
     "auto": ("自动", "所有工具调用直接执行，不打断"),
+    "plan": ("计划", "只让它看和想，方案讲清楚、你同意了才动手"),
     "readonly": ("只读", "只让它读文件、列目录、搜索、抓网页，写和执行一律拒绝"),
 }
-MODE_ORDER = ("default", "auto", "readonly")
+MODE_ORDER = ("default", "auto", "plan", "readonly")
 # confirm 模式下要问一声的：改本地状态的，加上会把内容发到外网的
 # remember 也在里面：它写的东西会进以后每一次的系统提示，而内容可能间接来自网页，
 # 不问一声的话就是一条能跨会话的注入通道 好在它很少调，问一次不烦
@@ -110,6 +113,16 @@ IDENTITY = (
     "\n\n关于你自己：你当前使用的模型是 {model}（配置名 {name}） "
     "用户问起你是什么模型时照这个回答，不要猜，也不要说成别家的模型 "
 )
+
+
+PLAN_PROMPT = """
+
+现在是**计划模式** 先把方案想清楚，别动手改任何东西 
+读文件、搜索、跑只读的命令都可以，写文件、改文件、执行会改变状态的命令一律不行 
+
+看够了就把方案讲出来：要动哪些文件、分成几步、有哪些取舍或者你拿不准的地方 
+然后调 exit_plan 交给用户过目 他同意就会自动切回默认模式，你接着做；
+不同意会把他的意见带回来给你 别自己宣布"那我开始了"就往下写 """
 
 
 # 回答风格：接在 SYSTEM_PROMPT 后面的一段补充指令
@@ -148,7 +161,9 @@ REVIEW_MAX_CHARS = 40_000
 class Feiyu:
     def __init__(self, workspace: Path, *, model: str = "", trace: Trace | None = None):
         self.toolbox = Toolbox(workspace, ask_model=self._ask_model,
-                               on_remember=self._refresh_system)
+                               on_remember=self._refresh_system,
+                               on_exit_plan=self._exit_plan)
+        self.approve_plan = None     # 界面层塞进来：(方案) -> bool
         self.context_file, self.context_text = load_project_context(workspace)
         self.trace = trace or Trace(workspace, enabled=False)
         self.verify = find_verify(self.context_text)
@@ -185,6 +200,8 @@ class Feiyu:
         if self.backend is None:
             return
         text = SYSTEM_PROMPT + IDENTITY.format(model=self.model, name=self.name) + STYLES[self.style][1]
+        if self.mode == "plan":
+            text += PLAN_PROMPT
         if self.context_text:
             # 项目约定放最后，比通用指令更具体，冲突时以它为准
             text += "\n\n这个项目在 %s 里写了自己的约定，优先照它来：\n\n%s" % (
@@ -301,8 +318,30 @@ class Feiyu:
         return True
 
     def cycle_mode(self) -> str:
-        self.mode = MODE_ORDER[(MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)]
-        return self.mode
+        return self.set_mode(MODE_ORDER[(MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)])
+
+    def set_mode(self, name: str) -> str:
+        """改模式一律走这里 计划模式会往系统提示里加一段，不重拼的话切了等于没切 """
+        self.mode = name
+        self._refresh_system()
+        return name
+
+    def _exit_plan(self, plan: str) -> tuple[bool, str]:
+        """模型交方案，用户点头就切回默认模式 """
+        if self.mode != "plan":
+            return False, "现在不是计划模式，不用交方案，直接做就行 "
+        print(ui.plan(plan))
+        agreed = bool(self.approve_plan and self.approve_plan(plan))
+        self.trace.write("exit_plan", agreed=agreed)
+        if not agreed:
+            print(ui.warn("方案没通过，还在计划模式"))
+            print()
+            return False, ("用户看过方案，还不能开始 听他接下来说什么，"
+                           "改完方案再交一次 别绕过去直接动手 ")
+        self.set_mode("default")
+        print(ui.notice("方案通过，已切回默认模式"))
+        print()
+        return True, "用户同意了这个方案，已经切回默认模式，可以动手了 按方案来 "
 
     def set_style(self, name: str) -> None:
         self.style = name
@@ -316,6 +355,7 @@ class Feiyu:
             return note
         self.backend.add_user_message(user_message + note)
         rounds = 0
+        nudged = False      # 清单没做完只提醒一次，提醒到底会转不出来
         while True:
             stream = ui.Stream()
             stream.start()
@@ -338,6 +378,14 @@ class Feiyu:
                 print(ui.warn("这一轮的输出撞上了长度上限，是半截的"))
                 print()
             if not turn.tool_calls:
+                left = self.toolbox.todos.unfinished()
+                if left and not nudged:
+                    # 五件事做完三件就宣布干完，是这类 agent 最常见的毛病
+                    nudged = True
+                    print(ui.warn("清单上还有 %d 条没做完，让它自己看一眼" % len(left)))
+                    print()
+                    self.backend.add_user_message(todo_mod.nudge_text(left))
+                    continue
                 self._fire("Stop", extra={"text": turn.text})
                 self._maybe_compact()
                 return turn.text
@@ -393,6 +441,7 @@ class Feiyu:
             self.style = data["style"]
         if data.get("mode") in MODES:
             self.mode = data["mode"]
+        self.toolbox.todos.restore(data.get("todos"))
         b = self.backend
         b.messages = data["messages"]
         b.tokens_total = int(data.get("tokens_total") or 0)
@@ -520,6 +569,10 @@ class Feiyu:
         print()
 
     def _gate(self, call, allow_all: bool):
+        if self.mode == "plan" and call.name in WRITES:
+            return (False, False, "计划模式已拒绝",
+                    "现在是计划模式，还不能动手 先把方案想完整，"
+                    "再调 exit_plan 交给用户过目 他同意了才轮到你改东西 ")
         if self.mode == "readonly" and call.name in WRITES:
             return (False, False, "只读模式已拒绝",
                     "当前是只读模式，不允许写文件或执行命令 要做这一步，用户得先按 shift+tab "

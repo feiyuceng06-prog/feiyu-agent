@@ -42,6 +42,7 @@ def save(workspace, agent) -> None:
         "style": agent.style,
         "mode": agent.mode,
         "messages": _plain(b.messages),
+        "todos": agent.toolbox.todos.items,
         "tokens_total": b.tokens_total,
         "tokens_context": b.tokens_context,
         "cost": b.cost,

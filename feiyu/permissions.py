@@ -29,6 +29,8 @@ RULE_NAME = {
     "search": "Search",
     "web_fetch": "Fetch",
     "remember": "Remember",
+    "todo": "Todo",
+    "exit_plan": "Plan",
 }
 
 # 出厂放行的：只暴露路径和版本库状态，读不到任意文件内容
@@ -47,6 +49,10 @@ DEFAULT_ALLOW = [
     "Read(*)",
     "List(*)",
     "Search(*)",
+    # 这两个不碰工作区也不出网：一个是它自己的进度清单，一个是把方案交给你看
+    # 不放行的话每列一次清单都要点一次确认，烦到没人愿意让它列
+    "Todo(*)",
+    "Plan(*)",
 ]
 
 # 出厂拦截的：碰这些路径的命令一律不放行，deny 优先所以 allow 里写了也没用

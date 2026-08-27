@@ -80,6 +80,7 @@ def main() -> int:
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
     # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
     agent.approve = lambda name, args: ui.confirm("要执行 %s 吗？" % ui.tool_label(name))
+    agent.approve_plan = lambda plan: ui.confirm("按这个方案动手吗？") in ("yes", "always")
     # 项目钩子是仓库里带下来的命令，第一次见到（和内容变了之后）必须让用户点头
     agent.approve_hooks = lambda path, count: ui.ask_yes_no(
         "%s 里有 %d 条项目钩子，它们会在这台机器上执行 要启用吗？" % (hooks_mod.PROJECT, count))
@@ -231,7 +232,7 @@ def _mode(agent: Feiyu, arg: str) -> str:
     if arg:
         if arg not in MODES:
             return ui.error("没有 %s 这个模式，可选：%s" % (arg, "、".join(MODES)))
-        agent.mode = arg
+        agent.set_mode(arg)
         return ui.notice("已切到「%s」 %s" % (MODES[arg][0], MODES[arg][1]))
     rows = []
     for key, (label, desc) in MODES.items():

@@ -302,7 +302,7 @@ class TestModes(Base):
     def test_shift_tab_循环(self):
         self.agent.mode = "default"
         seen = [self.agent.cycle_mode() for _ in agent_mod.MODE_ORDER]
-        self.assertEqual(seen, ["auto", "readonly", "default"])
+        self.assertEqual(seen, ["auto", "plan", "readonly", "default"])
 
     def test_风格会改系统提示(self):
         b = self.use([])

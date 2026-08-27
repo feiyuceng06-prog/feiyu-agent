@@ -10,7 +10,7 @@ verify: python -m unittest discover -s tests -t .
 |---|---|
 | `feiyu/__main__.py` | CLI 参数、主循环、斜杠命令 |
 | `feiyu/agent.py` | `SYSTEM_PROMPT`、`STYLES`、turn 循环、工具分发 |
-| `feiyu/tools.py` | 八个工具的 schema 与实现，含办公文档抽取 |
+| `feiyu/tools.py` | 十个工具的 schema 与实现，含办公文档抽取 |
 | `feiyu/providers.py` | anthropic / openai 兼容两种后端，用量与计价 |
 | `feiyu/keys.py` | 模型清单（接口地址/密钥/价格）的存取 |
 | `feiyu/permissions.py` | 命令级权限规则 |
@@ -21,6 +21,7 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/schema.py` | 结构化输出：抠 JSON + 最小 schema 校验 |
 | `feiyu/memory.py` | 跨会话长期记忆（agent 自己记的事实） |
 | `feiyu/hooks.py` | 钩子：四个时机跑外部命令，含项目钩子的信任机制 |
+| `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -145,6 +146,31 @@ ods 还要处理 `number-columns-repeated`（连续空列会被压成一个单�
 等于绕开 `_resolve` 的目录限制。加进去是用户的知情选择。
 `DENY_PATHS` 内置拦截 `.ssh/`、`id_rsa`、`~/.config/feiyu/` 等，auto 模式也拦。
 **这是正则路径匹配，不是 Claude Code 那个语义分类器**，挡不住刻意变形，别对外说成等价。
+
+## 任务清单与计划模式（0.16.0）
+
+`feiyu/todo.py` 只管状态和校验，画由 `ui.tool_result` 负责（`detail` 的 kind 复用成
+`done`/`doing`/`pending` 三种颜色），工具在 `tools.py`。分层照旧。
+
+- **整份替换，不做增量更新**：让模型每次交完整清单，比按 id 改某一条可靠得多——
+  它经常记错 id，而整份替换错不了，代价只是多几十个 token。
+- **清单的价值在 `unfinished()`**：`send()` 里模型想收尾（没有 tool_calls）时，
+  清单还有没做完的就塞一条提醒再问一轮。治的是「五件事做完三件就宣布干完」。
+  **`nudged` 标志必须有**，只提醒一次——提醒到底会转不出来。
+- **光有工具 schema 模型不会用**：实测 kimi 拿到 `todo` 工具后，三步任务照样直接
+  埋头做完，一次都没调。往 `SYSTEM_PROMPT` 里加一条「好几件事就先列清单」之后才用。
+  行为指令要放系统提示，工具描述只说明「怎么用」不说明「什么时候用」。
+  （它仍然倾向于开头列一次、结尾一次性标完，不是每步都改——这个没再强求。）
+
+计划模式：`MODES` 加了 `plan`，`MODE_ORDER` 变成四档。
+
+- **改模式一律走 `set_mode()`**，它会重拼系统提示。`plan` 会往提示里加 `PLAN_PROMPT`，
+  直接赋值 `self.mode` 的话切了等于没切。
+- `_gate` 里 plan 的拒绝理由要**指名 `exit_plan`**，否则模型会反复试别的写法。
+- `exit_plan` 是工具，但切模式是 agent 的事，所以走 `Toolbox.on_exit_plan` 回调
+  （跟 `on_remember` 一个套路），Toolbox 只管工作区。
+- 出厂 allow 放行 `Todo(*)` 和 `Plan(*)`：都不碰工作区也不出网，
+  不放行的话每列一次清单都要点一次确认，烦到没人愿意让它列。
 
 ## 权限门的两个集合
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import memory
+from . import memory, todo
 
 
 TOOL_SCHEMAS = [
@@ -129,6 +129,52 @@ TOOL_SCHEMAS = [
                 "max_chars": {"type": "integer", "description": "不填 prompt 时最多返回多少字符（默认 15000） "},
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "todo",
+        "description": (
+            "维护这次任务的清单 需要三步以上、或者用户一口气提了好几件事的时候，"
+            "先把清单列出来，然后每做完一步回来改状态，别攒到最后一次性改 "
+            "**每次都交完整的清单**，不是只交变动的那几条 "
+            "同一时刻只能有一条 doing 一两步就能做完的小事不用列 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "完整清单，按要做的顺序排 ",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "这一步要做什么 "},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "doing", "done"],
+                                "description": "没开始 / 正在做 / 做完了 ",
+                            },
+                        },
+                        "required": ["text", "status"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "exit_plan",
+        "description": (
+            "只在计划模式下用 方案想清楚了，用这个把方案交给用户过目 "
+            "用户同意就会自动切回默认模式，你可以接着动手；不同意会把他的意见带回来 "
+            "调它之前先把方案讲完整：要改哪些文件、分几步、有什么取舍 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plan": {"type": "string", "description": "方案摘要，一小段就够 "},
+            },
+            "required": ["plan"],
         },
     },
     {
@@ -494,6 +540,15 @@ class ToolResult:
     detail: list[tuple[str, str]] = field(default_factory=list)  # (kind, 文本)，kind 为 '-'/'+'/''
 
 
+_TODO_MARK = {todo.DONE: "✓", todo.DOING: "▸", todo.PENDING: "·"}
+
+
+def todo_rows(items: list[dict]) -> list[tuple[str, str]]:
+    """清单交给 ui 画 这里只出「符号 + 文字」，颜色和排版是 ui 的事 """
+    return [(item["status"], "%s %s" % (_TODO_MARK[item["status"]], item["text"]))
+            for item in items]
+
+
 def _peek(lines: list[str], keep: int = 3) -> list[tuple[str, str]]:
     shown = [("", line) for line in lines[:keep]]
     if len(lines) > keep:
@@ -515,10 +570,12 @@ def _diff(old_text: str, new_text: str, keep: int = 6) -> list[tuple[str, str]]:
 
 
 class Toolbox:
-    def __init__(self, root: Path, ask_model=None, on_remember=None):
+    def __init__(self, root: Path, ask_model=None, on_remember=None, on_exit_plan=None):
         self.root = root.resolve()
         self.ask_model = ask_model      # (提示词) -> 回答，用于 web_fetch 的 prompt 模式
         self.on_remember = on_remember  # 记了新东西就回调，让系统提示当场重拼
+        self.on_exit_plan = on_exit_plan  # (方案) -> (同意没, 说明)，切模式是 agent 的事
+        self.todos = todo.Todos()
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
 
     def _resolve(self, path: str) -> Path:
@@ -729,6 +786,20 @@ class Toolbox:
             head + shown + tail,
             summary="%s 抓到 %d 字%s" % (ctype or "未知类型", len(shown), "（已截断）" if clipped else ""),
         )
+
+    def _tool_todo(self, args: dict) -> ToolResult:
+        ok, note = self.todos.replace(args.get("items"))
+        if not ok:
+            return ToolResult(note, is_error=True, summary="清单没收下：" + note[:40])
+        return ToolResult(note, summary=note, detail=todo_rows(self.todos.items))
+
+    def _tool_exit_plan(self, args: dict) -> ToolResult:
+        if self.on_exit_plan is None:
+            return ToolResult("现在不是计划模式，不用交方案，直接做就行 ", is_error=True,
+                              summary="不在计划模式")
+        agreed, note = self.on_exit_plan(args.get("plan") or "")
+        return ToolResult(note, is_error=not agreed,
+                          summary="用户同意了" if agreed else "用户还有意见")
 
     def _tool_remember(self, args: dict) -> ToolResult:
         ok, note = memory.add(self.root, args.get("fact") or "")
