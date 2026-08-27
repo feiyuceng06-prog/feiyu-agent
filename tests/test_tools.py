@@ -327,3 +327,106 @@ class TestBinaryDetection(Base):
         raw = Path(__file__).resolve().parent.parent.joinpath(
             "feiyu/agent.py").read_bytes()
         self.assertFalse(tools._looks_binary(raw))
+
+
+class TestTimeout(Base):
+    """超时后**必须把已经打印的东西给模型** —— 那是"卡在哪一步"的唯一线索
+
+    不接住 TimeoutExpired 的话，模型只会看到一句
+    "TimeoutExpired: Command [...] timed out"，沙箱一开还会把整条 bwrap
+    命令行灌进上下文
+    """
+
+    def test_保住超时前的输出(self):
+        out = self.box.run("bash", {"command": "echo 跑到第 3 步了; sleep 30", "timeout": 1})
+        self.assertTrue(out.is_error)
+        self.assertIn("跑到第 3 步了", out.content)
+
+    def test_stderr_也保住(self):
+        out = self.box.run("bash", {"command": "echo 出错了 >&2; sleep 30", "timeout": 1})
+        self.assertIn("出错了", out.content)
+
+    def test_说清楚是超时(self):
+        out = self.box.run("bash", {"command": "sleep 30", "timeout": 1})
+        self.assertIn("超时", out.summary)
+        self.assertIn("1 秒", out.content)
+
+    def test_没有输出时也有个交代(self):
+        out = self.box.run("bash", {"command": "sleep 30", "timeout": 1})
+        self.assertTrue(out.is_error)
+        self.assertIn("一个字都没输出", out.content)
+
+    def test_不把整条命令行吐给模型(self):
+        # 沙箱开着时那串 argv 有二三十项，又长又没用
+        out = self.box.run("bash", {"command": "sleep 30", "timeout": 1})
+        self.assertNotIn("--ro-bind", out.content)
+        self.assertNotIn("TimeoutExpired", out.content)
+
+
+class TestSearchTruncation(Base):
+    """截断必须说出来 只报「200 处匹配」的话模型会以为搜全了，
+    「这个函数在哪些地方被调用」之类的结论就是错的 """
+
+    def many(self, n):
+        for i in range(n):
+            self.write("f%03d.py" % i, "\n".join(["需要找的东西"] * 5))
+
+    def test_没到上限不标截断(self):
+        self.many(3)
+        out = self.box.run("search", {"regex": "需要找的东西"})
+        self.assertNotIn("截断", out.summary)
+        self.assertEqual(out.summary, "15 处匹配")
+
+    def test_到上限要标出来(self):
+        self.many(60)      # 300 处，超过 200
+        out = self.box.run("search", {"regex": "需要找的东西"})
+        self.assertIn("截断", out.summary)
+        self.assertIn("还有更多没列出来", out.content)
+
+    def test_截断后条数就是上限(self):
+        self.many(60)
+        out = self.box.run("search", {"regex": "需要找的东西"})
+        self.assertEqual(out.content.count("需要找的东西"), tools.SEARCH_CAP)
+
+    def test_rg_不认的正则退回自己扫(self):
+        # rg 是 Rust 正则，不支持反向引用；不能因为它挑食就把搜索判死
+        self.write("a.py", "abc abc\n")
+        out = self.box.run("search", {"regex": r"(\w+) \1"})
+        self.assertFalse(out.is_error)
+        self.assertIn("a.py:1", out.content)
+
+    def test_正则写错当场报(self):
+        out = self.box.run("search", {"regex": "["})
+        self.assertTrue(out.is_error)
+
+    def test_跳过噪音目录(self):
+        self.write("node_modules/x.py", "需要找的东西\n")
+        self.write("好的.py", "需要找的东西\n")
+        out = self.box.run("search", {"regex": "需要找的东西"})
+        self.assertNotIn("node_modules", out.content)
+        self.assertIn("好的.py", out.content)
+
+
+class TestWebCache(unittest.TestCase):
+    def setUp(self):
+        tools._web_cache.clear()
+
+    def tearDown(self):
+        tools._web_cache.clear()
+
+    def test_超过上限会清掉最老的(self):
+        # 缓存里存的是整页正文，不设上限一次会话抓几十个站就是几十兆常驻
+        import time as t
+        for i in range(tools._WEB_CACHE_MAX + 10):
+            tools._web_cache["u%d" % i] = (t.time() + i, "正文", "u", "text/html")
+        tools._prune_web_cache()
+        self.assertLessEqual(len(tools._web_cache), tools._WEB_CACHE_MAX)
+        self.assertIn("u%d" % (tools._WEB_CACHE_MAX + 9), tools._web_cache)
+
+    def test_过期的会被清掉(self):
+        import time as t
+        tools._web_cache["旧"] = (t.time() - tools._WEB_CACHE_TTL - 1, "正文", "u", "")
+        tools._web_cache["新"] = (t.time(), "正文", "u", "")
+        tools._prune_web_cache()
+        self.assertNotIn("旧", tools._web_cache)
+        self.assertIn("新", tools._web_cache)

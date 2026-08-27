@@ -236,6 +236,8 @@ TOOL_SCHEMAS = [
 ]
 
 _IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", "dist", "build"}
+SEARCH_CAP = 200          # 最多列这么多处 到顶了必须告诉模型，不能装作搜全了
+SEARCH_TIMEOUT = 30
 _MAX_OUTPUT = 30_000
 _WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 _WEB_TIMEOUT = 20
@@ -244,11 +246,9 @@ _WEB_DEFAULT_CHARS = 15_000
 _WEB_MAX_CHARS_FOR_ASK = 60_000
 # 这些标签里的东西不是正文
 _WEB_CACHE_TTL = 900          # 同一个地址 15 分钟内不重复抓
+_WEB_CACHE_MAX = 32           # TTL 只在读的时候看，不设上限的话过期条目永远不清
 _web_cache: dict[str, tuple[float, str, str, str]] = {}
 _SKIP_TAGS = {"script", "style", "noscript", "svg", "head"}
-# 这些标签结束时该换行，否则整页糊成一行
-_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
-               "section", "article", "header", "footer", "pre", "blockquote"}
 
 
 # 变量名里带这些词的一律不传给子进程 按名字过滤而不是按值，
@@ -652,6 +652,12 @@ class Toolbox:
                 env=_child_env(),
             )
             self._track_cwd(pwd_file)
+        except subprocess.TimeoutExpired as exc:
+            # 必须自己接住 让它冒到 run() 的兜底 except 里的话，模型只会看到
+            # 一句 "TimeoutExpired: Command [...] timed out"——命令停下前打印的东西
+            # 全丢了，它根本不知道卡在哪一步；沙箱一开，那串 argv 还会把整条
+            # bwrap 命令行灌进上下文
+            return self._timed_out(exc, timeout)
         finally:
             try:
                 os.unlink(pwd_file)
@@ -674,6 +680,22 @@ class Toolbox:
             is_error=proc.returncode != 0,
             summary=summary,
             detail=detail,
+        )
+
+    def _timed_out(self, exc, timeout: int) -> ToolResult:
+        """超时了也要把它停下前打印的东西给模型 那才是"卡在哪儿"的唯一线索 """
+        # text=True 也没用，TimeoutExpired 上挂的仍然是 bytes
+        said = _decode(exc.stdout) + _decode(exc.stderr)
+        head = "命令超过 %d 秒还没结束，已经杀掉 " % timeout
+        if not said.strip():
+            return ToolResult(head + "它一个字都没输出 ", is_error=True,
+                              summary="超时（%d 秒），无输出" % timeout)
+        lines = [line for line in said.splitlines() if line.strip()]
+        return ToolResult(
+            head + "下面是它停下之前打印的东西：\n" + _truncate(said),
+            is_error=True,
+            summary="超时（%d 秒）" % timeout,
+            detail=_peek(lines[-4:], 4),
         )
 
     def _track_cwd(self, pwd_file: str) -> None:
@@ -791,6 +813,7 @@ class Toolbox:
             body = parser.text()
         body = body.strip()
         _web_cache[url] = (time.time(), body, final, ctype)
+        _prune_web_cache()
         return body, final, ctype
 
     def _tool_web_fetch(self, args: dict) -> ToolResult:
@@ -858,29 +881,85 @@ class Toolbox:
                           summary="记住了" if ok else "没记：" + note[:40])
 
     def _tool_search(self, args: dict) -> ToolResult:
-        rx = re.compile(args["regex"])
-        glob = args.get("glob", "**/*")
-        hits = []
-        for p in self.root.glob(glob):
-            if not p.is_file():
+        regex = args["regex"]
+        glob = args.get("glob", "")
+        re.compile(regex)      # 先在本地校验，语法错了当场报，别等 rg 吐一坨
+        hits, capped = _ripgrep(regex, glob, self.root)
+        if hits is None:
+            hits, capped = self._scan(regex, glob)
+        if not hits:
+            return ToolResult("（无匹配）", summary="无匹配")
+        # **截断必须说出来** 只报"200 处匹配"的话，模型会以为搜全了，
+        # 「这个函数在哪些地方被调用」之类的结论就是错的
+        tail = ("\n\n…（只列了前 %d 处，还有更多没列出来 "
+                "把正则写窄一点，或者用 glob 限定范围）" % SEARCH_CAP) if capped else ""
+        note = "%d 处匹配%s" % (len(hits), "（已截断）" if capped else "")
+        return ToolResult("\n".join(hits) + tail, summary=note, detail=_peek(hits))
+
+    def _scan(self, regex: str, glob: str) -> tuple[list[str], bool]:
+        """没有 rg 时的兜底：纯 Python 逐行扫 141M 的仓库要 0.8 秒，rg 只要 6 毫秒 """
+        rx = re.compile(regex)
+        hits: list[str] = []
+        for path in self.root.glob(glob or "**/*"):
+            if not path.is_file():
                 continue
-            if any(part in _IGNORE_DIRS for part in p.relative_to(self.root).parts):
+            if any(part in _IGNORE_DIRS for part in path.relative_to(self.root).parts):
                 continue
             try:
-                for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                    if rx.search(line):
-                        hits.append(f"{p.relative_to(self.root)}:{i}: {line.strip()}")
-                        if len(hits) >= 200:
-                            break
+                text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if len(hits) >= 200:
-                break
-        return ToolResult(
-            "\n".join(hits) or "（无匹配）",
-            summary=f"{len(hits)} 处匹配" if hits else "无匹配",
-            detail=_peek(hits),
-        )
+            for i, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"{path.relative_to(self.root)}:{i}: {line.strip()}")
+                    if len(hits) >= SEARCH_CAP:
+                        return hits, True
+        return hits, False
+
+
+def _ripgrep(regex: str, glob: str, root: Path) -> tuple[list[str] | None, bool]:
+    """有 rg 就用 rg 返回 (命中行, 是否截断)；用不了返回 (None, False) 让调用方兜底
+
+    rg 的正则是 Rust 那套，不支持反向引用和前后瞻 语法不合它就报错退出，
+    这时候退回 Python 扫——不能因为 rg 挑食就把整个搜索判死
+    """
+    if not _shutil.which("rg"):
+        return None, False
+    argv = ["rg", "--line-number", "--no-heading", "--color", "never",
+            "--no-messages", "-e", regex]
+    if glob:
+        argv += ["-g", glob]
+    for name in _IGNORE_DIRS:
+        argv += ["-g", "!" + name]
+    argv.append(".")
+    try:
+        done = subprocess.run(argv, cwd=str(root), capture_output=True,
+                              text=True, timeout=SEARCH_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None, False
+    if done.returncode == 1:          # rg 用 1 表示"没匹配"，不是出错
+        return [], False
+    if done.returncode != 0:
+        return None, False            # 多半是正则它不认，交给 Python 那套
+    rows = [line[2:] if line.startswith("./") else line
+            for line in done.stdout.splitlines() if line.strip()]
+    return rows[:SEARCH_CAP], len(rows) > SEARCH_CAP
+
+
+def _prune_web_cache() -> None:
+    """缓存里存的是整页正文，一次会话抓几十个站就是几十兆常驻 """
+    now = time.time()
+    for url, entry in list(_web_cache.items()):
+        if now - entry[0] >= _WEB_CACHE_TTL:
+            _web_cache.pop(url, None)
+    while len(_web_cache) > _WEB_CACHE_MAX:
+        _web_cache.pop(min(_web_cache, key=lambda u: _web_cache[u][0]), None)
+
+
+def _decode(raw) -> str:
+    if raw is None:
+        return ""
+    return raw if isinstance(raw, str) else raw.decode("utf-8", "replace")
 
 
 def _truncate(text: str) -> str:

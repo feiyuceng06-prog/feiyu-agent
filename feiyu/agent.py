@@ -43,6 +43,27 @@ COMPACT_RATIO = 0.75
 # 一次任务里最多连续调多少轮工具 纯保险：模型卡在某个循环里时不至于一直转下去
 MAX_ROUNDS = 25
 
+# 两个 SDK 自己会重试 429/5xx/连接错误（默认 2 次），但那只管**请求发出之前**
+# 流一旦开始，中途断了 SDK 就不管了，而 agent 一轮动辄几十秒，正是容易断的时候
+# 这里补的是流中途失败：还没吐字就重发（安全），吐了字就不重发（会说重复的话）
+STREAM_RETRIES = 2
+RETRY_WAIT = 2.0
+# 值得重试的状态码 不认 SDK 的异常类：两种后端，openai 还是可选依赖，
+# 硬 import 会把 anthropic-only 的装法弄坏
+RETRY_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+RETRY_NAMES = ("APIConnectionError", "APITimeoutError", "InternalServerError",
+               "RateLimitError", "ConnectionError", "TimeoutError",
+               "ReadTimeout", "RemoteProtocolError")
+
+
+def transient(exc: Exception) -> bool:
+    """这个错值不值得再试一次 按状态码和类名判断，不绑任何一家 SDK """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code in RETRY_CODES
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    return any(name in names for name in RETRY_NAMES)
+
 
 # 工作区里放一份约定给它读 按这个顺序找第一个存在的
 CONTEXT_FILES = ("FEIYU.md", "AGENTS.md", "CLAUDE.md")
@@ -383,6 +404,7 @@ class Feiyu:
         self.backend.add_user_message(user_message + note)
         rounds = 0
         nudged = False      # 清单没做完只提醒一次，提醒到底会转不出来
+        retries = 0
         while True:
             stream = ui.Stream()
             stream.start()
@@ -395,8 +417,26 @@ class Feiyu:
                 self.trace.write("interrupt", where="stream")
                 self._note_interrupted(stream.text)
                 raise
+            except Exception as exc:
+                stream.finish()
+                self.trace.write("api_error", error="%s: %s" % (
+                    type(exc).__name__, exc), said=len(stream.text) or None)
+                if not stream.text and transient(exc) and retries < STREAM_RETRIES:
+                    # 一个字都还没吐出来，重发是安全的
+                    retries += 1
+                    print(ui.warn("接口出错（%s），%.0f 秒后重试第 %d 次" % (
+                        type(exc).__name__, RETRY_WAIT, retries)))
+                    print()
+                    time.sleep(RETRY_WAIT)
+                    continue
+                # 吐过字就不能重发——模型会把刚说的话再说一遍
+                # 但已经说出口的话要留在历史里，角色也得接着交替
+                self._note_interrupted(stream.text)
+                raise
             finally:
                 stream.finish()
+
+            retries = 0
 
             self.trace.write("turn", round=rounds, tokens=self.context,
                              cost=self.cost, truncated=turn.truncated or None,

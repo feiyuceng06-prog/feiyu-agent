@@ -2,19 +2,25 @@
 
 [简体中文](README.md) | English
 
-Feiyu Agent is a coding assistant that runs in your terminal. You hand it a task and it reads the code, edits files, and runs commands on its own — working through the problem step by step, with everything it does visible to you as it goes. It works with Claude, DeepSeek, or Kimi.
+A coding assistant that lives in your terminal. Give it a task and it reads the code, edits files and runs commands until the job is done — with everything it does visible as it happens. Works with Claude, DeepSeek or Kimi.
+
+About 4,800 lines of Python, no framework, three dependencies.
 
 ## Install
-
-One command:
 
 ```
 git clone https://github.com/feiyuceng06-prog/feiyu-agent.git && cd feiyu-agent && ./install.sh
 ```
 
-It creates a virtualenv, installs the dependencies, and drops a shim in `~/.local/bin` so `feiyu` works from any directory. Needs Python 3.10 or newer — it'll tell you if that's missing. Re-running is safe; run it again after pulling new code.
+The script creates a virtualenv, installs dependencies and drops a shim in `~/.local/bin`, so `feiyu` works from any directory. Needs Python 3.10+. Safe to re-run after pulling changes.
 
-**It ships empty — you add the models yourself.** Run `feiyu`, type `/key add`, and fill in the endpoint, model id and key. That's all it takes; see "Models" below.
+**It ships empty — you add the models**: run `feiyu`, type `/key add`, and fill in the base URL, model id and key. See "Models" below.
+
+Two optional extras worth having — `bubblewrap` (the bash sandbox) and `ripgrep` (search, ~100× faster):
+
+```
+sudo pacman -S bubblewrap ripgrep      # Debian/Ubuntu: apt install bubblewrap ripgrep
+```
 
 <details>
 <summary>Manual install</summary>
@@ -23,55 +29,32 @@ It creates a virtualenv, installs the dependencies, and drops a shim in `~/.loca
 python -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -e ".[openai]"
-```
-
-Then source that .venv before each use, or drop a shim yourself:
-
-```
 printf '#!/usr/bin/env bash\nexec %s/.venv/bin/feiyu "$@"\n' "$PWD" > ~/.local/bin/feiyu
 chmod +x ~/.local/bin/feiyu
 ```
 
-The openai package in `.[openai]` is for DeepSeek, Kimi and other OpenAI-compatible endpoints; `pip install -e .` is enough if you only use Claude's native API.
+The `openai` package in `.[openai]` is for DeepSeek, Kimi and other OpenAI-compatible endpoints; for Claude's native API `pip install -e .` is enough.
 
 </details>
 
 ## Usage
 
-Just run feiyu to start an interactive session, working in the current directory:
-
 ```
-feiyu
-```
-
-It starts on whichever model you used last. To pick another, pass `-m` with a name from `/key`:
-
-```
-feiyu -m ds-flash
+feiyu                             # interactive, working directory = cwd
+feiyu -w ~/code/my-project        # pick the working directory
+feiyu -m ds-flash                 # pick an entry from /key (defaults to last used)
+feiyu -r                          # resume the last conversation in this directory
+feiyu "add a --json flag to the CLI"   # run one task and exit
 ```
 
-Point it at another project with `-w`:
-
-```
-feiyu -w ~/code/my-project
-```
-
-To run one task and exit, put the task on the command line:
-
-```
-feiyu "add a --json flag to the CLI and update the tests"
-```
-
-`-r` / `--resume` picks up the last conversation in this directory, and `-V` prints the version.
+Also `--json-schema <file>` (structured output, see "Piping it into other programs"), `--review` (score the changes afterwards) and `-V`.
 
 ## The interface
 
-Inside, you get a bordered input area; tool calls, file diffs, and the model's replies all print below it.
-
 ```
-╭──────────────────────────────────── deepseek  ·  context 1.4k  ·  ¥0.0014 ─╮
+╭─────────────────────────────────── deepseek  ·  context 1.4k  ·  ¥0.0014 ─╮
 │ > make search in tools.py use rg
-╰────────────────────────────────────────────────────────────────────────────╯
+╰───────────────────────────────────────────────────────────────────────────╯
 
 ⏺ Read(feiyu/tools.py)
   ⎿  217 lines
@@ -81,156 +64,89 @@ Inside, you get a bordered input area; tool calls, file diffs, and the model's r
        47  -  rx = re.compile(args["regex"])
        47  +  if shutil.which("rg"):
 
-  Done — search now prefers rg and falls back to the regex path when it's missing.
+  Done — search now prefers rg and falls back to the regex scan when it's missing.
 ```
 
-Keys: `⏎` send, `\⏎` newline, `shift+tab` cycle permission mode, `esc` interrupt the current answer, `ctrl-d` quit, `↑` `↓` history.
+`⏎` send · `\⏎` newline · `shift+tab` cycle permission mode · `esc` interrupt · `ctrl-d` quit · `↑` `↓` history.
 
-Slash commands (typing `/` pops up completions):
+The top border shows **how full the context is** and **what this session has cost**. Context is a percentage, not a token count — every request carries ~1.5k tokens of fixed overhead, and the absolute number is both alarming and useless to act on. Models with no price configured show no money at all.
+
+Type `/` for completion:
 
 | Command | What it does |
 |---|---|
 | `/help` | Show help |
-| `/model` | List configured models; `/model <name>` switches, keeping the conversation |
-| `/style` | Switch answer style: `default` / `concise` / `explanatory` / `teaching` |
-| `/key` | Add / list / remove model configs: `/key add`, `/key`, `/key rm <name>` |
-| `/mode` | Switch permission mode: `default` / `auto` / `readonly` |
+| `/model` | List models; `/model <name>` switches, keeping the conversation |
+| `/key` | Add / list / remove model configs |
+| `/mode` | Permission mode: `default` / `auto` / `plan` / `readonly` |
 | `/allow` | Show or add permission rules |
+| `/sandbox` | bash sandbox: `off` / `workspace` / `strict` |
+| `/hooks` | Show which external commands run, and when |
 | `/verify` | Show or set the command run automatically after edits |
 | `/review` | Have a model that never saw the process score the changes |
-| `/cost` | Recent token use and cost, by task |
 | `/memory` | Show / add / drop what it remembers about this directory |
-| `/hooks` | Show which external commands run, and when |
-| `/sandbox` | bash sandbox: `off` / `workspace` / `strict` |
 | `/context` | Show and reload the project conventions file |
+| `/cost` | Recent token use and cost, by task |
 | `/compact` | Squash the history into one summary to save context |
+| `/style` | Answer style: `default` / `concise` / `explanatory` / `teaching` |
 | `/clear` | Wipe the conversation and its saved session |
 | `/exit` | Quit |
 
-The top border shows **how full the context is** and **what the session has cost so far**.
+## What it can do
 
-Context is a percentage, not a token count. Every request carries roughly 1.5k tokens of fixed overhead (tool definitions plus the system prompt), so even a bare "hi" shows a four-figure number — alarming to look at and useless to act on. The percentage tells you what's left. Models with no price configured show no money at all, rather than a token count standing in for one.
+Eleven tools, each call printed as it happens:
 
-Cost comes from the three price fields you fill in during `/key add`; leave them blank and it shows a token count instead. See "Models" below.
+| Tool | Notes |
+|---|---|
+| `bash` | Run a shell command. `cd` persists between calls |
+| `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root |
+| `list_files` `search` | Glob the tree, grep it with a regex |
+| `web_fetch` | Fetch a page, HTML converted to Markdown |
+| `task` | Send a subagent to find something out and bring back only the conclusion |
+| `todo` | Keep the task list |
+| `remember` | Note something worth keeping across sessions |
+| `exit_plan` | In plan mode, hand you the plan for approval |
+
+A single task runs at most **25 rounds** of tool calls; at the cap it stops and says so, and one more message picks it up again.
+
+**When a batch of calls is entirely read-only they run at the same time** (`read_file` / `list_files` / `search` / `web_fetch` / `task`, four at a time). One `bash` or file write in the batch and the whole batch goes back to serial — the write usually depends on what the reads found.
+
+Interrupting with `esc` is safe: whatever it had already said stays in the history, and any call that didn't finish gets an "interrupted by the user" result, so the conversation is never left broken.
 
 ### Subagents
 
-A question like "how does this project handle interrupts" takes a dozen files and hundreds
-of lines to answer — all of which would bloat the conversation. Instead it sends a subagent
-and keeps only the conclusion:
+A question like "how does this project handle interrupts" takes a dozen files to answer, all of which would bloat the conversation. It sends a subagent and keeps only the conclusion. Measured on one run: **the subagent burned 41,579 tokens; the main conversation grew by 2,284.**
 
-```
-⏺ Task(work out how KeyboardInterrupt is handled and which files are involved)
-     read_file feiyu/ui.py → 80 lines
-     search def _run_tools → 1 match
-     read_file feiyu/agent.py → 100 lines
-     …
-  ⎿  done, 812 characters back
-```
+A subagent can only read (`read_file` / `list_files` / `search`) — no writes, no network. It cannot see your conversation with the main agent, which is why the main agent writes it a self-contained question. Its usage counts towards the status bar and `/cost`.
 
-Measured on that run: **the subagent burned 41,579 tokens; the main conversation grew by
-2,284.** Not one line of those twenty file reads entered the main context.
+### Task list and plan mode
 
-A subagent **can only read** — `read_file`, `list_files`, `search`, and nothing else. That
-isn't laziness; three properties come with it. It cannot change anything, so it never needs
-to stop and ask you (it runs on a worker thread and cannot read the keyboard). That in turn
-makes it safe to run several at once for unrelated questions. And with no `web_fetch` there
-is no "subagent read a page and got talked into something else" path.
+When there's a lot to do it writes the list down first and updates each item as it goes. **The list isn't only for you to look at: if it tries to finish while items are still open, it gets pulled back** — either to finish them or to say why it can't. It nudges once. The list is saved with the session.
 
-The cost is that it cannot do anything needing the network or a write; the main agent does
-those itself.
+For bigger changes, `shift+tab` into plan mode (or `/mode plan`): it can only read and think, writes and commands are refused. Once it has a plan it hands it over for approval, and only your yes switches it back to default mode to start work.
 
-It cannot see your conversation with the main agent — deliberately, which is why the main
-agent writes it a self-contained question. Its usage counts towards the status bar and
-`/cost`: **spending you cannot see is worse than spending you can**.
+### Office documents and the web
 
-### Parallel reads
+`.docx` `.xlsx` `.pptx` `.odt` `.ods` `.odp` `.pdf` are extracted to plain text on read, so "what does this report say" just works. Tables come out row by row, slides page by page. PDF needs `pdftotext` on the system. Only **text** survives — you can't edit these back; to generate them, have it script `python-docx` or `openpyxl`.
 
-When a batch of calls is **entirely read-only**, they run at the same time:
+`web_fetch` with a `prompt` reads the whole page and answers only your question — fetching PEP 8 (51,348 characters) and asking "what's the max line length" put 123 characters into the context. Without a `prompt` the whole page arrives as Markdown, truncated at 15,000 characters. The same URL isn't refetched within 15 minutes.
 
-```
-⏺ Read(mod1.py)
-⏺ Read(mod2.py)
-⏺ Read(mod3.py)
-⏺ Read(mod4.py)
-  ⎿  mod1.py — 3 lines
-  ⎿  mod2.py — 3 lines
-  ⎿  mod3.py — 3 lines
-  ⎿  mod4.py — 3 lines
-```
+**It will not fetch internal addresses**: loopback, private ranges and link-local (including the cloud metadata endpoint `169.254.169.254`) are refused, redirects to them included. To reach a local dev server: `FEIYU_ALLOW_LOCAL_FETCH=1 feiyu`.
 
-`read_file`, `list_files`, `search` and `web_fetch` count as read-only, four at a time.
-Fetching four pages goes from one-after-another to one wait, which is very noticeable.
+## Permissions
 
-**One `bash` or file write in the batch and the whole batch goes back to serial.** The
-decision is made per batch rather than per call: in a batch like "read three files, then
-write one based on them", the write depends on the reads, so cherry-picking what to
-parallelise would just execute things out of order. `bash` can never be parallel anyway —
-its `cd` persists across calls, and two concurrent `cd`s would clobber each other.
-
-Confirmation prompts always happen one at a time on the main thread, and results are
-returned to the model in call order (which one finishes first is not deterministic, but the
-order must be). Interrupt with `esc` partway through and the calls that never ran still get
-results — the history stays intact.
-
-### Permission modes
-
-`shift+tab` cycles through them, or use `/mode <name>`. The current mode shows on the left of the input box's top border.
+`shift+tab` cycles, or `/mode <name>`:
 
 | Mode | Behaviour |
 |---|---|
-| `default` | Anything on the allow list runs; everything else asks first (startup default) |
-| `auto` | Every tool call runs immediately, no interruption |
-| `plan` | It may only look and think; nothing is touched until you approve the plan |
-| `readonly` | Only reading, listing, searching and web fetches; writes and commands are refused |
+| `default` | Anything on the allow list runs; everything else asks first |
+| `auto` | Every tool call runs immediately |
+| `plan` | Read and think only; nothing is touched until you approve the plan |
+| `readonly` | Reading, listing, searching and web fetches only |
 
-When it asks you get four choices: `y` run / `n` skip / `a` allow the rest of this turn / **`s` don't ask again** (saved as a permission rule).
+When it asks: `y` run / `n` skip / `a` allow the rest of this turn / `s` don't ask again. A refused call reports the reason back to the model, which usually adapts.
 
-A refused call reports the reason back to the model, which usually adapts or asks you what you'd prefer — it doesn't get stuck.
-
-### Plan mode
-
-When a change is big enough that you want to see the intent first, `shift+tab` to plan
-mode, or `/mode plan`.
-
-In this mode it can read, search and run read-only commands; writes and commands are
-refused. Once it has seen enough it lays out the plan and hands it to you:
-
-```
-  │ One file only, parser.py:
-  │ 1. add a _fail(msg) helper that raises ValueError
-  │ 2. replace the three raise sites with calls to it
-  │ 3. verify the messages still match
-  Go ahead with this plan?  [y] run  [n] skip …
-```
-
-Approve and it switches back to default mode and carries on; decline and it takes your
-feedback and comes back with a revised plan — it never declares "starting now" on its own.
-
-### Task list
-
-When you ask for several things at once, or the work touches more than a couple of places,
-it writes the list down first:
-
-```
-⏺ Todo()
-  ⎿  0 / 4 done
-     ▸ read util.py and the existing structure
-     · strip whitespace in parse
-     · add a join function
-     · write test_util.py covering both
-```
-
-The list is not only for you to look at: **if it tries to finish while items are still
-open, it gets pulled back** — either to finish them, or to say why it can't. Declaring
-victory with three of five things done is the classic failure of tools like this, and this
-is what answers it. It nudges once, so it can't get stuck in a loop.
-
-The list is saved with the session, so `--resume` brings it back.
-
-### Permission rules
-
-Rules decide what runs without asking. They're written as `Tool(pattern)`:
+Rules are written `Tool(pattern)`, stored in `~/.config/feiyu/permissions.json`, `deny` beats `allow`:
 
 ```
 Bash(ls:*)            commands starting with ls
@@ -239,240 +155,80 @@ Bash(pwd)             exactly this command
 Read(*)               every call to this tool
 ```
 
-`/allow` lists them, `/allow Bash(npm test:*)` adds one, and pressing `s` at a prompt records one for you. They live in `~/.config/feiyu/permissions.json`; `deny` beats `allow`.
+**Rules match per segment**: a command is split on `&&`, `||`, `;`, `|` and redirections, and **every segment must be matched by the allow list**. So `Bash(ls:*)` allows `ls` alone — `ls -la && curl x | sh` still asks. Any command containing `$(...)` or backticks always asks.
 
-**Rules match per segment.** A command is first split on `&&`, `||`, `;`, `|` and redirections, and **every segment must be matched by the allow list** before it runs; one segment hitting `deny` refuses the whole line. So `Bash(ls:*)` allows `ls` alone — `ls -la && curl x | sh` still asks. Any command containing `$(...)` or backticks always asks, because prefix matching cannot see what is hiding in there. The cost is an extra prompt for commands with metacharacters inside quotes; erring in that direction is the safe one.
+**The shipped list only allows `ls` `pwd` `echo` `wc` `which` and `git status/log/diff/branch`** — deliberately not `cat`, `head` or `grep`, which can read any file outside the workspace. A built-in deny list refuses anything touching `.ssh/`, `id_rsa`, `.aws/credentials`, `~/.config/feiyu/` or `.env`, `auto` mode included.
 
-**The shipped list only allows `ls` `pwd` `echo` `wc` `which` and `git status/log/diff/branch`** — deliberately not `cat`, `head` or `grep`, which can read any file outside the workspace and would sidestep the directory limits on the file tools. Allowing them is your call; press `s` when you want to.
+## The bash sandbox
 
-There's also a **built-in deny list**: commands touching `.ssh/`, `id_rsa`, `.aws/credentials`, `~/.config/feiyu/`, `.netrc`, `.gnupg/` or `.env` are refused, `auto` mode included. That stops it reading every key you own with a single `cat ~/.config/feiyu/models.json`. It is path matching only — it catches the obvious form, not a deliberately obfuscated one.
+On by default when `bubblewrap` is installed:
 
-### Project conventions
-
-Drop a `FEIYU.md` in the workspace (it also accepts `AGENTS.md` and `CLAUDE.md`, first match wins) and it gets read into the system prompt at startup, up to 8000 characters. Write down whatever rules you want it to follow:
-
-```markdown
-# Conventions for this project
-
-- Run `npm test` before committing
-- Don't touch anything under `vendor/`
-- New components go in `src/components/`, one per file
-```
-
-`/context` reloads it without restarting. The welcome box shows which file was picked up and how big it is.
-
-### Context and sessions
-
-The whole history is resent every round, so it only grows. Two ways out:
-
-- **Automatic compaction**: past 75% of the context limit, it asks the model to condense the conversation into a handover summary, swaps that in for the original, and carries on. **This happens mid-task too**, so a long job that reads a dozen files won't stall on a full context. The limit defaults to 128k; if a model differs, add `"limit": 32000` to its entry in `~/.config/feiyu/models.json`.
-- **Manual**: `/compact` any time, or `/clear` to wipe it.
-
-Conversations are saved automatically — `feiyu --resume` picks up where you left off. **The save file holds the full transcript** (including file contents the agent read), lives in `~/.local/state/feiyu/sessions/` with mode 600, one per working directory. `/clear` deletes it too.
-
-### Models
-
-The model list is entirely yours — **no built-in vendors, no default model, nothing configured out of the box**. Add one with `/key add`:
+| Level | Behaviour |
+|---|---|
+| `off` | No sandbox |
+| `workspace` | Read-only outside the workspace, credential directories emptied, network on (default) |
+| `strict` | As above, plus no network |
 
 ```
-   名称（/model 里显示成这个）: ds-flash
-   接口地址 base_url: https://api.deepseek.com
-   模型 id: deepseek-v4-flash
-   API key: ****************
-   接口类型 openai / anthropic [openai]:
-  下面三项是价格，人民币每百万 token，留空就只显示 token 数不算钱
-     缓存命中价（没有缓存就填 0）: 0.02
-     输入价: 1
-     输出价: 2
+⏺ Bash(ls > ~/filelist.txt)
+  ⎿  /bin/sh: /home/Feiyu/filelist.txt: Read-only file system
 ```
 
-After that, `/model` lists them, `/model ds-flash` switches (keeping the conversation), `/key` shows what's stored with keys masked, and `/key rm <name>` deletes one. Next launch starts on whichever you used last, or pass `feiyu -m ds-flash`.
+**Writes are genuinely isolated** — the kernel's mount namespace, not string matching. Everything outside the workspace and `/tmp` is read-only, and `~/.ssh`, `~/.gnupg`, `~/.aws` plus feiyu's own `~/.config/feiyu` (your API keys) and `~/.local/state/feiyu` (transcripts, logs, memory) are replaced with empty directories.
 
-Configs live in `~/.config/feiyu/models.json`, mode 600. The key is typed into a separate hidden prompt, so it never reaches feiyu's input history.
+**Reads are only blanked in a few places — that is not isolation.** The rest of the filesystem is still readable. Real read isolation would mean mounting only what is allowed, which breaks most build tooling.
 
-The three price fields are optional: fill them in and the top border shows what the session has cost; leave them blank and it shows a token count. **There is no built-in price table** — model names and prices churn too fast, and a stale table quoting the wrong number is worse than quoting none.
+`/sandbox` switches; `FEIYU_SANDBOX=off` overrides the config for one run. Without bubblewrap it degrades to off and the welcome box says so.
 
-## What it does
+## Automation
 
-Given a task, it doesn't just start rewriting things. It looks around first — reads the relevant files, searches the code with keywords or a regex, and gets a feel for the structure — and only then creates or edits files. When it's done, it usually runs the tests or a relevant command to make sure nothing broke.
+**Run the tests after every edit**: put `verify: npm test` on a line of its own in the project conventions file. It then runs after every write or edit, and a failure goes straight back to the model to fix. Only `write_file` and `edit_file` trigger it.
 
-All of this runs through seven basic abilities: run a shell command, read a file, write a file, replace an exact chunk of a file, list files by glob, search contents with a regex, and fetch a web page. It prints each one as it goes, so you can always see what it's doing.
+**Hooks**: for more than one rule, write a `hooks.json` — globally in `~/.config/feiyu/hooks.json`, per project in `.feiyu/hooks.json`.
 
-### Office documents
+```json
+{
+  "PreToolUse":       [{"matcher": "Bash(git push:*)", "command": "echo 'open a PR' >&2; exit 1"}],
+  "PostToolUse":      [{"matcher": "Write|Update", "command": "ruff check ."}],
+  "UserPromptSubmit": [{"command": "git branch --show-current"}],
+  "Stop":             [{"command": "notify-send 'feiyu is done'"}]
+}
+```
 
-Reading a `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, `.odp` or `.pdf` extracts the text automatically, so you can just ask what a report says. Spreadsheets come back row by row, presentations slide by slide. The first six are handled with the standard library (these formats are ZIP archives of XML); PDF needs `pdftotext` on the system.
+**Exit 0 passes, non-zero blocks.** `PreToolUse` blocks the call, `PostToolUse` hands the output to the model to fix, `UserPromptSubmit` blocks the prompt (and on success its stdout is carried along as context), `Stop` is logged only. When blocking, both stdout and stderr go back to the model. `matcher` uses the same syntax as permission rules, `|` separates alternatives. Hooks receive a JSON payload on stdin.
 
-Only the **text** survives — layout, styling and images do not, and you can't edit the original file with `edit_file`. To create or modify these files, have it write a script using `python-docx`, `openpyxl` and friends, or drive LibreOffice from the command line for format conversion.
+**Project hooks need your approval the first time** — that file arrived with the repository, so running it unasked means "cloning a repo executes arbitrary code". Approvals are recorded against the file's **content hash**, so any edit re-asks. Non-interactive runs never run them.
 
-Other binary formats report a clear error instead of returning mojibake.
+**Independent review**: `/review` or `--review` opens a second model afterwards and shows it only the task and the final diff — it never took part and cannot see the reasoning. It reports on completeness, bugs and scope creep, and scores out of 10. This costs an extra API call, so it is manual.
 
-`web_fetch` accepts http/https only and converts HTML to **Markdown**, keeping headings, links and code blocks.
+## What it remembers
 
-It has two modes, and the difference matters:
+**Project conventions**: put a `FEIYU.md` in the workspace (`AGENTS.md` and `CLAUDE.md` also work, first match wins). It's read into the system prompt at startup, up to 8,000 characters. `/context` reloads it.
 
-- **With `prompt`**: the model reads the whole page and answers only what you asked. Fetching PEP 8 (51,348 chars) and asking about line length put just 123 characters into the context — 99% less than a raw fetch, and it reads the full text so a truncated tail can't hide the answer.
-- **Without `prompt`**: the whole page comes back as Markdown, truncated at 15000 characters. Fine for short pages or when you want it quoted verbatim.
-
-The same URL isn't refetched within 15 minutes.
-
-**It refuses internal addresses**: loopback (`127.0.0.1`, `localhost`), private ranges, and link-local (including the `169.254.169.254` cloud-metadata endpoint) are all rejected, redirects into them included. Otherwise a page only has to talk it into fetching the metadata endpoint and your cloud credentials walk out the door. To reach a local dev server on purpose, start it as `FEIYU_ALLOW_LOCAL_FETCH=1 feiyu`.
-
-What comes back is labelled as external data, not instructions — whatever a page says, it isn't a command. It isn't on the shipped allow list, so `default` mode asks before it sends the request (the content leaves your machine); `readonly` lets it through, since it changes nothing.
-
-A single task runs at most **25 rounds** of tool calls. At the cap it stops and says so rather than spinning forever; one more message from you and it picks up again. Press `esc` to cut a turn short.
-
-Interrupting with `esc` is safe: whatever it had already said stays in the history, and any tool call that didn't finish gets an "interrupted by the user" result of its own. The conversation is never left in a state the API rejects — just say your next thing.
-
-For shell commands, `cd` persists across calls: once it cds into a subdirectory, later commands run from there, so it doesn't have to keep writing `cd x && …`. File paths for read/write/edit stay relative to the workspace root regardless.
-
-## Long-term memory
-
-Saved sessions (`--resume`) bring back **the whole transcript**; long-term memory keeps
-**the conclusions that outlived it**, and applies with or without `--resume`.
-
-While working it calls `remember` on things worth keeping — how the build runs, a trap and
-why it exists, a preference you stated, an external dependency you can't infer from the
-code. Next time you start in **the same directory** those go into the system prompt
-automatically, with nothing for you to repeat.
+**Long-term memory**: when it learns something worth keeping it calls `remember` — how the build runs, a trap and why it exists, a preference you stated. Next time you start in **the same directory** those come back automatically.
 
 ```
 ⏺ Remember(tests here must run under pytest -q; conftest defines fixtures)
   ⎿  remembered
 ```
 
-`/memory` lists them, `/memory add <one line>` adds one by hand, `/memory forget <n>` drops
-one, `/memory clear` wipes them.
+`/memory` lists, `/memory add` adds one by hand, `/memory forget <n>` drops one, `/memory clear` wipes them. Stored in `~/.local/state/feiyu/memory/`, **deliberately separate from `FEIYU.md`** — that file is your hand-written rules and the agent has no business editing it. Capped at 40 entries / 3,000 characters. Remembering asks for confirmation: what it stores can come indirectly from a web page, and it enters every later system prompt.
 
-**This is deliberately separate from `FEIYU.md`.** That file is your hand-written rules and
-the agent has no business editing it; memory is the agent's own notebook, kept in
-`~/.local/state/feiyu/memory/<directory hash>.md` (mode 600) — never inside your repository,
-so it can't be committed by accident. The prompt also states plainly that these notes live
-in no project file, so it won't describe its own notes as "your project conventions".
+**Sessions**: saved every turn; `feiyu --resume` picks up where you left off. The file holds **the whole transcript** (including file contents it read), in `~/.local/state/feiyu/sessions/`, mode 600. `/clear` deletes it too.
 
-Capped at 40 entries / 3000 characters; the oldest go first. It travels with every request,
-so it cannot grow without limit.
+**Compaction**: past 75% of the limit it summarises the earlier conversation into a handover note and carries on, mid-task included. The limit defaults to 128k; override per model with `"limit": 32000` in `models.json`. `/compact` does it on demand.
 
-**Why remembering asks for confirmation**: what `remember` stores can come indirectly from
-a web page (something fetched persuades it to note a line), and what it stores enters
-**every** later system prompt — a persistent injection channel across sessions. So it is
-confirmed in `default` mode like a file write, refused outright in `readonly`, and every
-entry is logged. The confirmation line shows the exact text, so you are never signing blind.
+## Piping it into other programs
 
-## Automatic verification
-
-Put a line of its own in the project context file:
+Hand it a JSON schema and it produces matching output:
 
 ```
-verify: npm test
-```
-
-From then on it runs that command every time it writes or edits a file. **If it fails, the
-output goes straight back to the model to fix**, without you watching over it. `/verify`
-shows the current command, `/verify <command>` changes it for the session, `/verify off`
-turns it off.
-
-Only `write_file` and `edit_file` trigger it. `bash` can change files too, but counting it
-would mean running the test suite after every `ls` and `git status` — far more cost than
-it's worth.
-
-That line is shorthand for the hooks below — it is turned into a `PostToolUse` hook.
-
-## Hooks
-
-When one rule isn't enough, write a `hooks.json`:
-
-```json
-{
-  "PreToolUse": [
-    {"matcher": "Bash(git push:*)",
-     "command": "echo 'no direct pushes here, open a PR' >&2; exit 1"}
-  ],
-  "PostToolUse": [
-    {"matcher": "Write|Update", "command": "ruff check ."}
-  ],
-  "UserPromptSubmit": [
-    {"command": "git branch --show-current"}
-  ],
-  "Stop": [
-    {"command": "notify-send 'feiyu is done'"}
-  ]
-}
-```
-
-Four moments:
-
-| Event | When | What a non-zero exit does |
-|---|---|---|
-| `PreToolUse` | before a tool runs | blocks the call; the reason goes to the model |
-| `PostToolUse` | after files change | hands the output to the model to fix |
-| `UserPromptSubmit` | when you hit enter | blocks the prompt |
-| `Stop` | when a turn finishes | logged only, changes nothing |
-
-**Exit 0 passes, non-zero blocks**, same as Claude Code. When blocking, both stdout and
-stderr go back to the model (unittest writes failures to stderr, pytest to stdout — take
-only one and half your tools report nothing). When passing, a `UserPromptSubmit` hook's
-stdout is carried along as extra context — which is what makes the example above tell it
-your current branch every time.
-
-Hooks receive a JSON payload on stdin (`event`, `tool`, `subject`, `workspace`). `matcher`
-uses the same syntax as permission rules, `|` separates alternatives, and a bare tool name
-matches everything for that tool. Secret-looking environment variables are withheld from
-hooks, exactly as for the `bash` tool.
-
-Two locations, both active:
-
-- `~/.config/feiyu/hooks.json` — yours, effective immediately
-- `.feiyu/hooks.json` in the workspace — **needs your approval the first time**
-
-**Why project hooks ask**: that file arrived with the repository, so running it unasked
-means "cloning a repo executes arbitrary code on your machine". Approvals are recorded
-against the file's **content hash** in `~/.config/feiyu/trusted-hooks.json`, so any edit
-re-asks — otherwise one approval would keep covering the file after someone swaps in
-`rm -rf`. Non-interactive runs (pipes, scripts) never run project hooks.
-
-`/hooks` shows what is active and where each entry came from.
-
-## Independent review
-
-`/review`, or `--review` on a one-shot task:
-
-```bash
-feiyu --review "finish the error handling in parser.py"
-```
-
-Afterwards it opens **a second model** and shows it only the task and the final diff — it
-never took part in the task and cannot see the reasoning, which is the point: no marking
-your own homework. It reports on completeness, bugs, and scope creep, and ends with a
-score out of 10.
-
-With git it reads `git diff HEAD`; without a repository it diffs the before/after contents
-it recorded itself.
-
-**This costs an extra API call**, so it is manual — never automatic every turn.
-
-## Structured output
-
-To feed the result into another program, hand it a JSON schema:
-
-```bash
 feiyu --json-schema review.schema.json "check calc.py for bugs" > out.json
 ```
 
-The task runs as usual (tools, confirmations, verification all unchanged); one extra turn
-at the end produces the JSON. **stdout carries nothing but the JSON** — the interface and
-logs all go to stderr — so it pipes straight into anything. Output that doesn't match the
-schema is sent back with the specific problems, twice at most; if it still doesn't match,
-the exit code is non-zero.
+**stdout carries nothing but the JSON** — the interface and logs go to stderr, so it pipes straight into anything. Output that doesn't match is sent back with the specific problems, twice at most; if it still doesn't match, the exit code is non-zero. Supports `type` / `required` / `properties` / `items` / `enum` / `additionalProperties`.
 
-Supported keywords are `type`, `required`, `properties`, `items`, `enum` and
-`additionalProperties` — enough for this, and no `jsonschema` dependency added for it.
-
-## Logs and cost
-
-Every event is one JSONL line in `~/.local/state/feiyu/logs/<date>.jsonl` (mode 600): each
-tool call and its arguments, the permission verdict, how long it took, per-turn token
-usage, verification and review results. To work out why it did that odd thing an hour ago,
-filter by the `run` field.
+**Logs**: one JSONL line per event in `~/.local/state/feiyu/logs/<date>.jsonl` (mode 600) — every tool call and its arguments, the permission verdict, timings, per-turn token usage, verification and review results. To work out why it did that odd thing an hour ago, filter by the `run` field. `FEIYU_NO_LOG=1` disables it.
 
 `/cost` totals the last seven days by task:
 
@@ -483,82 +239,53 @@ filter by the `run` field.
    total  39.7k  ¥0.149
 ```
 
-Models with no price configured show token counts only. `FEIYU_NO_LOG=1` disables logging
-entirely. **The logs contain command text and file paths**, stored 600 like the session
-files — but they are not encrypted.
+## Models
 
-## The bash sandbox
-
-With `bubblewrap` installed this is on by default, and the `bash` tool runs inside it:
-
-| Level | Behaviour |
-|---|---|
-| `off` | no sandbox; reads and writes anywhere |
-| `workspace` | read-only outside the workspace, credential directories emptied, network on (default) |
-| `strict` | as above, plus no network |
-
-`/sandbox` shows the current state, `/sandbox strict` switches, and `FEIYU_SANDBOX=off`
-overrides the config for one run. On Arch: `pacman -S bubblewrap`. Without it the sandbox
-degrades to off and the welcome box says so.
-
-What it looks like:
+The model list is entirely yours: **no built-in vendors, no default model, no built-in price table.** Add one with `/key add`:
 
 ```
-⏺ Bash(ls > ~/filelist.txt)
-  ⎿  /bin/sh: /home/Feiyu/filelist.txt: Read-only file system
+   Name (shown in /model): ds-flash
+   base_url: https://api.deepseek.com
+   Model id: deepseek-v4-flash
+   API key: ****************
+   API type openai / anthropic [openai]:
+  The three prices below are ¥ per million tokens; leave blank to show token counts instead
+     Cache hit price (0 if there's no cache): 0.02
+     Input price: 1
+     Output price: 2
 ```
 
-**Writes are genuinely isolated.** This is the kernel's mount namespace, not string
-matching, so there is nothing to get around: everything outside the workspace and `/tmp` is
-read-only, and `~/.ssh`, `~/.gnupg`, `~/.aws` plus feiyu's own `~/.config/feiyu` (your API
-keys) and `~/.local/state/feiyu` (transcripts, logs, long-term memory) are replaced with
-empty directories.
-
-**Reads are only blanked in a few places — that is not isolation.** The rest of the
-filesystem is still readable, and the blank-list is a stopgap in the same way `DENY_PATHS`
-is. Real read isolation would mean mounting only what is allowed, which breaks most build
-tooling. Don't describe this as "reads are covered too".
-
-When something is blocked the error tells the model it hit the sandbox, so it usually
-writes inside the workspace instead or suggests `/sandbox off` rather than retrying blindly.
-
-**Hooks and the `verify:` command do not run in the sandbox** — you wrote those in your own
-config; they are not model output.
+Stored in `~/.config/feiyu/models.json`, mode 600; the key goes through a separate hidden prompt and never enters the input history. Leave the prices blank and you get token counts — there is no built-in price table because models are renamed and repriced constantly, and **a wrong price is worse than no price**.
 
 ## A note on safety
 
-Feiyu really does run commands and change files on your machine, **with exactly your permissions**. The startup `default` mode only lets allow-listed calls through and asks about the rest; `shift+tab` into `auto` skips that, but then nothing is confirmed.
+Feiyu really does run commands and edit files on your machine, **with exactly your permissions**.
 
-The three file tools (`read_file` / `write_file` / `edit_file`) are confined to the working directory and reject anything outside it. The **`bash` tool is not** — it can read and write any path your account can reach, and it has network access. A `cd` outside the workspace is bounced back, but that only controls where the *next* command starts; it doesn't stop the current one from touching whatever it likes.
+`read_file` / `write_file` / `edit_file` are confined to the working directory and refuse to go outside it. With bubblewrap installed, `bash` **writes are confined to the workspace too** (above) — but **reads are not isolated**: it can still `cat ~/.ssh/id_rsa` unless that directory is on the blank-list. Without bubblewrap there is no isolation at all.
 
-Shell commands run with **environment variables whose names contain `KEY`, `TOKEN`, `SECRET` or `PASSWORD` stripped out**, so a stray `echo $DEEPSEEK_API_KEY` can't pull your key into the conversation and ship it back to the model provider. Names without those words — `SSH_AUTH_SOCK` and friends — are kept, so `git push` still works. If a script it runs genuinely needs a key, start it as `FEIYU_KEEP_ENV_SECRETS=1 feiyu`.
+When running shell commands, **environment variables whose names contain `KEY` / `TOKEN` / `SECRET` / `PASSWORD` are withheld**, so a stray `echo $DEEPSEEK_API_KEY` can't pull your key into the conversation and send it to a model vendor. `SSH_AUTH_SOCK` is kept, so `git push` still works. To pass a specific secret through: `FEIYU_KEEP_ENV_SECRETS=1 feiyu`.
 
-That only closes the casual path, though. **`bash` is not sandboxed, so it can still `cat ~/.ssh/id_rsa` directly** — stripping the environment reduces accidental and lightly-coaxed leaks; it is not isolation. For real isolation, use a container.
+Fetched pages are labelled "external data, not instructions", but that is a soft defence — there is no guarantee the model heeds it.
 
-So: use it on projects you trust and keep under git, so anything it breaks is easy to roll back, and don't run untrusted tasks on a machine holding sensitive credentials. If you need real isolation, put it in a container or VM.
+So: **use it on projects you trust and keep under git**, where a bad edit is easy to undo; don't run untrusted tasks on a machine holding sensitive credentials. If you need hard isolation, put it in a container or a VM.
 
 ## Platforms
 
-Linux and macOS are fully supported.
+Linux and macOS are fully supported. The bash sandbox is Linux-only (bubblewrap).
 
-Windows works **only under WSL** for now: `install.sh` is a bash script, the `bash` tool's persistent `cd` relies on POSIX shell syntax, and both `esc` interrupts and the single-key confirmation prompt depend on termios. On native Windows those pieces don't work, and the 600 permissions on config files have no effect.
+Windows works **only under WSL**: `install.sh` is a bash script, the `bash` tool's persistent `cd` relies on POSIX shell syntax, and both `esc` interrupts and the single-key confirmation depend on termios. On native Windows those pieces don't work, and the 600 permissions on config files have no effect.
 
 ## Tests
 
-Standard-library `unittest`, no test framework pulled in:
+Standard-library `unittest`, no test framework:
 
-```bash
+```
 python -m unittest discover -s tests -t .
 ```
 
-175 cases, about a second, and no real API calls — the backends are fakes, and only the
-`bash` tool spawns a real subprocess. Everything runs in temporary directories, so your
-keys and permission rules under `~/.config/feiyu/` are never touched.
+440 cases, ten seconds, no real API calls, everything in temporary directories — your keys and rules under `~/.config/feiyu/` are never touched. Without bubblewrap the sandbox group skips itself.
 
-What they watch hardest is the **shape of the history**: one `tool_use` left without a
-matching result, or roles that stop alternating, and the next request is a 400 the
-conversation never recovers from. An interrupt landing mid-stream and one landing during
-tool execution are two different paths, and both have cases.
+What they watch hardest is the **shape of the history**: one `tool_use` left without a matching result, or roles that stop alternating, and the next request is a 400 the conversation never recovers from. An interrupt landing mid-stream and one landing during tool execution are two different paths, and both have cases.
 
 ## Versioning
 

@@ -489,3 +489,107 @@ class TestFinishJson(Base):
     def test_没有模型时报错(self):
         self.agent.backend = None
         self.assertTrue(quiet(self.agent.finish_json, self.SPEC)[1])
+
+
+class TestTransient(unittest.TestCase):
+    """判断一个错值不值得重试 不绑 SDK 的异常类：两种后端，
+    openai 还是可选依赖，硬 import 会把 anthropic-only 的装法弄坏 """
+
+    def make(self, name, code=None):
+        exc = type(name, (Exception,), {})()
+        if code is not None:
+            exc.status_code = code
+        return exc
+
+    def test_按状态码认(self):
+        for code in (429, 500, 502, 503, 504, 408):
+            self.assertTrue(agent_mod.transient(self.make("Whatever", code)), code)
+
+    def test_客户端错误不重试(self):
+        for code in (400, 401, 403, 404, 422):
+            self.assertFalse(agent_mod.transient(self.make("Whatever", code)), code)
+
+    def test_按类名认连接类错误(self):
+        for name in ("APIConnectionError", "APITimeoutError", "RateLimitError"):
+            self.assertTrue(agent_mod.transient(self.make(name)), name)
+
+    def test_认得出子类(self):
+        base = type("APIConnectionError", (Exception,), {})
+        self.assertTrue(agent_mod.transient(type("我的错", (base,), {})()))
+
+    def test_普通异常不重试(self):
+        self.assertFalse(agent_mod.transient(ValueError("随便")))
+
+
+class TestStreamRetry(Base):
+    def setUp(self):
+        super().setUp()
+        # 别让测试真的睡两秒
+        self._wait = agent_mod.RETRY_WAIT
+        agent_mod.RETRY_WAIT = 0
+        self.addCleanup(lambda: setattr(agent_mod, "RETRY_WAIT", self._wait))
+
+    def boom(self, times, exc_factory, text=""):
+        """前 times 次抛错，之后正常返回 """
+        state = {"n": 0}
+        b = self.use([("答完了", [])])
+        real = b.run_turn
+        def run_turn(on_text):
+            if state["n"] < times:
+                state["n"] += 1
+                if text:
+                    on_text(text)
+                raise exc_factory()
+            return real(on_text)
+        b.run_turn = run_turn
+        return b, state
+
+    def rate_limit(self):
+        exc = type("RateLimitError", (Exception,), {})()
+        exc.status_code = 429
+        return exc
+
+    def test_还没吐字就重试(self):
+        b, state = self.boom(1, self.rate_limit)
+        self.assertEqual(quiet(self.agent.send, "问题"), "答完了")
+        self.assertEqual(state["n"], 1)
+
+    def test_重试有上限(self):
+        b, state = self.boom(99, self.rate_limit)
+        with self.assertRaises(Exception):
+            quiet(self.agent.send, "问题")
+        self.assertEqual(state["n"], agent_mod.STREAM_RETRIES + 1)
+
+    def test_已经吐字了就不重试(self):
+        # 重发会让模型把刚说的话再说一遍
+        b, state = self.boom(99, self.rate_limit, text="我先看一下这个文件")
+        with self.assertRaises(Exception):
+            quiet(self.agent.send, "问题")
+        self.assertEqual(state["n"], 1)
+
+    def test_已经吐的字要留在历史里(self):
+        b, _ = self.boom(99, self.rate_limit, text="我先看一下")
+        with self.assertRaises(Exception):
+            quiet(self.agent.send, "问题")
+        self.assertEqual(b.messages[-1]["role"], "assistant")
+        self.assertIn("我先看一下", b.messages[-1]["content"])
+
+    def test_报错后角色仍然交替(self):
+        # 不补 assistant 的话，下次请求两条连着的 user，跟中断那个坑一样
+        b, _ = self.boom(99, self.rate_limit)
+        with self.assertRaises(Exception):
+            quiet(self.agent.send, "问题")
+        b.add_user_message("再说一句")
+        roles = [m["role"] for m in b.messages]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
+
+    def test_不该重试的错直接抛(self):
+        bad = lambda: ValueError("参数写错了")
+        b, state = self.boom(99, bad)
+        with self.assertRaises(ValueError):
+            quiet(self.agent.send, "问题")
+        self.assertEqual(state["n"], 1)
+
+    def test_重试计数每轮清零(self):
+        # 第一轮重试过，不该影响后面几轮的额度
+        self.assertEqual(agent_mod.STREAM_RETRIES, 2)

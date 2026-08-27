@@ -103,7 +103,10 @@ def load() -> dict:
 def save(rules: dict) -> None:
     try:
         os.makedirs(_DIR, exist_ok=True)
-        with open(STORE, "w", encoding="utf-8") as f:
+        # 跟 feiyu 其他配置一样 0600：这份列的是哪些命令不用问就能跑，
+        # 别人读得到就等于知道从哪儿下手
+        fd = os.open(STORE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"allow": rules["allow"], "deny": rules["deny"]}, f, ensure_ascii=False, indent=1)
     except OSError:
         pass

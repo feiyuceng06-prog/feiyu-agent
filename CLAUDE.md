@@ -1,6 +1,6 @@
 # Feiyu Agent — 给 Claude 的项目约定
 
-跑在终端里的编程 agent。约 3200 行 Python，无框架。
+跑在终端里的编程 agent。约 4800 行 Python，无框架。
 
 verify: python -m unittest discover -s tests -t .
 
@@ -388,6 +388,32 @@ PostToolUse 的 matcher 要拿它匹配。
 测试里 `需要沙箱 = unittest.skipUnless(sandbox.available(), ...)`：
 没有 bwrap 的机器上这些用例要跳过，不能让整个套件挂掉。
 **测真隔离不能只断言 argv 拼对了**，得真跑一遍看写不写得进去。
+
+## 0.20.0 的三处修补
+
+**bash 超时必须自己接住 `TimeoutExpired`**（`_timed_out`）。让它冒到 `run()` 的兜底
+`except Exception` 里的话，模型只看到一句 `TimeoutExpired: Command [...] timed out`——
+命令停下前打印的东西全丢了，它根本不知道卡在哪一步；沙箱开着时那串 argv 还会把
+整条 bwrap 命令行（二三十项）灌进上下文。注意 **`TimeoutExpired.stdout` 是 bytes**，
+`text=True` 也不管用，要走 `_decode()`。
+
+**`search` 截断必须说出来。**上限 `SEARCH_CAP = 200`，到顶了 summary 标「（已截断）」、
+正文末尾也加一句。只报「200 处匹配」的话模型会以为搜全了——实测本机一个仓库
+`const` 实际 743 处，「这个函数在哪些地方被调用」之类的结论就是错的。
+有 `rg` 走 `_ripgrep()`（141M 仓库 0.8 秒 → 5 毫秒），**rg 报错就退回 `_scan()`**：
+它是 Rust 正则，不支持反向引用和前后瞻，不能因为它挑食把整个搜索判死。
+`returncode == 1` 是「没匹配」不是出错。
+
+**流中途失败的重试。**两个 SDK 自己会重试 429/5xx/连接错误（`providers.RETRIES = 4`），
+但那只管**请求发出之前**；流一旦开始断了就没人管，而 agent 一轮动辄几十秒。
+`send()` 里补了 `except Exception`：**还没吐字就重发（安全），吐了字就不重发**
+（模型会把刚说的话再说一遍），两种情况都要 `_note_interrupted()` 保住已说的话和角色交替
+——不补的话就是 0.12.0 那个「历史废掉」的坑换了个入口。
+`transient()` **按状态码和类名判断，不 import SDK 的异常类**：两种后端，
+openai 还是可选依赖，硬 import 会把 anthropic-only 的装法弄坏。
+
+顺带清掉的：`_BLOCK_TAGS`（死常量）、`permissions.json` / `sandbox.json` 没按 0600 存、
+`_web_cache` 无上限（TTL 只在读时检查，过期条目永远不清，存的是整页正文）。
 
 ## 已知问题（未修，用户知情）
 

@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from . import pricing
 
 
+# 两个 SDK 自带的重试次数（429 / 5xx / 连接错误，指数退避）
+# 只管请求发出之前；流中途断掉由 agent.send() 那边接
+RETRIES = 4
+
 SUMMARY_PROMPT = (
     "下面是一段人和编程 agent 的对话记录 把它压缩成一段交接说明，"
     "让接手的人只看这段就能继续干活 必须保留：用户的目标和明确要求、"
@@ -106,7 +110,9 @@ class AnthropicBackend(Billing):
                  base_url: str | None = None, api_key: str | None = None):
         import anthropic
 
+        # SDK 默认重试 2 次；agent 一跑就是几十轮请求，多给两次更划算
         self.client = anthropic.Anthropic(
+            max_retries=RETRIES,
             **{k: v for k, v in (("base_url", base_url), ("api_key", api_key)) if v}
         )
         self.system = system
@@ -227,7 +233,7 @@ class OpenAICompatBackend(Billing):
                 "请先安装：pip install openai"
             ) from exc
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=RETRIES)
         self.model = model
         self.system = system
         self.tools = _to_openai_tools(tools)
