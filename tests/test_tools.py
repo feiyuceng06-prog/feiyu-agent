@@ -292,3 +292,38 @@ class TestDispatch(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBinaryDetection(Base):
+    """判二进制只看开头 4096 字节，**必须用增量解码器**
+
+    直接 decode 切片会从多字节字符中间切断：中文一个字 3 字节，
+    第 4096 字节落在字符中间的概率约 2/3 实测本项目的 feiyu/agent.py
+    就因此被判成二进制读不了
+    """
+
+    def test_长中文文件不是二进制(self):
+        for pad in range(4090, 4100):
+            path = self.write("中文%d.py" % pad, "# " + "中" * (pad // 3) + "\nx = 1\n")
+            self.assertFalse(tools._looks_binary(path.read_bytes()), pad)
+
+    def test_边界正好切断中文字符(self):
+        # 造一个第 4096 字节必然落在中文字符中间的文件
+        raw = ("a" * 4095 + "中" * 10).encode("utf-8")
+        self.assertFalse(tools._looks_binary(raw))
+
+    def test_真的二进制还是认得出(self):
+        self.assertTrue(tools._looks_binary(b"\x00\x01\x02" * 100))
+        self.assertTrue(tools._looks_binary(b"\xff\xfe\xff\xfe" * 100))
+
+    def test_读得出带中文的长文件(self):
+        self.write("长.py", "# " + "中" * 2000 + "\nx = 1\n")
+        out = self.box.run("read_file", {"path": "长.py"})
+        self.assertFalse(out.is_error)
+        self.assertIn("x = 1", out.content)
+
+    def test_读得出本项目自己的源码(self):
+        # 这条是回归：agent.py 恰好长到会踩中这个坑
+        raw = Path(__file__).resolve().parent.parent.joinpath(
+            "feiyu/agent.py").read_bytes()
+        self.assertFalse(tools._looks_binary(raw))

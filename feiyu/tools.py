@@ -1,3 +1,4 @@
+import codecs
 import difflib
 import ipaddress
 import os
@@ -129,6 +130,28 @@ TOOL_SCHEMAS = [
                 "max_chars": {"type": "integer", "description": "不填 prompt 时最多返回多少字符（默认 15000） "},
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "task",
+        "description": (
+            "派一个子 agent 去代码库里查清楚一件事，只把结论带回来 "
+            "适合「哪些地方做了 X」「这个功能是怎么串起来的」「有没有别处也这么写」"
+            "这类要翻很多文件才答得上来的问题——原文不会进你的上下文，只回来一段结论 "
+            "子 agent **只能读**（读文件、列目录、搜索），改不了东西也上不了网 "
+            "它看不到你和用户说过什么，所以问题要写完整、能独立看懂 "
+            "已经知道要看哪个文件的话直接 read_file，别为这个派人 "
+            "几件互不相干的事可以一次派几个，它们会同时跑 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "交给它的问题 写完整，它没有别的上下文 ",
+                },
+            },
+            "required": ["prompt"],
         },
     },
     {
@@ -373,10 +396,17 @@ def read_document(target: Path) -> str | None:
 
 
 def _looks_binary(raw: bytes) -> bool:
-    if b"\x00" in raw[:4096]:
+    """只看开头一段就判断 用增量解码器，不能直接 decode 切片
+
+    切片会从多字节字符中间切断：一个中文字符 3 字节，第 4096 字节落在字符
+    中间的概率约 2/3，直接 decode 就报错，整个文件被判成二进制读不了
+    增量解码器会把结尾不完整的那几个字节留在缓冲里，不算错
+    """
+    head = raw[:4096]
+    if b"\x00" in head:
         return True
     try:
-        raw[:4096].decode("utf-8")
+        codecs.getincrementaldecoder("utf-8")().decode(head)
     except UnicodeDecodeError:
         return True
     return False
@@ -570,11 +600,13 @@ def _diff(old_text: str, new_text: str, keep: int = 6) -> list[tuple[str, str]]:
 
 
 class Toolbox:
-    def __init__(self, root: Path, ask_model=None, on_remember=None, on_exit_plan=None):
+    def __init__(self, root: Path, ask_model=None, on_remember=None, on_exit_plan=None,
+                 spawn=None):
         self.root = root.resolve()
         self.ask_model = ask_model      # (提示词) -> 回答，用于 web_fetch 的 prompt 模式
         self.on_remember = on_remember  # 记了新东西就回调，让系统提示当场重拼
         self.on_exit_plan = on_exit_plan  # (方案) -> (同意没, 说明)，切模式是 agent 的事
+        self.spawn = spawn      # (问题) -> (结论, 过程行)，建后端要模型配置，是 agent 的事
         self.todos = todo.Todos()
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
 
@@ -786,6 +818,16 @@ class Toolbox:
             head + shown + tail,
             summary="%s 抓到 %d 字%s" % (ctype or "未知类型", len(shown), "（已截断）" if clipped else ""),
         )
+
+    def _tool_task(self, args: dict) -> ToolResult:
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return ToolResult("要交给它的问题是空的", is_error=True, summary="没写问题")
+        if self.spawn is None:
+            return ToolResult("现在派不出子 agent（没有可用的模型配置）", is_error=True,
+                              summary="派不出去")
+        report, lines = self.spawn(prompt)
+        return ToolResult(report, summary="查完了，回来 %d 字" % len(report), detail=lines)
 
     def _tool_todo(self, args: dict) -> ToolResult:
         ok, note = self.todos.replace(args.get("items"))

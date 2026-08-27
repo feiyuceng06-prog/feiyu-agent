@@ -112,6 +112,37 @@ Context is a percentage, not a token count. Every request carries roughly 1.5k t
 
 Cost comes from the three price fields you fill in during `/key add`; leave them blank and it shows a token count instead. See "Models" below.
 
+### Subagents
+
+A question like "how does this project handle interrupts" takes a dozen files and hundreds
+of lines to answer — all of which would bloat the conversation. Instead it sends a subagent
+and keeps only the conclusion:
+
+```
+⏺ Task(work out how KeyboardInterrupt is handled and which files are involved)
+     read_file feiyu/ui.py → 80 lines
+     search def _run_tools → 1 match
+     read_file feiyu/agent.py → 100 lines
+     …
+  ⎿  done, 812 characters back
+```
+
+Measured on that run: **the subagent burned 41,579 tokens; the main conversation grew by
+2,284.** Not one line of those twenty file reads entered the main context.
+
+A subagent **can only read** — `read_file`, `list_files`, `search`, and nothing else. That
+isn't laziness; three properties come with it. It cannot change anything, so it never needs
+to stop and ask you (it runs on a worker thread and cannot read the keyboard). That in turn
+makes it safe to run several at once for unrelated questions. And with no `web_fetch` there
+is no "subagent read a page and got talked into something else" path.
+
+The cost is that it cannot do anything needing the network or a write; the main agent does
+those itself.
+
+It cannot see your conversation with the main agent — deliberately, which is why the main
+agent writes it a self-contained question. Its usage counts towards the status bar and
+`/cost`: **spending you cannot see is worse than spending you can**.
+
 ### Parallel reads
 
 When a batch of calls is **entirely read-only**, they run at the same time:

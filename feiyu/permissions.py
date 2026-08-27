@@ -29,6 +29,7 @@ RULE_NAME = {
     "search": "Search",
     "web_fetch": "Fetch",
     "remember": "Remember",
+    "task": "Task",
     "todo": "Todo",
     "exit_plan": "Plan",
 }
@@ -53,6 +54,8 @@ DEFAULT_ALLOW = [
     # 不放行的话每列一次清单都要点一次确认，烦到没人愿意让它列
     "Todo(*)",
     "Plan(*)",
+    # 子 agent 只能读，跟 Read/Search 同一档；不放行的话每派一个都要点一次
+    "Task(*)",
 ]
 
 # 出厂拦截的：碰这些路径的命令一律不放行，deny 优先所以 allow 里写了也没用

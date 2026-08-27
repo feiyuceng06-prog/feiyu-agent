@@ -7,7 +7,9 @@ from pathlib import Path
 
 from . import ui
 from . import hooks as hooks_mod
-from . import keys, memory, permissions, schema as schema_mod, todo as todo_mod
+from . import keys, memory, permissions, schema as schema_mod
+from . import subagent as subagent_mod
+from . import todo as todo_mod
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 from .trace import Trace
@@ -112,7 +114,7 @@ VERIFY_AFTER = {"write_file", "edit_file"}
 # bash 不在里面——它共享 self.cwd，两条并发的 cd 会互相盖掉；
 # 写类工具不在里面——同一批里改同一个文件就是竞态；
 # todo / exit_plan / remember 都改 agent 自己的状态，也不能并发
-PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch"}
+PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "task"}
 # 上限拦一下：一批十个 web_fetch 同时打同一个站点不礼貌，线程也不是免费的
 MAX_PARALLEL = 4
 
@@ -171,8 +173,11 @@ class Feiyu:
     def __init__(self, workspace: Path, *, model: str = "", trace: Trace | None = None):
         self.toolbox = Toolbox(workspace, ask_model=self._ask_model,
                                on_remember=self._refresh_system,
-                               on_exit_plan=self._exit_plan)
+                               on_exit_plan=self._exit_plan,
+                               spawn=self._spawn)
         self.approve_plan = None     # 界面层塞进来：(方案) -> bool
+        self.subagent_tokens = 0     # 子 agent 烧掉的量，不进主对话但照样计费
+        self.subagent_cost = 0.0
         self.context_file, self.context_text = load_project_context(workspace)
         self.trace = trace or Trace(workspace, enabled=False)
         self.verify = find_verify(self.context_text)
@@ -275,8 +280,8 @@ class Feiyu:
 
     @property
     def tokens(self) -> int:
-        """累计计费量 """
-        return getattr(self.backend, "tokens_total", 0)
+        """累计计费量 子 agent 的也算进来——它烧的钱不会因为看不见就不用付 """
+        return getattr(self.backend, "tokens_total", 0) + self.subagent_tokens
 
     @property
     def context(self) -> int:
@@ -288,7 +293,7 @@ class Feiyu:
         """累计花费（人民币） 价格表里没有这个模型时返回 None """
         if not getattr(self.backend, "priced", False):
             return None
-        return getattr(self.backend, "cost", 0.0)
+        return getattr(self.backend, "cost", 0.0) + self.subagent_cost
 
     def reset(self) -> None:
         self.backend.reset()
@@ -334,6 +339,19 @@ class Feiyu:
         self.mode = name
         self._refresh_system()
         return name
+
+    def _spawn(self, prompt: str) -> tuple[str, list]:
+        """派一个子 agent 它用同一条模型配置，但后端和 Toolbox 都是全新的——
+        带着主对话的历史就谈不上「独立去看」了，上下文也照样会被撑爆 """
+        entry = keys.load().get(self.name)
+        if entry is None:
+            return "（没有可用的模型配置，派不出去）", []
+        report, lines, used = subagent_mod.run(
+            prompt, entry=entry, workspace=self.toolbox.root, trace=self.trace)
+        self.subagent_tokens += used["tokens"]
+        if used["priced"]:
+            self.subagent_cost += used["cost"]
+        return report, lines
 
     def _exit_plan(self, plan: str) -> tuple[bool, str]:
         """模型交方案，用户点头就切回默认模式 """

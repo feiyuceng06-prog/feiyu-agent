@@ -10,7 +10,7 @@ verify: python -m unittest discover -s tests -t .
 |---|---|
 | `feiyu/__main__.py` | CLI 参数、主循环、斜杠命令 |
 | `feiyu/agent.py` | `SYSTEM_PROMPT`、`STYLES`、turn 循环、工具分发 |
-| `feiyu/tools.py` | 十个工具的 schema 与实现，含办公文档抽取 |
+| `feiyu/tools.py` | 十一个工具的 schema 与实现，含办公文档抽取 |
 | `feiyu/providers.py` | anthropic / openai 兼容两种后端，用量与计价 |
 | `feiyu/keys.py` | 模型清单（接口地址/密钥/价格）的存取 |
 | `feiyu/permissions.py` | 命令级权限规则 |
@@ -22,6 +22,7 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/memory.py` | 跨会话长期记忆（agent 自己记的事实） |
 | `feiyu/hooks.py` | 钩子：四个时机跑外部命令，含项目钩子的信任机制 |
 | `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
+| `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -171,6 +172,32 @@ ods 还要处理 `number-columns-repeated`（连续空列会被压成一个单�
   （跟 `on_remember` 一个套路），Toolbox 只管工作区。
 - 出厂 allow 放行 `Todo(*)` 和 `Plan(*)`：都不碰工作区也不出网，
   不放行的话每列一次清单都要点一次确认，烦到没人愿意让它列。
+
+## 子 agent（0.18.0）
+
+`feiyu/subagent.py`。存在的**全部理由是上下文隔离**：实测一次派活，
+子 agent 烧 41579 token，主对话只涨 2284。改这块前先想清楚会不会破坏这一点。
+
+- **工具集限死 `TOOLS = (read_file, list_files, search)`**，三个性质捆在一起：
+  改不了东西 → 不需要中途要确认（它跑在工作线程里，读不了 stdin）→ 因此能进
+  `PARALLEL_SAFE`。没有 `web_fetch` 也就掐掉了「读网页被诱导去干别的」这条注入路径。
+  **想给它加工具前先确认这三条还成立。**
+- **必须 `build_backend` 建全新后端 + 全新 `Toolbox`**：带着主对话历史就谈不上
+  「独立去看」，上下文也照样被撑爆；共用 Toolbox 则 cwd/清单会串。
+- **过程行带回去、不当场打印**：并行派几个时各自往屏幕上写会交叉成一团，
+  由调用方在主线程按顺序画（走 `ToolResult.detail`）。
+- **用量要带回来算进 `Feiyu.tokens` / `.cost`**（`subagent_tokens` / `subagent_cost`）。
+  不带的话子 agent 的钱就成了看不见的开销——这比看得见的危险。
+- `spawn` 走 Toolbox 回调（跟 `on_remember` / `on_exit_plan` 一个套路）：
+  建后端要模型配置，那是 agent 的事，Toolbox 只管工作区。
+
+## 判二进制必须用增量解码器（0.18.0 修）
+
+`_looks_binary` 只看开头 4096 字节。**直接 `raw[:4096].decode()` 是错的**：
+一个中文字符 3 字节，第 4096 字节落在字符中间的概率约 2/3，一报错整个文件就被
+判成二进制读不了。**本项目自己的 `feiyu/agent.py` 就中招了**——子 agent 的端到端
+测试里它反复报「二进制文件，无法直接读」才发现。用 `codecs.getincrementaldecoder`，
+结尾不完整的字节会留在缓冲里，不算错。
 
 ## 并行工具调用（0.17.0）
 

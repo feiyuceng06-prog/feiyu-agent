@@ -195,6 +195,7 @@ _LABEL = {
     "search": "Search",
     "web_fetch": "Fetch",
     "remember": "Remember",
+    "task": "Task",
     "todo": "Todo",
     "exit_plan": "Plan",
 }
@@ -209,6 +210,7 @@ _HEADLINE_ARG = {
     # 确认时人只看得到这一行，不把 fact 显出来就等于让人盲签
     "remember": "fact",
     "exit_plan": "plan",
+    "task": "prompt",
 }
 
 
