@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import hooks as hooks_mod
 from . import keys, memory, permissions, pricing, schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import CONTEXT_FILES, MODES, STYLES, Feiyu, find_score
@@ -79,7 +80,13 @@ def main() -> int:
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
     # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
     agent.approve = lambda name, args: ui.confirm("要执行 %s 吗？" % ui.tool_label(name))
+    # 项目钩子是仓库里带下来的命令，第一次见到（和内容变了之后）必须让用户点头
+    agent.approve_hooks = lambda path, count: ui.ask_yes_no(
+        "%s 里有 %d 条项目钩子，它们会在这台机器上执行 要启用吗？" % (hooks_mod.PROJECT, count))
+    note = agent.load_hooks()
 
+    if note:
+        print(ui.notice(note), file=sys.stderr)
     if args.prompt:
         task = " ".join(args.prompt)
         if spec is None:
@@ -181,6 +188,8 @@ def main() -> int:
                 print(_cost(agent, workspace))
             elif cmd == "/memory":
                 print(_memory(agent, arg))
+            elif cmd == "/hooks":
+                print(_hooks(agent))
             else:
                 print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
             print()
@@ -433,6 +442,32 @@ def _verify(agent: Feiyu, arg: str) -> str:
             % (agent.context_file or "、".join(CONTEXT_FILES)))
     state = {True: "上次通过", False: "上次没过", None: "还没跑过"}[agent.verified_ok]
     return ui.notice("当前校验命令：%s（%s） /verify off 关掉" % (agent.verify, state))
+
+
+def _hooks(agent: Feiyu) -> str:
+    found = agent.all_hooks
+    rows = []
+    if not found:
+        rows.append(ui.notice("没有配任何钩子"))
+    else:
+        rows.append(ui.notice("会在这些时机跑（退出码非 0 就拦下，输出回给模型）"))
+        for event in hooks_mod.EVENTS:
+            mine = [h for h in found if h.event == event]
+            if not mine:
+                continue
+            rows.append("   " + ui.bold(event))
+            for h in mine:
+                rows.append("      " + ui.paint("grey", "%-22s %s" % (
+                    ui.clip(h.matcher, 22), ui.clip(h.command, ui.width() - 34))))
+                rows.append("      " + ui.paint("grey", " " * 23 + "来自 " + h.source))
+    if agent.hooks_note:
+        rows += ["", ui.warn(agent.hooks_note)]
+    path, _, state = hooks_mod.project_state(agent.toolbox.root)
+    rows += ["", ui.notice("全局 %s" % hooks_mod.GLOBAL)]
+    rows.append(ui.notice("项目 %s（%s）" % (hooks_mod.PROJECT, {
+        "none": "没有这个文件", "trusted": "已信任", "unknown": "存在但未启用"}[state])))
+    rows.append(ui.notice("改完配置重启生效 项目钩子内容一变就要重新确认"))
+    return "\n".join(rows)
 
 
 def _memory(agent: Feiyu, arg: str) -> str:

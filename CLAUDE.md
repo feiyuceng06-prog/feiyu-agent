@@ -20,6 +20,7 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/trace.py` | 结构化日志（JSONL）与按任务的花费汇总 |
 | `feiyu/schema.py` | 结构化输出：抠 JSON + 最小 schema 校验 |
 | `feiyu/memory.py` | 跨会话长期记忆（agent 自己记的事实） |
+| `feiyu/hooks.py` | 钩子：四个时机跑外部命令，含项目钩子的信任机制 |
 
 **分层原则：`agent.py` 和 `tools.py` 只产出结构化事实**（`ToolResult.summary` / `.detail`），
 怎么画一律由 `ui.py` 决定。加新工具时给它填好 `summary`，不要在业务代码里拼 ANSI。
@@ -203,17 +204,39 @@ review / json / interrupt / run_end。`/cost` 按 run 汇总——**一次运行
 **写日志绝不能弄崩主流程**：`Trace.write` 把所有异常咽掉。`FEIYU_NO_LOG=1` 关掉。
 参数值截到 300 字（`MAX_VALUE`），不记文件内容——排查要的是"调了什么"。
 
-## 自动校验（0.13.0）
+## 自动校验（0.13.0）与钩子（0.15.0）
 
 约定文件里单起一行 `verify: <命令>`（`VERIFY_LINE`，要求顶格且整行只有这一句，
 免得正文里提一嘴 verify 就被当配置）。`/verify` 可以临时改或关掉。
 
+**0.15.0 起 verify 不再是独立机制**：`Feiyu.all_hooks` 把它合成成一条
+`PostToolUse` + `Write|Update` 的钩子。verify 本来就是「改完文件跑个命令」，
+两套机制各写一遍只会行为不一致。改这块时改钩子那条路径就行。
+
 **只有 `write_file` / `edit_file` 触发**（`VERIFY_AFTER`）。bash 也能改文件（`sed -i`），
 但把它算进来的话每次 `ls` / `git status` 之后都要跑一遍测试——实测就是这样，
 一个任务里跑了两遍。代价远大于收益。
+`_run_tools` 因此返回**最后一次改动的 `(工具名, 主参数)`** 而不是 bool——
+PostToolUse 的 matcher 要拿它匹配。
 
 没通过时把报错**并进最后一条 tool_result**，不另起 user 消息：两种后端的消息结构
 不通用，tool_result 是唯一两边都能安全追加内容的地方，而且不会破坏配对。
+
+### 钩子的几个决定
+
+- 四个事件：`PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop`。
+  退出码 0 放行、非 0 拦下，跟 Claude Code 一致。
+- **`matcher` 复用 `permissions.matches()`**，不另发明语法。`|` 分隔，裸名当 `Name(*)`。
+- **`PreToolUse` 放在权限门之前**：反正要被拦，没必要先烦用户点一次确认。
+- **失败时 stdout 和 stderr 都要**：unittest 把失败写 stderr、pytest 写 stdout，
+  只取一个的话总有一半工具的报错是空的（第一版只取了 stderr，pytest 场景全瞎）。
+  成功时只取 stdout —— `UserPromptSubmit` 拿它当额外背景，stderr 多是噪音。
+- **项目钩子必须先经用户同意**，这条不能省：`.feiyu/hooks.json` 是从仓库带下来的，
+  直接跑等于「clone 一个仓库就执行任意代码」。**按内容 hash 认**
+  （`trusted-hooks.json`），文件一改就重新问——按路径认的话，同意过一次之后
+  仓库里换成 `rm -rf` 也照跑。非交互场景（`approve=None`）一律不跑。
+- 启动时的信任问句用 `ui.ask_yes_no()`，**不能用 `ui.confirm()`**：
+  后者要 `EscInterrupt` 的守卫，那时还没建起来。非终端一律返回 False。
 
 ## 评分 agent（0.13.0）
 

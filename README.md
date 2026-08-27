@@ -100,6 +100,7 @@ feiyu "给命令行加一个 --json 参数，并更新测试"
 | `/review` | 让一个没看过过程的模型给这次改动打分 |
 | `/cost` | 按任务看最近的 token 和花费 |
 | `/memory` | 查看 / 添加 / 删除这个目录的长期记忆 |
+| `/hooks` | 看在哪些时机会跑哪些外部命令 |
 | `/context` | 查看并重新加载项目约定文件 |
 | `/compact` | 把历史压缩成一段摘要，省上下文 |
 | `/clear` | 清空对话历史和存盘，重新开始 |
@@ -262,6 +263,60 @@ verify: npm test
 
 只有 `write_file` 和 `edit_file` 触发。`bash` 也能改文件，但把它算进来的话，
 每次 `ls` 或 `git status` 之后都要跑一遍测试，代价远大于收益。
+
+这一行其实就是下面钩子的简写——它会被当成一条 `PostToolUse` 钩子来跑。
+
+## 钩子
+
+想加的规矩不止「改完跑测试」一条时，写 `hooks.json`：
+
+```json
+{
+  "PreToolUse": [
+    {"matcher": "Bash(git push:*)",
+     "command": "echo '这个仓库禁止直接 push，请开 PR' >&2; exit 1"}
+  ],
+  "PostToolUse": [
+    {"matcher": "Write|Update", "command": "ruff check ."}
+  ],
+  "UserPromptSubmit": [
+    {"command": "git branch --show-current"}
+  ],
+  "Stop": [
+    {"command": "notify-send 'feiyu 干完了'"}
+  ]
+}
+```
+
+四个时机：
+
+| 事件 | 什么时候 | 非零退出码的效果 |
+|---|---|---|
+| `PreToolUse` | 工具跑之前 | 拦下这次调用，理由回给模型 |
+| `PostToolUse` | 改完文件之后 | 把输出交给模型，让它自己修 |
+| `UserPromptSubmit` | 你按下回车时 | 拦下这次提问 |
+| `Stop` | 一轮答完时 | 只记日志，不影响流程 |
+
+**退出码 0 放行、非 0 拦下**，跟 Claude Code 一致。拦下时 stdout 和 stderr 都会回给模型
+（unittest 把失败写 stderr、pytest 写 stdout，只取一个总有一半工具的报错是空的）。
+放行时 `UserPromptSubmit` 的 stdout 会作为额外背景带上——上面那条的效果就是它每次都知道
+你在哪个分支上。
+
+钩子从 stdin 收一份 JSON（`event` / `tool` / `subject` / `workspace`），要什么自己解析。
+`matcher` 用的就是权限规则那套语法，`|` 分隔多条，裸工具名等于全匹配。密钥类环境变量
+不会传给钩子，跟 `bash` 工具一样。
+
+放两个地方，都会跑：
+
+- `~/.config/feiyu/hooks.json` —— 你自己的，直接生效
+- 工作区的 `.feiyu/hooks.json` —— **第一次见到要你点头才启用**
+
+**为什么项目钩子要问一声**：那个文件是从仓库里带下来的，直接跑等于「clone 一个仓库就在
+你机器上执行任意代码」。同意过的按**内容 hash** 记在 `~/.config/feiyu/trusted-hooks.json`，
+所以文件一改就会重新问——不然同意过一次之后，仓库里换成 `rm -rf` 也照跑。
+非交互场景（管道、脚本）一律不跑项目钩子。
+
+`/hooks` 看当前生效的是哪些、分别来自哪里。
 
 ## 独立评分
 

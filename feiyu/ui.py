@@ -401,6 +401,26 @@ class Stream:
 _active_guard = None
 
 
+def ask_yes_no(question: str) -> bool:
+    """启动时问一句是非题 turn 中途用不了 confirm（那个要 EscInterrupt 的守卫）
+
+    非终端时一律返回 False：没人能回答，而这个问句问的都是「要不要信任」，
+    默认必须是不信任
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    from prompt_toolkit import prompt as ask_line
+    from prompt_toolkit.formatted_text import ANSI
+
+    try:
+        answer = ask_line(ANSI("  " + paint("amber", question) +
+                               paint("grey", " [y/N] "))).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+    return answer in ("y", "yes", "是")
+
+
 def confirm(question: str) -> str:
     """turn 中途问一个单键 stdin 这时已被 EscInterrupt 切到 cbreak，直接读一个字节
 
@@ -519,6 +539,7 @@ SLASH = {
     "/review": "让一个没看过过程的模型给这次改动打分",
     "/cost": "按任务看最近的 token 和花费",
     "/memory": "查看 / 添加 / 删除这个目录的长期记忆",
+    "/hooks": "看在哪些时机会跑哪些外部命令",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
     "/clear": "清空对话历史和存盘，重新开始",

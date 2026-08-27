@@ -100,6 +100,7 @@ Slash commands (typing `/` pops up completions):
 | `/review` | Have a model that never saw the process score the changes |
 | `/cost` | Recent token use and cost, by task |
 | `/memory` | Show / add / drop what it remembers about this directory |
+| `/hooks` | Show which external commands run, and when |
 | `/context` | Show and reload the project conventions file |
 | `/compact` | Squash the history into one summary to save context |
 | `/clear` | Wipe the conversation and its saved session |
@@ -271,6 +272,63 @@ turns it off.
 Only `write_file` and `edit_file` trigger it. `bash` can change files too, but counting it
 would mean running the test suite after every `ls` and `git status` — far more cost than
 it's worth.
+
+That line is shorthand for the hooks below — it is turned into a `PostToolUse` hook.
+
+## Hooks
+
+When one rule isn't enough, write a `hooks.json`:
+
+```json
+{
+  "PreToolUse": [
+    {"matcher": "Bash(git push:*)",
+     "command": "echo 'no direct pushes here, open a PR' >&2; exit 1"}
+  ],
+  "PostToolUse": [
+    {"matcher": "Write|Update", "command": "ruff check ."}
+  ],
+  "UserPromptSubmit": [
+    {"command": "git branch --show-current"}
+  ],
+  "Stop": [
+    {"command": "notify-send 'feiyu is done'"}
+  ]
+}
+```
+
+Four moments:
+
+| Event | When | What a non-zero exit does |
+|---|---|---|
+| `PreToolUse` | before a tool runs | blocks the call; the reason goes to the model |
+| `PostToolUse` | after files change | hands the output to the model to fix |
+| `UserPromptSubmit` | when you hit enter | blocks the prompt |
+| `Stop` | when a turn finishes | logged only, changes nothing |
+
+**Exit 0 passes, non-zero blocks**, same as Claude Code. When blocking, both stdout and
+stderr go back to the model (unittest writes failures to stderr, pytest to stdout — take
+only one and half your tools report nothing). When passing, a `UserPromptSubmit` hook's
+stdout is carried along as extra context — which is what makes the example above tell it
+your current branch every time.
+
+Hooks receive a JSON payload on stdin (`event`, `tool`, `subject`, `workspace`). `matcher`
+uses the same syntax as permission rules, `|` separates alternatives, and a bare tool name
+matches everything for that tool. Secret-looking environment variables are withheld from
+hooks, exactly as for the `bash` tool.
+
+Two locations, both active:
+
+- `~/.config/feiyu/hooks.json` — yours, effective immediately
+- `.feiyu/hooks.json` in the workspace — **needs your approval the first time**
+
+**Why project hooks ask**: that file arrived with the repository, so running it unasked
+means "cloning a repo executes arbitrary code on your machine". Approvals are recorded
+against the file's **content hash** in `~/.config/feiyu/trusted-hooks.json`, so any edit
+re-asks — otherwise one approval would keep covering the file after someone swaps in
+`rm -rf`. Non-interactive runs (pipes, scripts) never run project hooks.
+
+`/hooks` shows what is active and where each entry came from.
 
 ## Independent review
 

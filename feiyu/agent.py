@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from . import ui
+from . import hooks as hooks_mod
 from . import keys, memory, permissions, schema as schema_mod
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
@@ -56,6 +57,13 @@ SCORE_LINE = re.compile(r"评分[:：]\s*(\d+(?:\.\d+)?)\s*/\s*10")
 def find_score(text: str) -> float | None:
     hit = SCORE_LINE.search(text or "")
     return float(hit.group(1)) if hit else None
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    """报错通常在头尾，中间的堆栈没那么重要 """
+    if len(text) <= limit:
+        return text
+    return text[:limit // 2] + "\n\n…（中间省略）…\n\n" + text[-limit // 2:]
 
 
 def find_verify(text: str) -> str:
@@ -145,6 +153,9 @@ class Feiyu:
         self.trace = trace or Trace(workspace, enabled=False)
         self.verify = find_verify(self.context_text)
         self.verified_ok = None      # 最近一次校验过没有：True/False/None（没跑过）
+        self.hooks: list = []
+        self.hooks_note = ""
+        self.approve_hooks = None    # 交互层塞进来：(路径, 条数) -> bool
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
@@ -186,6 +197,55 @@ class Feiyu:
         self.context_file, self.context_text = load_project_context(self.toolbox.root)
         self.verify = find_verify(self.context_text)
         self._refresh_system()
+
+    def load_hooks(self) -> str:
+        """项目钩子是从仓库带下来的命令，要用户点头才载入 返回给人看的一句话 """
+        self.hooks, self.hooks_note = hooks_mod.load(
+            self.toolbox.root, approve=self.approve_hooks)
+        self.trace.write("hooks", count=len(self.hooks) or None,
+                         note=self.hooks_note or None)
+        return self.hooks_note
+
+    @property
+    def all_hooks(self) -> list:
+        """配置里的钩子，加上 `verify:` 合成的那条
+
+        verify 就是「改完文件跑个命令」，本来就是 PostToolUse 的特例
+        合成成钩子而不是各走各的，省得两套机制各写一遍、行为还不一样
+        """
+        found = list(self.hooks)
+        if self.verify:
+            found.append(hooks_mod.Hook(
+                "PostToolUse",
+                {"matcher": "Write|Update", "command": self.verify,
+                 "timeout": VERIFY_TIMEOUT},
+                "verify:"))
+        return found
+
+    def _fire(self, event: str, tool: str = "", subject: str = "",
+              extra: dict | None = None) -> list:
+        """跑这个时机上所有匹配的钩子，返回结果列表 """
+        chosen = hooks_mod.pick(self.all_hooks, event, tool, subject)
+        results = []
+        for hook in chosen:
+            payload = {"event": event, "workspace": str(self.toolbox.root),
+                       "tool": tool, "subject": subject}
+            payload.update(extra or {})
+            began = time.monotonic()
+            outcome = hooks_mod.run(hook, payload, self.toolbox.root)
+            ms = round((time.monotonic() - began) * 1000)
+            self.trace.write("hook", event=event, command=hook.command,
+                             code=outcome.code, ms=ms)
+            if hook.source == "verify:":
+                self.verified_ok = outcome.ok
+            if outcome.ok:
+                print(ui.notice("钩子通过：%s" % ui.clip(hook.command, 60)))
+            else:
+                print(ui.warn("钩子拦下了（退出码 %d）：%s" % (
+                    outcome.code, ui.clip(hook.command, 60))))
+            print()
+            results.append(outcome)
+        return results
 
     @property
     def tokens(self) -> int:
@@ -251,7 +311,10 @@ class Feiyu:
     def send(self, user_message: str) -> str:
         if self.backend is None:
             raise RuntimeError("还没有可用的模型 先用 /key add 添加一个，再用 /model 选中 ")
-        self.backend.add_user_message(user_message)
+        blocked, note = self._before_prompt(user_message)
+        if blocked:
+            return note
+        self.backend.add_user_message(user_message + note)
         rounds = 0
         while True:
             stream = ui.Stream()
@@ -275,6 +338,7 @@ class Feiyu:
                 print(ui.warn("这一轮的输出撞上了长度上限，是半截的"))
                 print()
             if not turn.tool_calls:
+                self._fire("Stop", extra={"text": turn.text})
                 self._maybe_compact()
                 return turn.text
 
@@ -289,7 +353,7 @@ class Feiyu:
                 # 历史里就留下没配对的调用，之后每次请求都会被接口 400 掉
                 self._fill_missing(turn.tool_calls, outputs)
                 if changed:
-                    self._append_verify(outputs)
+                    self._after_tools(changed, outputs)
                 self.backend.add_tool_results(outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
@@ -483,13 +547,14 @@ class Feiyu:
         return (False, False, "用户拒绝",
                 "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
 
-    def _run_tools(self, calls, outputs: list[ToolOutput]) -> bool:
+    def _run_tools(self, calls, outputs: list[ToolOutput]):
         """结果追加进 outputs 中断时调用方要靠它知道跑到哪一个了
 
-        返回这一批里有没有真的改到代码——改了才值得跑校验
+        返回这一批里最后一次真的改到代码的 (工具名, 主参数)，没改到就是 None
+        PostToolUse 的 matcher 要拿它来匹配
         """
         allow_all = False
-        changed = False
+        changed = None
         for call in calls:
             print(ui.tool_call(call.name, call.input), flush=True)
             if call.error:
@@ -497,6 +562,12 @@ class Feiyu:
                 print()
                 self.trace.write("tool", name=call.name, ok=False, why="参数没解析出来")
                 outputs.append(ToolOutput(id=call.id, content=call.error, is_error=True))
+                continue
+            veto = self._pre_tool(call)
+            if veto:
+                print(ui.tool_result("钩子拦下", [], is_error=True))
+                print()
+                outputs.append(ToolOutput(id=call.id, content=veto, is_error=True))
                 continue
             ok, always, label, reason = self._gate(call, allow_all)
             allow_all = allow_all or always
@@ -521,12 +592,24 @@ class Feiyu:
                 # 它写的东西会进以后每一次系统提示，日志里必须留底
                 self.trace.write("remember", fact=call.input.get("fact"))
             if not result.is_error and call.name in VERIFY_AFTER:
-                changed = True
+                changed = (call.name, permissions.subject(call.name, call.input))
                 self._remember_touched(call)
             outputs.append(
                 ToolOutput(id=call.id, content=result.content, is_error=result.is_error)
             )
         return changed
+
+    def _pre_tool(self, call) -> str:
+        """PreToolUse 拦下就返回给模型看的说明 放在权限门**之前**：
+        反正要被拦，没必要先烦用户点一次确认 """
+        subject = permissions.subject(call.name, call.input)
+        blocked = [r for r in self._fire("PreToolUse", tool=call.name, subject=subject)
+                   if not r.ok]
+        if not blocked:
+            return ""
+        return ("这次调用被项目的钩子挡下了 别绕过去，把情况告诉用户 原因：\n" +
+                "\n".join("`%s`（退出码 %d）%s" % (r.hook.command, r.code, r.output)
+                           for r in blocked))
 
     def _remember_touched(self, call) -> None:
         """记下改过哪些文件 /review 拿它当"最终产出"的清单 """
@@ -553,43 +636,41 @@ class Feiyu:
         target = self.toolbox._resolve(path)
         return target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
 
-    def _append_verify(self, outputs: list[ToolOutput]) -> None:
-        """改完代码就跑一遍校验命令，结果并进最后一条工具结果
+    def _before_prompt(self, text: str) -> tuple[bool, str]:
+        """UserPromptSubmit：拦下就不发，放行时把 stdout 当额外背景带上 """
+        results = self._fire("UserPromptSubmit", extra={"prompt": text})
+        blocked = [r for r in results if not r.ok]
+        if blocked:
+            note = "钩子拦下了这次提问：\n" + "\n".join(r.output for r in blocked)
+            print(ui.error(note))
+            print()
+            return True, note
+        extra = [r.output for r in results if r.output]
+        if not extra:
+            return False, ""
+        return False, "\n\n（钩子附带的背景信息，不是用户说的话）\n" + "\n".join(extra)
+
+    def _after_tools(self, changed: bool, outputs: list[ToolOutput]) -> None:
+        """PostToolUse：没过就把输出并进最后一条工具结果
 
         挂在工具结果里而不是另起一条 user 消息：两种后端的消息结构不通用，
         而 tool_result 是唯一两边都能安全追加内容的地方
         """
-        if not self.verify or not outputs:
+        if not outputs:
             return
-        print(ui.notice("跑一遍校验：%s" % self.verify))
-        began = time.monotonic()
-        try:
-            done = subprocess.run(
-                self.verify, shell=True, cwd=self.toolbox.root,
-                capture_output=True, text=True, timeout=VERIFY_TIMEOUT,
-            )
-            code, out = done.returncode, (done.stdout or "") + (done.stderr or "")
-        except subprocess.TimeoutExpired:
-            code, out = -1, "校验命令超过 %d 秒还没结束" % VERIFY_TIMEOUT
-        except OSError as exc:
-            code, out = -1, "校验命令跑不起来：%s" % exc
-        ms = round((time.monotonic() - began) * 1000)
-        self.trace.write("verify", command=self.verify, code=code, ms=ms)
-        self.verified_ok = code == 0
-        if code == 0:
-            print(ui.notice("校验通过（%.1fs）" % (ms / 1000)))
-            print()
+        results = self._fire("PostToolUse", tool=changed[0], subject=changed[1])
+        failed = [r for r in results if not r.ok]
+        if not failed:
             return
-        print(ui.warn("校验没过，退出码 %d 已经把报错交给它自己修" % code))
-        print()
-        tail = out if len(out) <= VERIFY_MAX_CHARS else out[:VERIFY_MAX_CHARS // 2] + \
-            "\n\n…（中间省略）…\n\n" + out[-VERIFY_MAX_CHARS // 2:]
+        notes = "\n\n".join(
+            "命令 `%s` **没有通过**（退出码 %d）输出如下：\n\n%s" % (
+                r.hook.command, r.code, _clip_middle(r.output, VERIFY_MAX_CHARS))
+            for r in failed)
         last = outputs[-1]
         outputs[-1] = ToolOutput(
             id=last.id,
             content=last.content + (
-                "\n\n---\n\n改动之后自动跑了校验命令 `%s`，**没有通过**（退出码 %d）"
-                "先把它修好再往下做，别绕过去 输出如下：\n\n%s" % (self.verify, code, tail)
-            ),
+                "\n\n---\n\n改动之后自动跑了检查，先把下面这些修好再往下做，别绕过去 \n\n"
+                + notes),
             is_error=True,
         )
