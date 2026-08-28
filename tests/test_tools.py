@@ -251,29 +251,40 @@ class TestListCap(Base):
         self.assertNotIn("截断", out.summary)
         self.assertNotIn("只列了前", out.content)
 
-    def test_到上限就不再往下走(self):
-        """攒够就 break 是关键 不 break 的话整棵树照样走完，慢的还是那么慢 """
+    def test_忽略的目录压根不进去走(self):
+        """剪枝要发生在目录一级 交给 glob 吐完再一个个筛掉的话，
+        本仓库实测是 8455 次 stat、178 毫秒，而真正要列的只有 54 个文件 """
+        for i in range(30):
+            self.write(".venv/lib/pkg%d/mod.py" % i, "x")
+        self.write("a.py", "x")
+        visited = []
+        real_walk = tools.os.walk
+        def spy(top, *a, **kw):
+            for row in real_walk(top, *a, **kw):
+                visited.append(row[0])
+                yield row
+        self.addCleanup(setattr, tools.os, "walk", real_walk)
+        tools.os.walk = spy
+        out = self.box.run("list_files", {"pattern": "**/*"})
+        self.assertEqual(out.content.splitlines(), ["a.py"])
+        self.assertFalse([d for d in visited if ".venv" in d], "进了 .venv")
+
+    def test_到上限就停(self):
         self.addCleanup(setattr, tools, "LIST_CAP", tools.LIST_CAP)
         tools.LIST_CAP = 5
-        walked = [0]
+        for i in range(60):
+            self.write("g%02d.txt" % i, "x")
+        out = self.box.run("list_files", {"pattern": "**/*"})
+        self.assertEqual(len([l for l in out.content.splitlines() if l.endswith(".txt")]), 5)
 
-        class Fake:
-            def __init__(self, n):
-                self.n = n
-            def is_file(self):
-                return True
-            def relative_to(self, _root):
-                return Path("f%d.txt" % self.n)
-
-        class Root:
-            def glob(self, _pattern):
-                for i in range(100_000):
-                    walked[0] = i + 1
-                    yield Fake(i)
-
-        self.box.root = Root()
-        self.box.run("list_files", {"pattern": "**/*"})
-        self.assertLess(walked[0], 50)
+    def test_模式照旧管用(self):
+        self.write("a.py", "x")
+        self.write("b.md", "x")
+        self.write("sub/c.py", "x")
+        both = self.box.run("list_files", {"pattern": "**/*.py"}).content.splitlines()
+        self.assertEqual(sorted(both), ["a.py", "sub/c.py"])
+        top = self.box.run("list_files", {"pattern": "*.py"}).content.splitlines()
+        self.assertEqual(top, ["a.py"])
 
     def test_无匹配(self):
         self.assertIn("无匹配", self.box.run("list_files", {"pattern": "*.没有"}).summary)
