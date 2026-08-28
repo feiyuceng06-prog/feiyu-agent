@@ -86,8 +86,8 @@ def main() -> int:
     # 一次性任务也要能答应确认 装在早退分支后面的话 approve 一直是 None，
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
     # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
-    agent.approve = lambda name, args: ui.confirm("要执行 %s 吗？" % ui.tool_label(name))
-    agent.approve_plan = lambda plan: ui.confirm("按这个方案动手吗？") in ("yes", "always")
+    agent.approve = lambda name, args: ui.confirm(ui.ask_text(name, args))
+    agent.approve_plan = lambda plan: ui.confirm("按这个方案动手吗？", simple=True) == "yes"
     # 项目钩子是仓库里带下来的命令，第一次见到（和内容变了之后）必须让用户点头
     agent.approve_hooks = lambda path, count: ui.ask_yes_no(
         "%s 里有 %d 条项目钩子，它们会在这台机器上执行 要启用吗？" % (hooks_mod.PROJECT, count))
@@ -298,9 +298,10 @@ def _compact(agent: Feiyu) -> str:
     summary = agent.compact()
     if not summary:
         return ui.warn("压缩没成功，历史照旧")
-    head = summary if len(summary) <= 300 else summary[:300] + "…"
-    body = "\n".join("  " + ui.paint("grey", line) for line in head.split("\n"))
-    return "\n".join([ui.notice("压缩完成 压缩前上下文 " + ui.tokens(before)), "", body])
+    # 摘要本身不往屏幕上倒 —— 压缩就是为了省地方，压完再全文打一遍是自相矛盾
+    # 压完还剩多少要等下一次请求才知道，不编一个数字出来
+    return ui.notice("压缩完成 原来占了 %s，现在换成了一段摘要，接着说就行 "
+                     % ui.tokens(before))
 
 
 def _context(agent: Feiyu) -> str:
@@ -652,6 +653,27 @@ def _piped(agent: Feiyu) -> int:
     return 0
 
 
+# 接口报错时给一句能照着做的话 原样甩 JSON 的话用户只能干瞪眼
+_API_HINTS = (
+    ("401", "key 不对或者过期了 /key 看看这条配置，或者 /key add 重新加一条"),
+    ("403", "这个 key 没有访问权限，确认一下它开通了这个模型"),
+    ("404", "接口说没有这个模型 id 各家退役很勤，去厂商后台看现在叫什么，"
+            "再 /key add 改一条"),
+    ("429", "被限流了 等一会儿再试，或者 /model 换一条配置"),
+    ("insufficient", "余额不够了"),
+    ("Connection", "连不上接口 检查网络，或者这条配置的 base_url 写错了"),
+    ("Timeout", "接口超时了 网络不稳，或者这次要它做的事太重"),
+)
+
+
+def _explain(exc: Exception) -> str:
+    text = "%s: %s" % (type(exc).__name__, exc)
+    for probe, hint in _API_HINTS:
+        if probe.lower() in text.lower():
+            return hint
+    return ""
+
+
 def _run_turn(agent: Feiyu, prompt: str) -> None:
     guard = ui.EscInterrupt()
     try:
@@ -660,7 +682,12 @@ def _run_turn(agent: Feiyu, prompt: str) -> None:
     except KeyboardInterrupt:
         print(ui.warn("已中断"))
     except Exception as exc:
-        print(ui.error(f"错误：{exc}"))
+        hint = _explain(exc)
+        if hint:
+            print(ui.error(hint))
+            print(ui.notice(ui.clip(str(exc), 200)))
+        else:
+            print(ui.error("出错了：%s" % exc))
 
 
 if __name__ == "__main__":

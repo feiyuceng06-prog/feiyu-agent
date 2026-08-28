@@ -71,6 +71,21 @@ def clip(text: str, limit: int) -> str:
     return "".join(kept) + "…"
 
 
+def clip_path(path: str, limit: int) -> str:
+    """路径要从左边裁 裁右边的话看到的全是 /tmp/xxx/yyy/…，恰好不知道在哪个项目 """
+    if visible(path) <= limit or limit <= 4:
+        return path
+    parts = path.split("/")
+    kept: list[str] = []
+    used = 1
+    for part in reversed(parts):
+        if used + get_cwidth(part) + 1 > limit or not part:
+            break
+        kept.insert(0, part)
+        used += get_cwidth(part) + 1
+    return "…/" + "/".join(kept) if kept else path[-limit:]
+
+
 def _pad(text: str, inner: int) -> str:
     return text + " " * max(0, inner - visible(text))
 
@@ -135,7 +150,7 @@ def _trim(img, threshold: int = 60, margin: int = 10):
 
 def mode_tag(mode: str, label: str) -> str:
     """自动模式是唯一会不打招呼就动手的，用暖色点出来 """
-    marker = {"auto": "⏵⏵", "default": "⏸", "readonly": "○"}.get(mode, "·")
+    marker = {"auto": "⏵⏵", "default": "⏸", "plan": "◐", "readonly": "○"}.get(mode, "·")
     return paint("amber" if mode == "auto" else "grey", marker + " " + label)
 
 
@@ -149,10 +164,11 @@ def welcome(workspace, name: str, model: str, version: str, style: str, mode: st
     shown = str(workspace)
     if shown.startswith(home):
         shown = "~" + shown[len(home) :]
+    room = width() - 4 - (LOGO_COLS + LOGO_GAP if width() >= LOGO_MIN_WIDTH else 0)
     info = [
         paint("brown", SPARK) + " " + bold("Feiyu") + paint("grey", f"  v{version}   终端编程助手"),
         "",
-        paint("grey", "工作目录  ") + shown,
+        paint("grey", "工作目录  ") + clip_path(shown, max(20, room - 10)),
         paint("grey", "模型      ") + (f"{name} · {model}" if model else paint("amber", "未设置")),
         paint("grey", "风格      ") + style,
         paint("grey", "模式      ") + mode,
@@ -215,7 +231,6 @@ _HEADLINE_ARG = {
     "web_fetch": "url",
     # 确认时人只看得到这一行，不把 fact 显出来就等于让人盲签
     "remember": "fact",
-    "exit_plan": "plan",
     "task": "prompt",
     "job": "action",
 }
@@ -257,7 +272,17 @@ def tool_call(name: str, args: dict) -> str:
     key = _HEADLINE_ARG.get(name)
     head = args.get(key, "") if key else ""
     head = clip(str(head).replace("\n", " "), max(8, width() - visible(label) - 6))
-    return paint("brown", BULLET) + " " + bold(label) + paint("grey", f"({head})")
+    tail = paint("grey", "(%s)" % head) if head else ""    # 没有参数就别留一对空括号
+    return paint("brown", BULLET) + " " + bold(label) + tail
+
+
+def tool_preview(rows: list[tuple[str, str]]) -> str:
+    """确认之前先让人看见要改什么 跟结果那块同一套配色，但不带 ⎿ """
+    out = []
+    for kind, text in rows:
+        color = {"-": "red", "+": "blue"}.get(kind, "grey")
+        out.append("     " + paint(color, clip(text, width() - 5)))
+    return "\n".join(out)
 
 
 def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool) -> str:
@@ -281,13 +306,24 @@ def plan(text: str) -> str:
 
 
 def wrap(line: str, limit: int) -> list[str]:
-    """按显示宽度折行 CJK 算两格，所以不能用 textwrap """
+    """按显示宽度折行 CJK 算两格，所以不能用 textwrap
+
+    西文往回找空格断词 —— 不找的话 `feiyu --resume` 会被劈成 `feiyu --res` 和 `ume`
+    CJK 可以任意断，不用管
+    """
     out, row, used = [], "", 0
     for ch in line:
         w = get_cwidth(ch)
         if used + w > limit and row:
-            out.append(row)
-            row, used = "", 0
+            cut = len(row)
+            if w == 1 and not ch.isspace():
+                space = row.rfind(" ")
+                # 太靠前就不回退了，否则一个长词能把半行留白
+                if space > 0 and get_cwidth(row[:space]) * 2 >= limit:
+                    cut = space
+            out.append(row[:cut].rstrip())
+            row = row[cut:].lstrip(" ")
+            used = get_cwidth(row)
         row += ch
         used += w
     if row:
@@ -295,22 +331,204 @@ def wrap(line: str, limit: int) -> list[str]:
     return out
 
 
+def _lines(text: str, color: str) -> str:
+    """提示语按终端宽度折行 不折的话终端会自己软换行，断在词中间（feiyu → f / eiyu）"""
+    rows = []
+    for line in text.split("\n"):
+        rows += wrap(line, width() - 4) or [""]
+    return "\n".join("  " + paint(color, row) for row in rows)
+
+
 def notice(text: str) -> str:
-    return "  " + paint("grey", text)
+    return _lines(text, "grey")
 
 
 def warn(text: str) -> str:
-    return "  " + paint("amber", text)
+    return _lines(text, "amber")
 
 
 def error(text: str) -> str:
-    return "  " + paint("red", text)
+    return _lines(text, "red")
 
 
 def tokens(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k".replace(".0k", "k")
     return str(n)
+
+
+# ---- 流式 markdown ----
+
+
+class MarkdownStream:
+    """把流进来的 markdown 切成 (文本, 样式) 片段 样式由 Stream 上色
+
+    只认终端里真正有用的那几样：**粗体**、`行内代码`、# 标题、- 列表、``` 代码块
+    斜体不认——`*` 在命令行里多半是通配符，认了反而到处误伤
+
+    是流式的：一次只喂到几个字符，末尾那个还判不出来的（半个 `**`、半行 ```）
+    先攒着，等下一批或者 flush
+    """
+
+    FENCE = "```"
+    # 判定行首那几种记号最多要看这么多字符 攒够或者见到换行就能定
+    LOOKAHEAD = 8
+
+    def __init__(self) -> None:
+        self.bold = False
+        self.code = False
+        self.block = False      # ``` 围起来的代码块
+        self.head = False       # # 标题，到行尾为止
+        self.quote = False      # > 引用，到行尾为止
+        self._buf = ""
+        self._sol = True        # 停在行首
+
+    def feed(self, chunk: str) -> list[tuple[str, str]]:
+        self._buf += chunk
+        return self._drain(False)
+
+    def flush(self) -> list[tuple[str, str]]:
+        out = self._drain(True)
+        self.bold = self.code = self.head = self.quote = False
+        return out
+
+    def _style(self) -> str:
+        if self.block:
+            return "block"
+        if self.code:
+            return "code"
+        if self.head or self.bold:
+            return "bold"
+        if self.quote:
+            return "quote"
+        return ""
+
+    def _drain(self, final: bool) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+
+        def push(text: str) -> None:
+            if not text:
+                return
+            style = self._style()
+            if out and out[-1][1] == style:
+                out[-1] = (out[-1][0] + text, style)
+            else:
+                out.append((text, style))
+
+        while self._buf:
+            if self._sol:
+                kept = self._open_line(final, push)
+                if kept is None:
+                    return out          # 还判不出来，攒着等下一批
+                if kept:
+                    continue
+            take = self._inline(final, push)
+            if not take:
+                return out
+        return out
+
+    def _open_line(self, final: bool, push) -> bool | None:
+        """处理行首的记号 返回 True 表示吃掉了东西要重来，None 表示还判不出来 """
+        buf = self._buf
+        nl = buf.find("\n")
+        head = buf if nl < 0 else buf[:nl]
+        stripped = head.lstrip(" ")
+        indent = len(head) - len(stripped)
+
+        # 半个 ``` 落在 chunk 边界上时，光看这几个字符判不出是不是围栏，
+        # 得攒着等下一批 —— 不攒的话它会当普通文字走掉，行首状态一丢，
+        # 收尾那行 ``` 就再也认不出来，后面全被当成代码块（踩过）
+        if not final and nl < 0 and len(stripped) < len(self.FENCE) \
+                and self.FENCE.startswith(stripped):
+            return None
+
+        if self.block:
+            # 代码块里只关心收尾的那行 ```
+            if stripped.startswith(self.FENCE):
+                if nl < 0 and not final:
+                    return None
+                self.block = False
+                self._buf = buf[nl + 1:] if nl >= 0 else ""
+                return True
+            self._sol = False
+            return False
+
+        if stripped.startswith(self.FENCE):
+            if nl < 0 and not final:
+                return None
+            self.block = True
+            self._buf = buf[nl + 1:] if nl >= 0 else ""     # 连语言名一起吞掉
+            return True
+
+        marks = len(stripped) - len(stripped.lstrip("#"))
+        if 1 <= marks <= 6:
+            if len(stripped) <= marks and not final and nl < 0:
+                return None
+            if stripped[marks:marks + 1] == " ":
+                self.head = True
+                self._buf = buf[indent + marks + 1:]
+                self._sol = False
+                return True
+
+        if stripped[:1] in ("-", "*", "+"):
+            if len(stripped) < 2 and not final and nl < 0:
+                return None
+            if stripped[1:2] == " ":
+                push(" " * indent + "• ")
+                self._buf = buf[indent + 2:]
+                self._sol = False
+                return True
+
+        if stripped[:1] == ">":
+            if len(stripped) < 2 and not final and nl < 0:
+                return None
+            if stripped[1:2] in (" ", ""):
+                self.quote = True
+                push(" " * indent + "│ ")
+                self._buf = buf[indent + 2:]
+                self._sol = False
+                return True
+
+        self._sol = False
+        return False
+
+    def _inline(self, final: bool, push) -> bool:
+        """行内：往前扫到下一个记号或者换行 返回 False 表示要攒着等下一批 """
+        buf = self._buf
+        i = 0
+        while i < len(buf):
+            ch = buf[i]
+            if ch == "\n":
+                push(buf[:i])
+                self.head = self.quote = False       # 标题和引用只管到行尾
+                push("\n")
+                self._buf = buf[i + 1:]
+                self._sol = True
+                return True
+            if self.block:
+                i += 1
+                continue
+            if ch == "`":
+                push(buf[:i])
+                self.code = not self.code
+                self._buf = buf[i + 1:]
+                return True
+            if ch == "*" and not self.code:
+                if i + 1 >= len(buf):
+                    if not final:
+                        push(buf[:i])
+                        self._buf = buf[i:]
+                        return False    # 单个 * 可能是半个 **，攒着
+                    break
+                if buf[i + 1] == "*":
+                    push(buf[:i])
+                    self.bold = not self.bold
+                    self._buf = buf[i + 2:]
+                    return True
+            i += 1
+        push(buf)
+        self._buf = ""
+        return False
 
 
 # ---- 流式输出 ----
@@ -339,6 +557,9 @@ class Stream:
         self._col = 0
         self._word = ""
         self._limit = width()
+        self._md = MarkdownStream()
+        self._style = ""        # 当前这段文字的 markdown 样式
+        self._newline = True    # 刚换过行（跟 _fresh_line 不同：折行不算）
         self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
         self._status_drawn = False
         self._status_at = 0.0
@@ -381,17 +602,38 @@ class Stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
+    # markdown 样式怎么上色 code 用主色，代码块整体压暗
+    _PAINT = {"bold": lambda t: bold(t),
+              "code": lambda t: paint("brown", t),
+              "block": lambda t: paint("grey", t),
+              "quote": lambda t: paint("grey", t)}
+
     def _emit(self, chunk: str) -> None:
+        self._runs(self._md.feed(chunk))
+
+    def _runs(self, runs: list[tuple[str, str]]) -> None:
+        for text, style in runs:
+            if style != self._style:
+                # 样式一变就得把攒着的词吐出去，否则整个词会被后来的样式染上
+                self._flush_word()
+                self._style = style
+            self._chars(text)
+        sys.stdout.flush()
+
+    def _chars(self, chunk: str) -> None:
         """按框宽折行并保持两格缩进 英文断在词边界，CJK 可以任意断 """
         for ch in chunk:
             if ch == "\n":
                 self._flush_word()
                 sys.stdout.write("\n")
                 self._fresh_line, self._col = True, 0
+                self._newline = True    # 换行之后的空格是缩进，折行之后的不是
             elif ch.isspace():
                 self._flush_word()
-                # 行尾那个空格不写出去，否则会溢出一列、逼终端自己软换行
-                if not self._fresh_line and self._col + 1 <= self._limit:
+                if self._newline:
+                    self._put(ch)       # 原文自己的缩进，代码块和嵌套列表全靠它
+                elif not self._fresh_line and self._col + 1 <= self._limit:
+                    # 行尾那个空格不写出去，否则会溢出一列、逼终端自己软换行
                     sys.stdout.write(ch)
                     self._col += 1
             elif get_cwidth(ch) > 1:
@@ -401,7 +643,6 @@ class Stream:
                 self._word += ch
                 if self._col + len(self._word) < self._limit - self.WRAP_MARGIN:
                     self._flush_word()
-        sys.stdout.flush()
 
     def _flush_word(self) -> None:
         if self._word:
@@ -409,6 +650,7 @@ class Stream:
             self._put(word)
 
     def _put(self, text: str) -> None:
+        self._newline = False
         while text:
             if self._fresh_line:
                 sys.stdout.write("  ")
@@ -416,7 +658,7 @@ class Stream:
             room = self._limit - self._col
             width_left = get_cwidth(text)
             if width_left <= room:
-                sys.stdout.write(text)
+                sys.stdout.write(self._painted(text))
                 self._col += width_left
                 return
             if self._col > 2:
@@ -431,9 +673,14 @@ class Stream:
                     break
                 cut, used = cut + 1, used + cw
             cut = max(cut, 1)
-            sys.stdout.write(text[:cut] + "\n")
+            sys.stdout.write(self._painted(text[:cut]) + "\n")
             text = text[cut:]
             self._fresh_line, self._col = True, 0
+
+    def _painted(self, text: str) -> str:
+        """宽度是按原文算好的，这里只负责套色 —— 先上色再量宽度就会把转义序列算进去 """
+        style = self._PAINT.get(self._style)
+        return style(text) if style else text
 
     def _run(self) -> None:
         frame = 0
@@ -454,6 +701,7 @@ class Stream:
                 time.sleep(self._tick)
                 continue
             if done:
+                self._runs(self._md.flush())
                 self._hide_status()
                 return
             if self._should_draw(status) and \
@@ -519,18 +767,29 @@ def ask_yes_no(question: str) -> bool:
     return answer in ("y", "yes", "是")
 
 
-def confirm(question: str) -> str:
+def ask_text(name: str, args: dict) -> str:
+    """确认时问什么 —— 要认得出对象 光问「要执行 Update 吗」等于让人盲签 """
+    what = str(args.get(_HEADLINE_ARG.get(name, ""), "")).replace("\n", " ")
+    verb = {"write_file": "写", "edit_file": "改", "read_file": "读",
+            "web_fetch": "抓", "remember": "记住", "bash": "执行"}.get(name, "执行")
+    return "要%s吗？" % verb if not what else "要%s %s 吗？" % (verb, what)
+
+
+def confirm(question: str, *, simple: bool = False) -> str:
     """turn 中途问一个单键 stdin 这时已被 EscInterrupt 切到 cbreak，直接读一个字节
 
     返回 "yes" / "no" / "always" 不是终端（管道里跑）时一律拒绝——没人能回答
+    simple 只给是非两个选项：交方案那种「以后都不用问」没有意义，还会把计划模式废掉
     """
     guard = _active_guard
     if guard is None or not guard.enabled:
         return "no"
     guard.pause()
     try:
-        prompt = ("  " + paint("amber", question)
-                  + paint("grey", "  [y] 执行  [n] 跳过  [a] 本轮都允许  [s] 以后都不用问"))
+        keys = "  [y] 好  [n] 不用" if simple else "  [y] 执行  [n] 跳过  [a] 本轮全放  [s] 记住"
+        # 这行靠 \r\033[K 擦掉，只能擦一行 —— 撑到第二行就会在屏幕上留半截残影
+        question = clip(question, max(12, width() - visible(keys) - 3))
+        prompt = "  " + paint("amber", question) + paint("grey", keys)
         sys.stdout.write(prompt)
         sys.stdout.flush()
         while True:
@@ -538,7 +797,9 @@ def confirm(question: str) -> str:
                 ch = os.read(sys.stdin.fileno(), 1).decode("utf-8", "ignore").lower()
             except OSError:
                 ch = "n"
-            if ch in ("y", "n", "a", "s", "\x1b", "\r", "\n", ""):
+            allowed = ("y", "n", "\x1b", "\r", "\n", "") if simple else (
+                "y", "n", "a", "s", "\x1b", "\r", "\n", "")
+            if ch in allowed:
                 break
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()

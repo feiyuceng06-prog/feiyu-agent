@@ -639,6 +639,43 @@ def _diff(old_text: str, new_text: str, keep: int = 6) -> list[tuple[str, str]]:
     return rows
 
 
+# 确认之前给人看几行 太多的话确认框被顶到屏幕外，反而更看不见
+PREVIEW_LINES = 14
+
+
+def preview(name: str, args: dict, root: Path) -> list[tuple[str, str]]:
+    """这次调用到底要改什么 只出结构化的行，怎么画归 ui
+
+    没有这个的话，写文件和编辑的确认等于让人盲签：问句里只有一个路径，
+    真正的改动要点完「执行」之后才看得到
+    """
+    try:
+        if name == "edit_file":
+            target = (root / args["path"]).resolve()
+            text = target.read_text(encoding="utf-8", errors="replace")
+            old, new = args.get("old_str", ""), args.get("new_str", "")
+            if old and old in text:
+                updated = (text.replace(old, new) if args.get("replace_all")
+                           else text.replace(old, new, 1))
+                return _diff(text, updated, keep=PREVIEW_LINES)
+            # 对不上的话照样把它想改什么显出来，别让人对着空白点确认
+            return ([("-", line) for line in old.splitlines()]
+                    + [("+", line) for line in new.splitlines()])[:PREVIEW_LINES]
+        if name == "write_file":
+            target = (root / args["path"]).resolve()
+            content = args.get("content", "")
+            if target.is_file():
+                return _diff(target.read_text(encoding="utf-8", errors="replace"),
+                             content, keep=PREVIEW_LINES)
+            rows = [("+", line) for line in content.splitlines()]
+            if len(rows) > PREVIEW_LINES:
+                rows = rows[:PREVIEW_LINES] + [("", "… 还有 %d 行" % (len(rows) - PREVIEW_LINES))]
+            return rows
+    except Exception:
+        return []      # 预览崩了不能挡住确认本身
+    return []
+
+
 class Toolbox:
     def __init__(self, root: Path, ask_model=None, on_remember=None, on_exit_plan=None,
                  spawn=None):

@@ -109,6 +109,107 @@ class TestStream(unittest.TestCase):
         self.assertFalse(s.wrote_text)
 
 
+class TestWrap(unittest.TestCase):
+    def test_中文按宽度断(self):
+        rows = ui.wrap("中" * 20, 10)
+        self.assertTrue(all(ui.visible(r) <= 10 for r in rows))
+
+    def test_西文不劈开单词(self):
+        rows = ui.wrap("想接着聊就 feiyu --resume 就行了", 24)
+        self.assertTrue(all(ui.visible(r) <= 24 for r in rows), rows)
+        self.assertNotIn("--res\n", "\n".join(rows) + "\n")
+        self.assertIn("--resume", " ".join(rows))
+
+    def test_单个超长词硬断(self):
+        rows = ui.wrap("a" * 40, 10)
+        self.assertTrue(all(ui.visible(r) <= 10 for r in rows))
+        self.assertEqual("".join(rows), "a" * 40)
+
+    def test_内容不丢(self):
+        text = "混排 mixed 内容 with words 和中文 一起 test"
+        self.assertEqual(" ".join(ui.wrap(text, 12)).split(), text.split())
+
+
+class TestMarkdown(unittest.TestCase):
+    """流式 markdown 模型每句话都带 ** 和反引号，不渲染就是满屏记号 """
+
+    def run_md(self, text, size=7):
+        m = ui.MarkdownStream()
+        out = []
+        for i in range(0, len(text), size):
+            out += m.feed(text[i:i + size])
+        out += m.flush()
+        return out
+
+    def plain(self, text, size=7):
+        return "".join(t for t, _ in self.run_md(text, size))
+
+    def styled(self, text, style, size=7):
+        return "".join(t for t, s in self.run_md(text, size) if s == style)
+
+    def merged(self, text, size):
+        """按样式合并相邻片段 切法不同时分段位置本来就会不同，看的是最终结果 """
+        out = []
+        for piece, style in self.run_md(text, size):
+            if out and out[-1][1] == style:
+                out[-1] = (out[-1][0] + piece, style)
+            else:
+                out.append((piece, style))
+        return out
+
+    def test_粗体(self):
+        self.assertEqual(self.plain("说 **重点** 了"), "说 重点 了")
+        self.assertEqual(self.styled("说 **重点** 了", "bold"), "重点")
+
+    def test_行内代码(self):
+        self.assertEqual(self.plain("用 `ls -la` 看"), "用 ls -la 看")
+        self.assertEqual(self.styled("用 `ls -la` 看", "code"), "ls -la")
+
+    def test_标题只管到行尾(self):
+        out = self.plain("# 标题\n正文\n")
+        self.assertEqual(out, "标题\n正文\n")
+        self.assertEqual(self.styled("# 标题\n正文\n", "bold"), "标题")
+
+    def test_列表变圆点(self):
+        self.assertEqual(self.plain("- 一\n- 二\n"), "• 一\n• 二\n")
+
+    def test_代码块整段压暗且吃掉围栏(self):
+        text = "看：\n```python\nx = 1\n```\n完\n"
+        self.assertEqual(self.plain(text), "看：\nx = 1\n完\n")
+        self.assertEqual(self.styled(text, "block"), "x = 1\n")
+
+    def test_代码块里的缩进要留住(self):
+        text = "```py\ndef f():\n    return 1\n```\n"
+        self.assertIn("    return 1", self.plain(text))
+
+    def test_代码块里的记号不当格式(self):
+        text = "```\na = b ** 2\npath = `x`\n```\n"
+        self.assertIn("b ** 2", self.plain(text))
+        self.assertIn("`x`", self.plain(text))
+
+    def test_引用变竖线(self):
+        self.assertEqual(self.plain("> 一句话\n正文\n"), "│ 一句话\n正文\n")
+        self.assertEqual(self.styled("> 一句话\n正文\n", "quote"), "│ 一句话")
+
+    def test_单个星号不动(self):
+        # 命令行里 * 多半是通配符，认成斜体到处误伤
+        self.assertEqual(self.plain("匹配 *.py 文件"), "匹配 *.py 文件")
+
+    def test_任何切法结果都一样(self):
+        """半个 ``` 落在 chunk 边界上时曾经整段串味，收尾围栏再也认不出来 """
+        text = ("讲 **重点**：用 `rg` 搜\n\n```python\nimport os\n"
+                "    x = 1\n```\n\n- 一条\n- 两条\n# 小标题\n收工 **了**\n")
+        want = self.merged(text, 1)
+        for size in range(2, 13):
+            self.assertEqual(self.merged(text, size), want, "chunk=%d" % size)
+
+    def test_没收完的记号在_flush_时吐出来(self):
+        m = ui.MarkdownStream()
+        got = "".join(t for t, _ in m.feed("话说到一半 *"))
+        got += "".join(t for t, _ in m.flush())
+        self.assertEqual(got, "话说到一半 *")
+
+
 class TestToolProgress(unittest.TestCase):
     """工具参数流式生成时的那行状态 参数是没收完的 JSON """
 

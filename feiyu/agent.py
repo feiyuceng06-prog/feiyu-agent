@@ -10,6 +10,7 @@ from . import hooks as hooks_mod
 from . import keys, memory, permissions, schema as schema_mod
 from . import subagent as subagent_mod
 from . import todo as todo_mod
+from . import tools as tools_mod
 from .providers import ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 from .trace import Trace
@@ -660,7 +661,14 @@ class Feiyu:
         if self.mode == "readonly":
             return self._PASS
 
-        answer = self.approve(call.name, call.input) if self.approve else "no"
+        if self.approve is None:
+            return (False, False, "用户拒绝",
+                    "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
+        # 先把要改的东西画出来再问 只给一个路径就让人点确认等于让他盲签
+        rows = tools_mod.preview(call.name, call.input, self.toolbox.root)
+        if rows:
+            print(ui.tool_preview(rows))
+        answer = self.approve(call.name, call.input)
         if answer == "always":
             return self._ALL
         if answer == "remember":
