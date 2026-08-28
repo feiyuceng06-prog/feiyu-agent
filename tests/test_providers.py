@@ -168,6 +168,7 @@ class TestOpenAIStream(unittest.TestCase):
         b = object.__new__(providers.OpenAICompatBackend)
         b.model, b.system, b.tools = "m", "s", []
         b.messages = [{"role": "system", "content": "s"}]
+        b.thinking = False
         b._reset_usage()
         b.client = type("C", (), {"chat": type("Ch", (), {"completions": type("Cp", (), {
             "create": staticmethod(lambda **kw: iter(chunks))})()})()})()
@@ -210,6 +211,40 @@ class TestOpenAIStream(unittest.TestCase):
         b = self.backend(chunks)
         b.run_turn(on_text=lambda t: None)
         self.assertNotIn("reasoning_content", b.messages[-1])
+
+    def test_思考混着传会被接口拒掉_所以要补齐(self):
+        """要么条条都有要么条条都没有 混着就是 400，而混着几乎必然发生 """
+        b = self.backend([_Chunk(_Delta(content="好"), finish="stop")])
+        b.messages += [
+            {"role": "assistant", "content": None, "reasoning_content": "想了想",
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "look", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "这轮没想，直接调"},      # 缺 reasoning
+        ]
+        b.run_turn(on_text=lambda t: None)
+        missing = [m for m in b.messages
+                   if m["role"] == "assistant" and "reasoning_content" not in m]
+        self.assertEqual(missing, [])
+
+    def test_从没思考过就不要凭空加这个字段(self):
+        # 不认这个字段的接口收到多余字段可能报错
+        b = self.backend([_Chunk(_Delta(content="好"), finish="stop")])
+        b.messages.append({"role": "assistant", "content": "说了句话"})
+        b.run_turn(on_text=lambda t: None)
+        self.assertTrue(all("reasoning_content" not in m for m in b.messages))
+
+    def test_恢复会话时也认得出思考模式(self):
+        # --resume 回来 thinking 标志是 False，得从历史里重新看出来
+        b = self.backend([_Chunk(_Delta(content="好"), finish="stop")])
+        b.messages += [
+            {"role": "assistant", "content": "早先想过", "reasoning_content": "嗯"},
+            {"role": "assistant", "content": "后来没想"},
+        ]
+        b.thinking = False
+        b.run_turn(on_text=lambda t: None)
+        self.assertTrue(b.thinking)
+        self.assertIn("reasoning_content", b.messages[-2])
 
     def test_正文照常走_on_text(self):
         chunks = [_Chunk(_Delta(content="你好")), _Chunk(_Delta(content="世界"), finish="stop")]

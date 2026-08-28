@@ -282,10 +282,12 @@ class OpenAICompatBackend(Billing):
         self.system = system
         self.tools = _to_openai_tools(tools)
         self.messages: list[dict] = [{"role": "system", "content": system}]
+        self.thinking = False       # 这段对话里出现过思考内容没有
         self._reset_usage()
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self.system}]
+        self.thinking = False
         self._reset_usage()
 
     def set_system(self, text: str) -> None:
@@ -353,7 +355,23 @@ class OpenAICompatBackend(Billing):
                     "url": "data:%s;base64,%s" % o.image}})
             self.messages.append({"role": "user", "content": parts})
 
+    def _mind_thinking(self) -> None:
+        """思考模式下 reasoning_content 要么条条 assistant 都有、要么条条都没有
+
+        混着就是 400（`must be passed back to the API`），而混着几乎必然发生：
+        模型不是每轮都想（有时直接说话 + 调工具），中断补的那条 assistant 更是
+        我们自己造的 所以在发请求这个唯一的收口上把缺的补成空串
+        实测：补空串接受，全删也接受，只有混着不行
+        """
+        seen = [m for m in self.messages if m.get("role") == "assistant"]
+        self.thinking = self.thinking or any("reasoning_content" in m for m in seen)
+        if not self.thinking:
+            return
+        for m in seen:
+            m.setdefault("reasoning_content", "")
+
     def run_turn(self, on_text, on_tool=None) -> TurnResult:
+        self._mind_thinking()
         stream = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.MAX_TOKENS,
@@ -407,6 +425,10 @@ class OpenAICompatBackend(Billing):
         assistant: dict = {"role": "assistant", "content": text or None}
         if reasoning:
             assistant["reasoning_content"] = reasoning
+            self.thinking = True
+        elif self.thinking:
+            # 这一轮它没想，但这段对话已经在思考模式里了，缺了就是混着
+            assistant["reasoning_content"] = ""
         if ordered:
             assistant["tool_calls"] = [
                 {
