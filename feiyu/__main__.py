@@ -125,13 +125,14 @@ def main() -> int:
     resumed = bool(args.resume and saved and agent.restore(saved))
 
     project = f"{agent.context_file}（{len(agent.context_text)} 字）" if agent.context_text else "无"
-    boxed, why = sandbox_mod.effective()
-    shown = (ui.paint("grey", "%s · 工作区外只读%s" % (
-        boxed, "、断网" if boxed == "strict" else ""))
-        if boxed != "off" else "关闭" + ("（%s）" % why if why else ""))
-    print(ui.welcome(workspace, agent.name, agent.model, __version__,
-                     STYLES[agent.style][0], MODES[agent.mode][0], project, shown))
+    print(ui.welcome(workspace, __version__, project))
     print()
+    boxed, why = sandbox_mod.effective()
+    if boxed == "off":
+        # 沙箱关着是唯一需要主动说一声的情况 开着是常态，状态栏不必天天挂着
+        print(ui.warn("bash 没有沙箱，它执行的命令能写你机器上任何地方"
+                      + ("：%s" % why if why else "（/sandbox workspace 打开）")))
+        print()
     if workspace == Path.home():
         # 在家目录里跑，工作区就是整个家：列一次目录三十多万个文件，
         # 沙箱那道"工作区外只读"也等于没有了
@@ -158,6 +159,9 @@ def main() -> int:
         # 不放一份到这条常驻的状态栏上，用户切了风格就再也看不到它现在是什么
         if agent.style != "default":
             parts.append(STYLES[agent.style][0])
+        # 沙箱关着才显示 —— 开着是常态，状态栏只放需要你据以行动的东西
+        if sandbox_mod.effective()[0] == "off":
+            parts.append("无沙箱")
         # 上下文显示占满多少，不显示绝对值：每次请求都有一千多 token 的固定底噪，
         # 绝对数字既吓人又没法据此做任何决定，占比才说明还剩多少余地
         if agent.context:

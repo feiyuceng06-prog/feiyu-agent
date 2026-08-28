@@ -158,8 +158,13 @@ def tool_label(name: str) -> str:
     return _LABEL.get(name, name)
 
 
-def welcome(workspace, name: str, model: str, version: str, style: str, mode: str,
-            project: str, sandbox: str = "") -> str:
+def welcome(workspace, version: str, project: str) -> str:
+    """开工框里只放整个会话不会变的东西
+
+    模型 / 风格 / 模式 / 沙箱都在这儿放过，但这个框是打进 scrollback 的，
+    切完之后重画不了，它会一直挂着开工时那份值骗人 —— 会变的一律交给状态栏，
+    那才是唯一一处始终为真的地方
+    """
     home = os.path.expanduser("~")
     shown = str(workspace)
     if shown.startswith(home):
@@ -169,13 +174,7 @@ def welcome(workspace, name: str, model: str, version: str, style: str, mode: st
         paint("brown", SPARK) + " " + bold("Feiyu") + paint("grey", f"  v{version}   终端编程助手"),
         "",
         paint("grey", "工作目录  ") + clip_path(shown, max(20, room - 10)),
-        paint("grey", "模型      ") + (f"{name} · {model}" if model else paint("amber", "未设置")),
-        paint("grey", "风格      ") + style,
-        paint("grey", "模式      ") + mode,
         paint("grey", "项目约定  ") + project,
-        # 用户有权知道 bash 到底关没关起来 关着的时候要显眼
-        paint("grey", "bash 沙箱 ") + (sandbox if sandbox.startswith("\033")
-                                        else paint("amber", sandbox)),
         "",
         paint("grey", "⏎ 发送   \\⏎ 换行   esc 中断   /help 更多"),
     ]
