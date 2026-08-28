@@ -1,5 +1,6 @@
 """两个后端里跟真实网络无关的部分：参数解析、transcript、计价 """
 
+import json
 import unittest
 
 from feiyu import providers
@@ -167,6 +168,7 @@ class TestOpenAIStream(unittest.TestCase):
     def backend(self, chunks):
         b = object.__new__(providers.OpenAICompatBackend)
         b.model, b.system, b.tools = "m", "s", []
+        b.max_tokens = providers.OpenAICompatBackend.MAX_TOKENS
         b.messages = [{"role": "system", "content": "s"}]
         b.thinking = False
         b._reset_usage()
@@ -188,6 +190,31 @@ class TestOpenAIStream(unittest.TestCase):
         # 每次报的都是「到目前为止」的完整片段，越来越长
         self.assertEqual([len(p) for _, p in seen], sorted(len(p) for _, p in seen))
         self.assertEqual(turn.tool_calls[0].input, {"path": "a.py", "content": "x = 1"})
+
+    def test_截断的参数不能原样留在历史里(self):
+        """半截 JSON 留在历史里 = 之后每一次请求都 400，用户实测撞到过
+
+        接口把 tool_calls 转成 tool_use.input 时要 json.loads，解析不出来就
+        `Provider returned error`，而这条坏消息每轮都重发，说什么都救不回来
+        """
+        chunks = [_Chunk(_Delta(tool_calls=[
+            _TC(0, "c1", "write_file", '{"path": "a.py", "content": "写到一半就断了')]),
+            finish="length")]
+        b = self.backend(chunks)
+        turn = b.run_turn(on_text=lambda t: None)
+        self.assertTrue(turn.truncated)
+        # 模型要知道自己被截断了，否则原样重试一遍
+        self.assertTrue(turn.tool_calls[0].error)
+        raw = b.messages[-1]["tool_calls"][0]["function"]["arguments"]
+        json.loads(raw)          # 合法就是全部要求
+
+    def test_没截断的参数原样留着(self):
+        chunks = [_Chunk(_Delta(tool_calls=[_TC(0, "c1", "bash", '{"command": "ls"}')]),
+                         finish="tool_calls")]
+        b = self.backend(chunks)
+        b.run_turn(on_text=lambda t: None)
+        raw = b.messages[-1]["tool_calls"][0]["function"]["arguments"]
+        self.assertEqual(json.loads(raw), {"command": "ls"})
 
     def test_不传回调也照常跑(self):
         chunks = [_Chunk(_Delta(tool_calls=[_TC(0, "c1", "bash", '{"command": "ls"}')]),

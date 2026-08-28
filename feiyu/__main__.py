@@ -5,10 +5,11 @@ import sys
 from pathlib import Path
 
 from . import hooks as hooks_mod
-from . import keys, memory, permissions, pricing, sandbox as sandbox_mod
+from . import keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import CONTEXT_FILES, MODE_ORDER, MODES, STYLES, Feiyu, find_score
+from .providers import OpenAICompatBackend
 
 
 def main() -> int:
@@ -88,12 +89,20 @@ def main() -> int:
     # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
     agent.approve = lambda name, args: ui.confirm(ui.ask_text(name, args))
     agent.approve_plan = lambda plan: ui.confirm("按这个方案动手吗？", simple=True) == "yes"
+    # 同理装在这里：ask_choice 自己会认出非终端并返回空串，工具收到空串就让模型自己定
+    agent.ask_user = ui.ask_choice
     # 项目钩子是仓库里带下来的命令，第一次见到（和内容变了之后）必须让用户点头
     agent.approve_hooks = lambda path, count: ui.ask_yes_no(
         "%s 里有 %d 条项目钩子，它们会在这台机器上执行 要启用吗？" % (hooks_mod.PROJECT, count))
     if args.mode:
         agent.set_mode(args.mode)      # 一律走 set_mode：它要重拼系统提示
     note = agent.load_hooks()
+    # 带了上次的半截进度就说一声 不说的话下次开工它突然提起一件旧事，
+    # 用户不知道这话是哪来的
+    if progress.as_prompt(agent.resumed):
+        print(ui.notice("上次在这个目录的任务还没做完（%s），清单已经带给它了 "
+                        "/clear 可以清掉 " % agent.resumed.get("when", "上次")),
+              file=sys.stderr)
 
     if note:
         print(ui.notice(note), file=sys.stderr)
@@ -193,6 +202,9 @@ def main() -> int:
             elif cmd == "/clear":
                 agent.reset()
                 session.drop(workspace)
+                # 清空就是清空 留着半截进度的话下一轮它又从旧清单接着说
+                progress.clear(workspace)
+                agent.resumed = {}
                 print(ui.notice("对话历史已清空，存盘也删了"))
             elif cmd == "/model":
                 print(_model(agent, arg))
@@ -370,6 +382,9 @@ def _key_add() -> str:
         kind = ask("接口类型 openai / anthropic [openai]: ").lower() or "openai"
         # 探测不出来，只能问 标错了的后果是发图过去接口直接报错
         vision = ask("这个模型能看图吗 y/N: ").lower().startswith("y")
+        # 出厂那个 8192 对现在的模型普遍偏小：写一个长文件就撞上限，
+        # 半截的 JSON 参数还会把这轮调用废掉 填不填由用户定，探测不出来
+        cap = _ask_cap(ask)
         print(ui.notice("下面三项是价格，人民币每百万 token，留空就只显示 token 数不算钱"))
         price = _ask_price(ask)
     except (KeyboardInterrupt, EOFError):
@@ -380,11 +395,29 @@ def _key_add() -> str:
     if kind not in ("openai", "anthropic"):
         return ui.error(f"接口类型只能是 openai 或 anthropic，收到 {kind}，已取消")
     keys.add(name, base_url=base_url, model=model, key=secret, kind=kind,
-             price=price, vision=vision)
+             price=price, vision=vision, max_tokens=cap)
     tail = "，已带价格" if price else "，未填价格（界面上显示 token 数）"
     if vision:
         tail += "，标了能看图"
+    if cap:
+        tail += "，单轮输出上限 %d" % cap
     return ui.notice(f"已保存{tail} 用 /model {name} 切过去")
+
+
+def _ask_cap(ask) -> int | None:
+    """单轮输出上限 查不出来只能问：填大了接口报错，填小了长文件写不完 """
+    raw = ask("单轮输出上限 max_tokens（留空用 %d）: " % OpenAICompatBackend.MAX_TOKENS)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        print(ui.error(f"「{raw}」不是整数，这项跳过"))
+        return None
+    if value < 256:
+        print(ui.error("太小了（至少 256），这项跳过"))
+        return None
+    return value
 
 
 def _ask_price(ask) -> dict | None:
@@ -430,6 +463,9 @@ def _help() -> str:
 
 
 def _finish(agent: Feiyu, tracer, code: int) -> int:
+    # 清单没做完就把进度留下，下次进这个目录时它自己知道上次干到哪
+    # 放在三条路径共同的收尾里，一次覆盖全部；全做完时 save 自己会把旧的清掉
+    progress.save(agent.toolbox.root, agent.task, agent.toolbox.todos.items)
     # 后台命令跟着 feiyu 一起收摊 留着的话用户关掉窗口之后那些进程还在跑，
     # 而他已经没有任何句柄能找到它们了
     left = agent.toolbox.jobs.running()

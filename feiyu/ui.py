@@ -30,6 +30,8 @@ ELBOW = "⎿"
 SPARK = "✻"
 FRAMES = "✳✻✽✶"
 MAX_WIDTH = 100
+# 选项最多摆这么多个 再多就该拆成两个问题，也超出单键能舒服选的范围
+MAX_OPTIONS = 4
 
 
 def paint(color: str, text: str, *, bold: bool = False) -> str:
@@ -219,6 +221,7 @@ _LABEL = {
     "todo": "Todo",
     "exit_plan": "Plan",
     "job": "Job",
+    "ask_user": "Ask",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -232,6 +235,8 @@ _HEADLINE_ARG = {
     "remember": "fact",
     "task": "prompt",
     "job": "action",
+    # 问句本身就是这次调用的全部内容，不显出来那行就只剩一个 Ask
+    "ask_user": "question",
 }
 
 
@@ -243,7 +248,7 @@ def tool_target(name: str, args: dict) -> str:
 
 # 参数还在流式生成时，从没收完的 JSON 里抠出目标 这几个键就是 _HEADLINE_ARG 的键
 _ARG_HINT = re.compile(
-    r'"(path|command|url|regex|pattern|prompt|fact|plan)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    r'"(path|command|url|regex|pattern|prompt|fact|plan|question)"\s*:\s*"((?:[^"\\]|\\.)*)"')
 # 参数短的时候没什么可报的进度，别抖着一个「已生成 1 行」
 _PROGRESS_MIN = 200
 
@@ -807,6 +812,70 @@ def confirm(question: str, *, simple: bool = False) -> str:
         guard.resume()
 
 
+def ask_choice(question: str, options: list[str]) -> str:
+    """turn 中途问用户一句 返回他的答复，空串表示他没回答
+
+    选项走单键（stdin 这时是 cbreak，跟 confirm 同一条路），另给一个键进自由输入
+    —— 模型摆出来的选项经常不是用户真正想说的那句，只能选就等于逼他将就
+
+    非终端（管道、一次性任务）一律返回空串：没人能回答，让模型自己定
+    """
+    guard = _active_guard
+    if guard is None or not guard.enabled:
+        return ""
+    options = [o for o in (options or []) if o.strip()][:MAX_OPTIONS]
+
+    lines = []
+    for piece in wrap(question, width() - 6) or [""]:
+        lines.append("  " + paint("brown", "│ ") + bold(piece))
+    for i, option in enumerate(options, 1):
+        head = "  %s %s " % (paint("brown", "│"), paint("brown", "[%d]" % i))
+        for n, piece in enumerate(wrap(option, width() - 10) or [""]):
+            lines.append(head + piece if n == 0 else "  " + paint("brown", "│") + "     " + piece)
+    print("\n".join(lines))
+
+    keys = "  [1-%d] 选  [t] 自己打字  [esc] 你定" % len(options) if options else \
+           "  [t] 打字回答  [esc] 你定"
+    guard.pause()
+    try:
+        sys.stdout.write("  " + paint("grey", keys))
+        sys.stdout.flush()
+        picked = _read_choice(len(options))
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        if picked == "t":
+            return _read_line()
+        if picked.isdigit():
+            return options[int(picked) - 1]
+        return ""
+    finally:
+        guard.resume()
+
+
+def _read_choice(count: int) -> str:
+    """单键：数字选项、t 打字、esc/回车放弃 """
+    allowed = {"t", "\x1b", "\r", "\n", ""} | {str(i) for i in range(1, count + 1)}
+    while True:
+        try:
+            ch = os.read(sys.stdin.fileno(), 1).decode("utf-8", "ignore").lower()
+        except OSError:
+            return ""
+        if ch in allowed:
+            return ch if ch in ("t",) or ch.isdigit() else ""
+
+
+def _read_line() -> str:
+    """自由输入 prompt_toolkit 自己会存好再改 termios，cbreak 下起它是安全的 """
+    from prompt_toolkit import prompt as ask_line
+    from prompt_toolkit.formatted_text import ANSI
+
+    try:
+        return ask_line(ANSI("  " + paint("brown", "› "))).strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return ""
+
+
 class EscInterrupt:
     """把 stdin 切到 cbreak，读到 ESC 就给主线程丢 KeyboardInterrupt
 
@@ -819,12 +888,22 @@ class EscInterrupt:
         self._saved = None
         self._stop = threading.Event()
         self._paused = threading.Event()
+        self._idle = threading.Event()   # 读线程确实停在暂停分支里了
         self._thread = None
 
     def pause(self) -> None:
+        """等读线程真的停下来再返回
+
+        只 set 一个标志是不够的：线程这时多半正阻塞在 select 上，醒来之后会把
+        下一个字节直接读走 —— 那个字节是接下来要问的人（confirm 的按键、
+        prompt_toolkit 的 CPR 回复）的，被吃掉的表现是按键没反应、
+        或者屏幕上冒出一句 "terminal doesn't support cursor position requests"
+        """
         self._paused.set()
+        self._idle.wait(timeout=0.3)
 
     def resume(self) -> None:
+        self._idle.clear()
         self._paused.clear()
 
     def __enter__(self):
@@ -852,13 +931,19 @@ class EscInterrupt:
 
         while not self._stop.is_set():
             if self._paused.is_set():
+                self._idle.set()
                 time.sleep(0.03)
                 continue
+            self._idle.clear()
             try:
                 ready, _, _ = select.select([self._fd], [], [], 0.1)
             except (OSError, ValueError):
                 return
             if not ready:
+                continue
+            # select 等的这 0.1 秒里可能已经暂停了，醒来必须再看一眼：
+            # 这个字节是别人的，读走就没了
+            if self._paused.is_set():
                 continue
             try:
                 ch = os.read(self._fd, 1)

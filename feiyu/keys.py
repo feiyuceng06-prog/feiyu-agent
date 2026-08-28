@@ -15,7 +15,7 @@ _DIR = os.path.join(
 STORE = os.path.join(_DIR, "models.json")
 STATE = os.path.join(_DIR, "state.json")
 
-FIELDS = ("kind", "base_url", "model", "key", "price", "vision")
+FIELDS = ("kind", "base_url", "model", "key", "price", "vision", "max_tokens")
 
 
 def _write(path: str, data) -> None:
@@ -46,7 +46,8 @@ def save(entries: dict[str, dict]) -> None:
     _write(STORE, entries)
 
 
-def add(name, *, base_url, model, key, kind="openai", price=None, vision=False) -> None:
+def add(name, *, base_url, model, key, kind="openai", price=None, vision=False,
+        max_tokens=None) -> None:
     entries = load()
     entries[name] = {
         "kind": kind,
@@ -55,6 +56,7 @@ def add(name, *, base_url, model, key, kind="openai", price=None, vision=False) 
         "key": key,
         "price": price,
         "vision": bool(vision),
+        "max_tokens": int(max_tokens) if max_tokens else None,
     }
     save(entries)
 

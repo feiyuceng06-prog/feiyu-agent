@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 
 from . import ui
-from . import hooks as hooks_mod
+from . import history, hooks as hooks_mod
+from . import progress as progress_mod
 from . import keys, memory, permissions, schema as schema_mod
 from . import subagent as subagent_mod
 from . import todo as todo_mod
@@ -27,6 +28,9 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 - 用户一口气提了好几件事、或者要动三个以上地方时，先用 todo 把清单列出来，
 每做完一步回去改状态 光靠记很容易做到一半就忘了还剩什么 
 - 写的代码要贴合周围的风格、命名和约定 
+- **干这个项目时学到的、下次还用得上的事，用 remember 记一句**：怎么跑测试和构建、\
+某个坑和它的原因、用户明确说过的偏好、外部依赖的版本或地址 \
+代码里读一遍就知道的不用记；这次任务做到哪了也不用记，那个会自己留下 
 - 执行会改变状态的命令（删除、git push、安装）之前，先确认有足够依据支持这个\
 具体操作 
 
@@ -35,12 +39,24 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 - 做完后用一两句话说清结果，先说发生了什么 不用逐个复述你改过的文件，用户一直\
 在看 
 - 遇到小选择（起个名字、定个默认值、两种等价做法选哪个），自己挑个合理的并说明，\
-别停下来问 涉及范围变化或破坏性操作时，先问 """
+别停下来问 
+- **答案会改变你接下来怎么做的时候，用 ask_user 问一句**：两种做法各有取舍、\
+他的话有两种读法、要动的范围比他说的大、或者要动的东西看着不像他的本意 \
+问之前先自己查 —— 代码里读得到、跑一条命令能确认的，不要拿来问 \
+一次只问一件事，摆两到四个选项，第一个放你推荐的那个 
+- 任务大、或者动手之前方向就不清楚，先把方案讲出来（要改哪些文件、分几步、\
+有什么取舍）再问，别闷头做完了才说 """
 
 
 # 上下文接近上限时自动压缩 具体上限可以在 models.json 里给某条配置写 "limit"
 DEFAULT_CONTEXT_LIMIT = 128_000
 COMPACT_RATIO = 0.75
+# 压缩之前先做一次无损瘦身：把靠前的大块工具输出压成头尾
+# 摘要是有损的（要模型自己复述一遍），能不摘要就别摘要，所以这一档更早触发
+TRIM_RATIO = 0.55
+TRIM_KEEP_LAST = 8       # 最近这么多条消息不动，正在用的东西不能碰
+TRIM_LIMIT = 4000        # 单条超过这么多字符才值得压
+TRIM_KEEP = 1200         # 压完头尾各留这么多
 
 # 一次任务里最多连续调多少轮工具 纯保险：模型卡在某个循环里时不至于一直转下去
 MAX_ROUNDS = 25
@@ -129,6 +145,10 @@ GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "remember"}
 # readonly 模式下直接拒绝的 web_fetch 不改任何东西，所以只读模式放行
 # remember 要拒：它不动工作区，但确实往磁盘上留了东西，只读就该是真的什么都不留
 WRITES = {"bash", "write_file", "edit_file", "remember"}
+# ask_user 三个集合都不进，都是有意的：进 GUARDED 等于问你之前先问你"要不要问你"；
+# 进 WRITES 的话只读模式下连问一句都不行；进 PARALLEL_SAFE 的话它会在工作线程里
+# 跑，而那里读不了 stdin
+
 # 跑完这两个才触发自动校验 bash 也能改文件（sed -i），但把它算进来的话
 # 每次 ls / git status 之后都要跑一遍测试，代价远大于收益
 VERIFY_AFTER = {"write_file", "edit_file"}
@@ -197,11 +217,17 @@ class Feiyu:
         self.toolbox = Toolbox(workspace, ask_model=self._ask_model,
                                on_remember=self._refresh_system,
                                on_exit_plan=self._exit_plan,
-                               spawn=self._spawn)
+                               spawn=self._spawn,
+                               ask_user=self._ask_user_cb)
         self.approve_plan = None     # 界面层塞进来：(方案) -> bool
+        self.ask_user = None         # 界面层塞进来：(问题, 选项) -> 答复
         self.subagent_tokens = 0     # 子 agent 烧掉的量，不进主对话但照样计费
         self.subagent_cost = 0.0
         self.context_file, self.context_text = load_project_context(workspace)
+        # 上次在这个目录留下的半截进度 本次会话固定用启动时读到的这一份，
+        # 它自己列了新清单之后就不再带（那份已经在对话里了）
+        self.resumed = progress_mod.load(workspace)
+        self.task = ""           # 用户最近一次的要求，存进度时一起留下
         self.trace = trace or Trace(workspace, enabled=False)
         self.verify = find_verify(self.context_text)
         self.verified_ok = None      # 最近一次校验过没有：True/False/None（没跑过）
@@ -212,6 +238,9 @@ class Feiyu:
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
         self.mode = "default"
+        # 路径 -> 这个文件在历史里还有效的那几条 read_file 结果的 id
+        # 同一个文件再读一次、或者被改过，之前那几份就该从历史里折叠掉
+        self._reads: dict[str, list[str]] = {}
         self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
         self.name = ""           # 当前用的是 /key 里的哪一条
         self.context_limit = DEFAULT_CONTEXT_LIMIT
@@ -222,6 +251,10 @@ class Feiyu:
     @property
     def ready(self) -> bool:
         return self.backend is not None
+
+    def _ask_user_cb(self, question: str, options: list) -> str:
+        """界面层没装（管道、一次性任务）就当没人能回答，工具会让它自己定 """
+        return self.ask_user(question, options) if self.ask_user else ""
 
     def _ask_model(self, prompt: str) -> str:
         """给 web_fetch 的 prompt 模式用：读完页面只回答问题，原文不进主上下文 """
@@ -245,6 +278,8 @@ class Feiyu:
                 self.context_file, self.context_text)
         # 自己记的笔记排在人写的约定后面：约定是规矩，笔记只是背景
         text += memory.as_prompt(memory.load(self.toolbox.root))
+        if not self.toolbox.todos.items:
+            text += progress_mod.as_prompt(self.resumed)
         self.backend.set_system(text)
 
     def reload_context(self) -> None:
@@ -320,6 +355,7 @@ class Feiyu:
 
     def reset(self) -> None:
         self.backend.reset()
+        self._reads.clear()
 
     @property
     def model(self) -> str:
@@ -344,6 +380,9 @@ class Feiyu:
             if same:
                 fresh.messages = old.messages
                 fresh.tokens_context = old.tokens_context
+            else:
+                # 两种后端的 messages 结构不通用，历史丢了，登记的 id 也就没意义
+                self._reads.clear()
             fresh.tokens_total = old.tokens_total
             fresh.cost = old.cost
             fresh.priced = old.priced
@@ -401,6 +440,7 @@ class Feiyu:
     def send(self, user_message: str) -> str:
         if self.backend is None:
             raise RuntimeError("还没有可用的模型 先用 /key add 添加一个，再用 /model 选中 ")
+        self.task = user_message
         blocked, note = self._before_prompt(user_message)
         if blocked:
             return note
@@ -446,7 +486,12 @@ class Feiyu:
                              cost=self.cost, truncated=turn.truncated or None,
                              calls=[c.name for c in turn.tool_calls] or None)
             if turn.truncated:
-                print(ui.warn("这一轮的输出撞上了长度上限，是半截的"))
+                # 撞上限不只是"话说了半截"：工具参数是流式拼的 JSON，断在中间
+                # 这一轮的调用就废了 老撞说明这个模型的上限配小了，得说清怎么改
+                print(ui.warn(
+                    "这一轮的输出撞上了长度上限（max_tokens=%s），是半截的 "
+                    "老撞的话用 /key 删掉这条配置重加一次，把上限填大 " %
+                    getattr(self.backend, "max_tokens", "?")))
                 print()
             if not turn.tool_calls:
                 left = self.toolbox.todos.unfinished()
@@ -475,6 +520,7 @@ class Feiyu:
                     self._after_tools(changed, outputs)
                 self._note_jobs(outputs)
                 self.backend.add_tool_results(outputs)
+                self._fold(turn.tool_calls, outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
                 return self._stop_runaway(rounds)
@@ -516,6 +562,9 @@ class Feiyu:
         self.toolbox.todos.restore(data.get("todos"))
         b = self.backend
         b.messages = data["messages"]
+        # 捞回来的历史里，那些 id 我们没登记过；Watcher 也是一张白纸，
+        # 隔了一个会话的内容本来就该重读
+        self._reads.clear()
         b.tokens_total = int(data.get("tokens_total") or 0)
         b.tokens_context = int(data.get("tokens_context") or 0)
         b.cost = float(data.get("cost") or 0.0)
@@ -532,6 +581,8 @@ class Feiyu:
             return ""
         self.backend.compact_to(summary)
         self.backend.tokens_context = 0
+        # 历史整个换成了摘要，之前登记的那些 id 在历史里已经不存在
+        self._reads.clear()
         return summary
 
     def changes(self) -> str:
@@ -626,7 +677,20 @@ class Feiyu:
         print()
         return note
 
+    def _maybe_trim(self) -> None:
+        """摘要之前先做一次无损瘦身 压的是靠前那些很长的工具输出，
+        用户的话、模型的决定、最近几轮全都原样留着——比整段摘要保真得多 """
+        if self.backend is None or self.context <= self.context_limit * TRIM_RATIO:
+            return
+        done = history.trim(self.backend.messages, keep_last=TRIM_KEEP_LAST,
+                            limit=TRIM_LIMIT, keep=TRIM_KEEP)
+        if done:
+            self.trace.write("trim", count=done)
+            print(ui.notice("历史里 %d 段很长的工具输出只留了开头和结尾" % done))
+            print()
+
     def _maybe_compact(self, *, mid_turn: bool = False) -> None:
+        self._maybe_trim()
         if self.backend is None or self.context <= self.context_limit * COMPACT_RATIO:
             return
         print(ui.notice("上下文快满了（%s / %s），正在压缩…" % (
@@ -789,6 +853,46 @@ class Feiyu:
                            is_error=result.is_error, image=result.image)
             )
         return changed
+
+    def _fold(self, calls, outputs: list[ToolOutput]) -> None:
+        """同一个文件又读了一次、或者被改过，历史里旧的那几份就折叠掉
+
+        每轮都重发全部历史，一份 1200 行的文件留在里面就是每轮多付一万多 token，
+        而被取代的那几份对模型没有价值——它要的是最新那版 折叠不删消息、
+        不碰配对，只把内容换成一句说明
+        """
+        if self.backend is None:
+            return
+        ok = {o.id for o in outputs if not o.is_error}
+        for call in calls:
+            if call.id not in ok or not isinstance(call.input, dict):
+                continue
+            shown = call.input.get("path")
+            key = self._key_of(shown)
+            if key is None:
+                continue
+            if call.name == "read_file":
+                self._expire(key, shown, "后面有更新的一次读取")
+                self._reads.setdefault(key, []).append(call.id)
+            elif call.name in VERIFY_AFTER:
+                self._expire(key, shown, "这个文件后来被改过")
+
+    def _key_of(self, shown) -> str | None:
+        """按解析后的绝对路径认，模型写 ./x.py 和 x.py 指的是同一个文件 """
+        if not shown or not isinstance(shown, str):
+            return None
+        try:
+            return str(self.toolbox._resolve(shown))
+        except (OSError, ValueError):
+            return None
+
+    def _expire(self, key: str, shown: str, why: str) -> None:
+        ids = self._reads.pop(key, [])
+        if ids:
+            history.expire(
+                self.backend.messages, set(ids),
+                "这里原本是 read_file 读到的 %s，内容已经过期（%s）"
+                "需要的话重新读一次 " % (shown, why))
 
     def _pre_tool(self, call) -> str:
         """PreToolUse 拦下就返回给模型看的说明 放在权限门**之前**：

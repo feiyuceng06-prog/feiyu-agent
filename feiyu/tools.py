@@ -21,6 +21,11 @@ from pathlib import Path
 from . import files, images, jobs as jobs_mod, memory, sandbox, todo
 
 
+# read_file 不给 limit 时最多读这么多行 原来是"整份读进来"，
+# 而整份会一直留在历史里被每一轮重发：本仓库 tools.py 一次就是 16180 token
+READ_CAP = 1500
+
+
 TOOL_SCHEMAS = [
     {
         "name": "bash",
@@ -43,11 +48,7 @@ TOOL_SCHEMAS = [
                 },
                 "background": {
                     "type": "boolean",
-                    "description": (
-                        "挂到后台跑，立刻返回一个编号，不等它结束 "
-                        "用于 dev server、watch、要跑很久的构建 "
-                        "之后用 job 工具看输出或者停掉它 "
-                    ),
+                    "description": "挂到后台跑，立刻返回一个编号，不等它结束 ",
                 },
             },
             "required": ["command"],
@@ -87,7 +88,8 @@ TOOL_SCHEMAS = [
             "properties": {
                 "path": {"type": "string", "description": "相对工作区根目录的文件路径 "},
                 "offset": {"type": "integer", "description": "从第几行开始读，1 起始（可选） "},
-                "limit": {"type": "integer", "description": "最多读多少行（可选） "},
+                "limit": {"type": "integer",
+                          "description": "最多读多少行 不填默认 %d 行，不够会告诉你怎么接着读 " % READ_CAP},
             },
             "required": ["path"],
         },
@@ -97,7 +99,6 @@ TOOL_SCHEMAS = [
         "description": (
             "在工作区内创建或覆盖一个文本文件，父目录会自动创建 "
             "如果只是改动已有文件的一部分，优先用 edit_file "
-            "覆盖已有文件之前必须先 read_file 读过它，否则会被拒绝 "
         ),
         "input_schema": {
             "type": "object",
@@ -114,7 +115,6 @@ TOOL_SCHEMAS = [
             "替换已有文件里的一段精确文本 默认 old_str 必须在文件中恰好出现一次，"
             "否则编辑会被拒绝 多带一些上下文，让 old_str 唯一；"
             "确实要把每一处都换掉时加上 replace_all "
-            "编辑之前必须先 read_file 读过这个文件，否则会被拒绝 "
         ),
         "input_schema": {
             "type": "object",
@@ -193,10 +193,8 @@ TOOL_SCHEMAS = [
     {
         "name": "todo",
         "description": (
-            "维护这次任务的清单 需要三步以上、或者用户一口气提了好几件事的时候，"
-            "先把清单列出来，然后每做完一步回来改状态，别攒到最后一次性改 "
-            "**每次都交完整的清单**，不是只交变动的那几条 "
-            "同一时刻只能有一条 doing 一两步就能做完的小事不用列 "
+            "维护这次任务的清单 **每次都交完整的清单**，不是只交变动的那几条 "
+            "同一时刻只能有一条 doing "
         ),
         "input_schema": {
             "type": "object",
@@ -234,6 +232,32 @@ TOOL_SCHEMAS = [
                 "plan": {"type": "string", "description": "方案摘要，一小段就够 "},
             },
             "required": ["plan"],
+        },
+    },
+    {
+        "name": "ask_user",
+        "description": (
+            "问用户一句，等他回答了再往下做 "
+            "**只在答案会改变你接下来怎么做的时候用**：两种做法各有取舍难以取舍、"
+            "他的话有两种读法、或者要动的东西超出他说的范围 "
+            "自己查得到的不要问（翻代码、跑命令、看文档），"
+            "小选择自己定一个合理的往下走 "
+            "问题写具体，别问「你想怎么做」这种让人从头替你想的问题 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "要问的那一句 一句话说完 "},
+                "options": {
+                    "type": "array",
+                    "description": (
+                        "两到四个选项，第一个放你推荐的那个 每个都说清选了会怎样 "
+                        "用户也可以不选，自己打字回答 "
+                    ),
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["question"],
         },
     },
     {
@@ -678,12 +702,13 @@ def preview(name: str, args: dict, root: Path) -> list[tuple[str, str]]:
 
 class Toolbox:
     def __init__(self, root: Path, ask_model=None, on_remember=None, on_exit_plan=None,
-                 spawn=None):
+                 spawn=None, ask_user=None):
         self.root = root.resolve()
         self.ask_model = ask_model      # (提示词) -> 回答，用于 web_fetch 的 prompt 模式
         self.on_remember = on_remember  # 记了新东西就回调，让系统提示当场重拼
         self.on_exit_plan = on_exit_plan  # (方案) -> (同意没, 说明)，切模式是 agent 的事
         self.spawn = spawn      # (问题) -> (结论, 过程行)，建后端要模型配置，是 agent 的事
+        self.ask_user = ask_user   # (问题, 选项) -> 答复，画界面是 ui 的事
         self.todos = todo.Todos()
         self.cwd = self.root      # bash 的当前目录，cd 之后一直保持到下次改变
         self.files = files.Watcher()   # 写之前对一下版本，别盖掉模型没看见的改动
@@ -880,12 +905,22 @@ class Toolbox:
         self.files.record(target, raw)
         lines = raw.decode("utf-8", errors="replace").splitlines()
         offset = max(1, int(args.get("offset", 1)))
-        limit = int(args.get("limit", len(lines)))
+        asked = args.get("limit")
+        limit = int(asked) if asked is not None else READ_CAP
         chunk = lines[offset - 1 : offset - 1 + limit]
         numbered = "\n".join(f"{offset + i}\t{line}" for i, line in enumerate(chunk))
+        rest = len(lines) - (offset - 1 + len(chunk))
+        if rest > 0:
+            # 截断必须说出来，而且要说清怎么接着读 只报行数的话模型会以为
+            # 自己看完了整个文件——search 的 SEARCH_CAP 是同一个道理
+            numbered = ("（这个文件共 %d 行，下面只有第 %d-%d 行，后面还有 %d 行 "
+                        "要接着看就用 offset=%d ）\n\n%s"
+                        % (len(lines), offset, offset - 1 + len(chunk), rest,
+                           offset + len(chunk), numbered))
         return ToolResult(
             _truncate(numbered) or "（空文件）",
-            summary=f"读取 {len(chunk)} 行" if chunk else "空文件",
+            summary=(("读取 %d 行（共 %d 行）" % (len(chunk), len(lines))) if rest > 0
+                     else "读取 %d 行" % len(chunk)) if chunk else "空文件",
         )
 
     def _read_image(self, target, shown: str) -> ToolResult:
@@ -1104,6 +1139,26 @@ class Toolbox:
         agreed, note = self.on_exit_plan(args.get("plan") or "")
         return ToolResult(note, is_error=not agreed,
                           summary="用户同意了" if agreed else "用户还有意见")
+
+    def _tool_ask_user(self, args: dict) -> ToolResult:
+        question = str(args.get("question") or "").strip()
+        if not question:
+            return ToolResult("问题是空的 ", is_error=True, summary="没写问题")
+        raw = args.get("options")
+        options = [str(o).strip() for o in raw if str(o).strip()] if isinstance(raw, list) else []
+        if self.ask_user is None:
+            # 管道、一次性任务、子 agent 的工作线程 —— 都没人能回答
+            return ToolResult(
+                "现在没人能回答（非交互场景）自己挑一个合理的做法接着往下走，"
+                "最后说明你是按哪个假设做的 ",
+                is_error=True, summary="没人能回答，让它自己定")
+        answer = self.ask_user(question, options)
+        if not answer:
+            return ToolResult(
+                "用户这次没有回答 别再问同一件事，自己挑一个合理的做法往下走，"
+                "最后说明你按的是哪个假设 ",
+                summary="用户没回答")
+        return ToolResult("用户回答：" + answer, summary=answer)
 
     def _tool_remember(self, args: dict) -> ToolResult:
         ok, note = memory.add(self.root, args.get("fact") or "")

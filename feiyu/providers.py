@@ -82,6 +82,7 @@ def build_backend(entry: dict, *, system: str, tools: list[dict]):
         model=entry["model"],
         base_url=entry.get("base_url"),
         api_key=entry["key"],
+        max_tokens=entry.get("max_tokens"),
     )
     # 能不能看图没法探测，只能按用户在 /key add 里填的来
     backend.vision = bool(entry.get("vision"))
@@ -130,7 +131,8 @@ class AnthropicBackend(Billing):
     EFFORT = "xhigh"
 
     def __init__(self, *, system: str, tools: list[dict], model: str,
-                 base_url: str | None = None, api_key: str | None = None):
+                 base_url: str | None = None, api_key: str | None = None,
+                 max_tokens: int | None = None):
         import anthropic
 
         # SDK 默认重试 2 次；agent 一跑就是几十轮请求，多给两次更划算
@@ -141,6 +143,7 @@ class AnthropicBackend(Billing):
         self.system = system
         self.tools = tools
         self.model = model
+        self.max_tokens = int(max_tokens or self.MAX_TOKENS)
         self.messages: list[dict] = []
         # total 是累计计费量（每轮都要重发全部历史，所以会一直涨）；
         # context 是最近一次请求的规模，也就是"这段对话现在多大"
@@ -224,7 +227,7 @@ class AnthropicBackend(Billing):
     def run_turn(self, on_text, on_tool=None) -> TurnResult:
         with self.client.messages.stream(
             model=self.model,
-            max_tokens=self.MAX_TOKENS,
+            max_tokens=self.max_tokens,
             system=self.system,
             thinking={"type": "adaptive"},
             output_config={"effort": self.EFFORT},
@@ -265,10 +268,14 @@ class AnthropicBackend(Billing):
 
 
 class OpenAICompatBackend(Billing):
+    # 没在 /key 里填 max_tokens 时的保底 往高了写不安全：有些兼容接口
+    # 收到超过自己上限的值直接报错 要写长文件的模型（Claude、Kimi K2）
+    # 得在 /key 里按它自己的上限填一个，否则每次都撞上长度上限半途而废
     MAX_TOKENS = 8_192
 
     def __init__(self, *, system: str, tools: list[dict], model: str,
-                 base_url: str | None = None, api_key: str | None = None):
+                 base_url: str | None = None, api_key: str | None = None,
+                 max_tokens: int | None = None):
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -279,6 +286,7 @@ class OpenAICompatBackend(Billing):
 
         self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=RETRIES)
         self.model = model
+        self.max_tokens = int(max_tokens or self.MAX_TOKENS)
         self.system = system
         self.tools = _to_openai_tools(tools)
         self.messages: list[dict] = [{"role": "system", "content": system}]
@@ -374,7 +382,7 @@ class OpenAICompatBackend(Billing):
         self._mind_thinking()
         stream = self.client.chat.completions.create(
             model=self.model,
-            max_tokens=self.MAX_TOKENS,
+            max_tokens=self.max_tokens,
             tools=self.tools,
             messages=self.messages,
             stream=True,
@@ -429,6 +437,18 @@ class OpenAICompatBackend(Billing):
         elif self.thinking:
             # 这一轮它没想，但这段对话已经在思考模式里了，缺了就是混着
             assistant["reasoning_content"] = ""
+        calls = []
+        for slot in ordered:
+            parsed, bad = _parse_args(slot["args"])
+            calls.append(ToolCall(id=slot["id"], name=slot["name"], input=parsed, error=bad))
+            if bad:
+                # 半截 JSON 不能留在历史里 下一轮原样发回去，接口把 tool_calls
+                # 转成 tool_use.input 时解析不出来，从此**每一次**请求都 400
+                # （中转到 anthropic 时报 "Provider returned error"），
+                # 用户说什么都救不回来 跟 0.12.0 那条没配对的 tool_use 同一类：
+                # 历史里绝不能留下接口不接受的形状
+                slot["args"] = "{}"
+
         if ordered:
             assistant["tool_calls"] = [
                 {
@@ -440,10 +460,6 @@ class OpenAICompatBackend(Billing):
             ]
         self.messages.append(assistant)
 
-        calls = []
-        for slot in ordered:
-            parsed, bad = _parse_args(slot["args"])
-            calls.append(ToolCall(id=slot["id"], name=slot["name"], input=parsed, error=bad))
         return TurnResult(text=text, tool_calls=calls, truncated=finish == "length")
 
 

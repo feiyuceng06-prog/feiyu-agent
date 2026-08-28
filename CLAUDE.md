@@ -10,7 +10,7 @@ verify: python -m unittest discover -s tests -t .
 |---|---|
 | `feiyu/__main__.py` | CLI 参数、主循环、斜杠命令 |
 | `feiyu/agent.py` | `SYSTEM_PROMPT`、`STYLES`、turn 循环、工具分发 |
-| `feiyu/tools.py` | 十二个工具的 schema 与实现，含办公文档抽取 |
+| `feiyu/tools.py` | 十三个工具的 schema 与实现，含办公文档抽取 |
 | `feiyu/providers.py` | anthropic / openai 兼容两种后端，用量与计价 |
 | `feiyu/keys.py` | 模型清单（接口地址/密钥/价格）的存取 |
 | `feiyu/permissions.py` | 命令级权限规则 |
@@ -25,6 +25,8 @@ verify: python -m unittest discover -s tests -t .
 | `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
 | `feiyu/files.py` | 记住看过的文件版本，写之前对一次，别盖掉没看见的改动 |
+| `feiyu/history.py` | 历史瘦身：把过期或过长的工具结果换成一行说明 |
+| `feiyu/progress.py` | 上次在这个目录干到哪了（跟 memory 分开，会过期） |
 | `feiyu/jobs.py` | 挂在后台跑的 bash 命令：收输出、报结束、杀进程组 |
 | `feiyu/images.py` | 图片缩到上限之内再 base64，只有 read_file 用 |
 | `ui.MarkdownStream` | 流式 markdown → (文本, 样式) 片段，Stream 上色 |
@@ -674,6 +676,140 @@ the thinking mode must be passed back to the API`。也就是说凡是它想过�
 `glob` 一致，实测逐条对过。`os.walk` 是逐目录来的，末尾要 `matches.sort()`。
 
 **记住这条**：`Path.glob` 没法剪枝，凡是要跳过某些目录的遍历都别用它。
+
+## 截断的工具参数绝不能留在历史里（0.28.0，用户拿截图来提的）
+
+用户用中转站的 claude-sonnet-5 写一个长文件，从某一轮起**每次请求都** `400
+Provider returned error`，说什么都救不回来，一路撞到 25 轮上限。
+
+链条是：输出超过 `MAX_TOKENS`（那时写死 8192）→ `finish_reason == "length"` →
+`write_file` 的 arguments 断在 JSON 中间 → **这条 assistant 原样进了 `self.messages`**
+→ 下一轮重发 → 接口把 `tool_calls` 转成 `tool_use.input` 时 `json.loads` 失败。
+
+`_parse_args` 早就认出了截断，但它的结果只进 `ToolCall`，**没有回写历史**——
+历史里挂的仍然是原始的 `slot["args"]`。现在解析放在拼 assistant 之前，
+解析不出来就把历史里那份换成 `"{}"`，模型那边照旧收到「你被截断了」的说明。
+
+**这跟 0.12.0 那条没配对的 `tool_use` 是同一类问题**：历史里留下了接口不接受的
+形状，而历史每轮都重发，所以一次事故会污染整个会话。往历史里放任何东西之前，
+先问一句「这个形状接口下一轮还认吗」。
+
+顺带修掉根因：**`max_tokens` 现在是每条模型配置自带的一项**（`keys.FIELDS`，
+`/key add` 问一句），跟 `vision` 和价格同一个道理——**不要写内置的「哪个模型能出多少」
+表**，各家不一样、也没有接口能问出来。出厂保底仍是 8192：往高了写不安全，
+有些兼容接口收到超过自身上限的值直接报错。撞上限时的提示也改成能照着做的话。
+
+回归用例在 `tests/test_providers.py`：**断言就是 `json.loads(历史里的 arguments)`
+不报错**。
+
+## 历史瘦身（0.29.0）
+
+**省 token 要先省在历史上，不是省在系统提示上。**实测本仓库 `read_file` 一次
+`tools.py` 是 16180 token，比整套工具 schema（2246）还贵七倍，而且它会一直躺在
+历史里被后面**每一轮**重发。0.28.0 之前历史没有任何裁剪，一路留到
+`context > limit * 0.75` 才一次性全量摘要。
+
+`feiyu/history.py` 只做一件事：**换掉 `tool_result` 的内容，不删消息、不碰配对**。
+少一条配对结果不是"下次凑合能跑"，是整个会话废掉（0.12.0）。两种后端形状都认
+（anthropic 是 user 消息 content 列表里的块，openai 兼容是独立的 `role=tool` 消息），
+带图的那种 `content` 是列表，跳过——图另有 `without_images()` 管。
+
+两个机制：
+
+- **`expire()` — 过期折叠**（`Feiyu._fold`，每批工具结果进历史之后立刻做）。
+  同一个文件又读了一次、或者被 `write_file`/`edit_file` 改过，历史里旧的那几份
+  就换成一句说明。模型要的是最新那版，旧版还在每轮陪着一起发。
+  **按 `_resolve()` 之后的绝对路径认**，模型写 `./x.py` 和 `x.py` 指的是同一份。
+  只登记成功的调用（`outputs` 里 `is_error` 为假的）。
+- **`trim()` — 过长压缩**（`_maybe_trim`，`TRIM_RATIO = 0.55`）。
+  靠前那些超过 `TRIM_LIMIT` 的工具输出只留头尾各 `TRIM_KEEP`。
+  最近 `TRIM_KEEP_LAST` 条不动——正在用的东西不能碰。
+
+**压缩现在是两级的**：`_maybe_compact` 先调 `_maybe_trim`。瘦身是无损的
+（用户的话、模型的决定、最近几轮全部原样留着），摘要是有损的（要模型自己复述一遍），
+所以能靠瘦身撑住就不摘要。
+
+**`_reads` 登记在历史被整体换掉时必须清空**：`reset()` / `compact()` / `restore()` /
+`use_model()` 换了后端类型这四处。不清的话登记的 id 指向的消息已经不存在了。
+
+实测一个「读三个文件、改两处、各重读一次验证」的任务：历史 55140 → 33101 token（-40%）。
+
+顺带：**`read_file` 补了默认上限 `READ_CAP = 1500`**。原来是
+`limit = int(args.get("limit", len(lines)))` —— 没有上限，整份读进来。
+**截断要说清怎么接着读**（`offset=N`），只报行数的话模型以为自己看完了，
+跟 `SEARCH_CAP` 是同一个道理。
+
+### 工具 schema 只删了逐字重复的部分（2189 → 2083）
+
+`SYSTEM_PROMPT` 和三处 schema 描述是逐字重复的：`background` 的用途、`todo`
+什么时候列、`write_file`/`edit_file` 的 read-before-write。按项目自己定的
+「行为指令放系统提示，工具描述只说怎么用不说什么时候用」删掉 schema 那几份。
+
+**没有做「按模式挂工具」**（plan 模式不挂写工具、没有后台任务时不挂 `job`）。
+算过账不划算：省 275 token/轮，而两种后端的服务端缓存命中后这部分按 0.1× 计费，
+等效只有 27 token；代价是引入「工具集会中途变」这个新状态维度，而且**工具块在请求
+前缀，一改就作废整段 prompt cache**，plan↔default 来回切反而更贵。
+
+## 会问人、会留进度（0.30.0，用户提的）
+
+用户说「它不会问我需要怎么做，不确定的事也不问；也不会主动记住任务」。
+查下来是两个不同的根因，都指向同一条老教训。
+
+### ask_user：以前根本没有"问"这个能力
+
+系统提示里唯一相关的一句是「遇到小选择…**别停下来问**」，是劝退的；
+而"先问"没有任何机制支撑 —— 它想问也只能说完话不调工具，靠退出循环把问题带出来，
+而这条路还会被 todo 的 `unfinished()` 推回去。
+
+`ask_user` 工具：问句 + 两到四个选项，`ui.ask_choice()` 画。
+
+- **选项走单键**（`os.read` 一个字节），跟 `confirm` 同一条路 —— turn 中途 stdin
+  是 cbreak，读整行要另起 prompt_toolkit。**另给一个 `t` 键进自由输入**：
+  模型摆出来的选项经常不是用户真正想说的那句，只能选就等于逼他将就。
+- **三个集合一个都不进**，每条都有理由：进 `GUARDED` 等于问你之前先问你
+  「要不要问你」；进 `WRITES` 的话只读模式下连问一句都不行；进 `PARALLEL_SAFE`
+  的话它会跑在工作线程里，**那儿读不了 stdin**。
+- **没人能回答时不能当成"拒绝"**（管道、一次性任务、`ask_user` 回调没装）。
+  回"被拒绝"会让它停在原地反复问；现在回的是「自己挑一个合理的做法往下走，
+  最后说明你按的是哪个假设」。用户按 esc 放弃也走这条。
+
+### progress：任务进度跟长期记忆刻意分开
+
+用户要的"记住任务"跟 `memory` 是冲突的 —— `memory` 明确排除「任务的过程和进展」，
+因为那种信息很快过时，被当成事实讲出来比不记更糟。所以另起 `feiyu/progress.py`，
+规矩正好相反：**整份替换、带时间戳、超过 `STALE_DAYS` 就不带、做完就删、
+进系统提示时明说"可能已经过时，先自己看一眼现在的代码"。**
+
+**它不是模型写的**：内容自动来自 `todo` 清单，`_finish` 里存（三条路径共同的收尾）。
+所以不像 `remember` 那样是一条跨会话的注入通道。
+`_refresh_system` 里**只在本次会话还没有自己的清单时才带** —— 有了新清单，
+旧的那份只会跟它打架。启动时带了旧进度要 `ui.notice` 说一声，
+不说的话下次开工它突然提起一件旧事，用户不知道这话是哪来的。
+
+### 又一次栽在"光有工具 schema 模型不会用"上
+
+`remember` 从 0.14.0 起就存在，但 **`SYSTEM_PROMPT` 里一个字都没提过它**，
+所以模型基本不调 —— 跟 0.16.0 的 `todo` 一模一样的坑，隔了十几个版本又踩一次。
+这次三条行为指令全部写进系统提示（何时问、何时先讲方案、何时 remember），
+schema 里只留"怎么用"。**加新工具时，先问一句：系统提示里写了什么时候用它吗？**
+
+系统提示因此从 462 涨到 649 token。这是**值得**的：它直接决定行为，
+而工具 schema 那边省下的 106 token 远不如这个重要。
+
+### 顺带修掉 EscInterrupt 的一处抢字节
+
+`pause()` 原来只 set 一个标志就返回，而读线程这时多半正阻塞在 `select(0.1)` 上，
+**醒来之后不再检查 `_paused` 就把下一个字节读走了**。那个字节是接下来要问的人的
+（`confirm` 的按键、prompt_toolkit 的 CPR 回复）。现在 `pause()` 等一个 `_idle`
+握手，`select` 醒来后也再看一眼。
+
+### pty 夹具：喂键必须是非阻塞的
+
+验证时屏幕上冒出一句 `terminal doesn't support cursor position requests (CPR)`，
+查了四轮才定位到**是夹具的毛病不是产品的**：旧夹具喂键用
+`for ch: write + sleep(0.15)` 的阻塞循环，那几百毫秒里它读不了 fd、也就回不了 CPR。
+改成非阻塞（每轮 select 超时喂一个字符，全程都能回 CPR）之后警告就没了。
+**以后写这类夹具，喂键和读屏必须在同一个循环里。**
 
 ## 已知问题（未修，用户知情）
 

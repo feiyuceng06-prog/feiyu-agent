@@ -95,7 +95,7 @@ Type `/` for completion:
 
 ## What it can do
 
-Twelve tools, each call printed as it happens:
+Thirteen tools, each call printed as it happens:
 
 | Tool | Notes |
 |---|---|
@@ -108,6 +108,7 @@ Twelve tools, each call printed as it happens:
 | `remember` | Note something worth keeping across sessions |
 | `job` | Read a background command's new output, or stop it |
 | `exit_plan` | In plan mode, hand you the plan for approval |
+| `ask_user` | Stop and ask you when the direction is unclear, with options to pick from |
 
 **Hand it a screenshot**: `read_file` on png / jpg / gif / webp passes the image to the model, downscaled first if it is over 1568px (bigger only costs more, it does not read better). Whether a model can see images is part of its own entry (`/key add` asks), and one that is not marked simply says so rather than sending the image and letting the API reject it. Images are kept out of the saved session and out of summaries.
 
@@ -131,7 +132,7 @@ A subagent can only read (`read_file` / `list_files` / `search`) — no writes, 
 
 ### Task list and plan mode
 
-When there's a lot to do it writes the list down first and updates each item as it goes. **The list isn't only for you to look at: if it tries to finish while items are still open, it gets pulled back** — either to finish them or to say why it can't. It nudges once. The list is saved with the session.
+When there's a lot to do it writes the list down first and updates each item as it goes. **The list isn't only for you to look at: if it tries to finish while items are still open, it gets pulled back** — either to finish them or to say why it can't. It nudges once. The list is saved with the session. **Quit with items still open and the progress carries over** — next time you start in the same directory it knows where it stopped, but it checks the current code first, because that snapshot may well be stale (past seven days it is dropped entirely). Finishing everything, or `/clear`, wipes it.
 
 For bigger changes, `shift+tab` into plan mode (or `/mode plan`): it can only read and think, writes and commands are refused. Once it has a plan it hands it over for approval, and only your yes switches it back to default mode to start work.
 
@@ -215,6 +216,15 @@ On by default when `bubblewrap` is installed:
 
 **Project conventions**: put a `FEIYU.md` in the workspace (`AGENTS.md` and `CLAUDE.md` also work, first match wins). It's read into the system prompt at startup, up to 8,000 characters. `/context` reloads it.
 
+**It asks when it matters**: when the answer would change what it does next — two approaches with real trade-offs, a request that reads two ways, a change reaching further than you asked for — it stops and asks with `ask_user`, offering two to four options with its recommendation first. Pick by number, press `t` to type your own answer, or `esc` to let it decide. Small calls it still makes on its own: asking too much is as tiring as never asking.
+
+```
+  │ Should the sentence-splitting logic change in both places?
+  │ [1] Both, keeping the three copies in sync (recommended)
+  │ [2] Only writer — I'll do the nvim side myself
+    [1-2] pick  [t] type your own  [esc] you decide
+```
+
 **Long-term memory**: when it learns something worth keeping it calls `remember` — how the build runs, a trap and why it exists, a preference you stated. Next time you start in **the same directory** those come back automatically.
 
 ```
@@ -226,7 +236,9 @@ On by default when `bubblewrap` is installed:
 
 **Sessions**: saved every turn; `feiyu --resume` picks up where you left off. The file holds **the whole transcript** (including file contents it read), in `~/.local/state/feiyu/sessions/`, mode 600. `/clear` deletes it too.
 
-**Compaction**: past 75% of the limit it summarises the earlier conversation into a handover note and carries on, mid-task included. The limit defaults to 128k; override per model with `"limit": 32000` in `models.json`. `/compact` does it on demand.
+**Shrinking the history**: every request resends the whole history, so one copy of a file sitting in there is paid for again on every later turn. Two mechanisms keep it down automatically: when a file is read again, or edited, the older copies in the history are replaced by a one-line note (the model wants the latest version anyway); and past the halfway mark, long tool outputs from earlier in the conversation keep only their head and tail. Measured on a "read three files, make two edits, re-read each to verify" task, the history went from 55k to 33k tokens. `read_file` without an explicit `limit` reads 1500 lines and tells the model how to continue.
+
+**Compaction**: only if it is still past 75% after that does it summarise the earlier conversation into a handover note and carry on, mid-task included. The limit defaults to 128k; override per model with `"limit": 32000` in `models.json`. `/compact` does it on demand. A summary is lossy — the model has to restate everything — so shrinking is preferred as long as it holds.
 
 ## Piping it into other programs
 
@@ -259,6 +271,8 @@ The model list is entirely yours: **no built-in vendors, no default model, no bu
    Model id: deepseek-v4-flash
    API key: ****************
    API type openai / anthropic [openai]:
+   Can this model see images? y/N: y
+   Max output tokens per turn (blank uses 8192): 64000
   The three prices below are ¥ per million tokens; leave blank to show token counts instead
      Cache hit price (0 if there's no cache): 0.02
      Input price: 1
@@ -266,6 +280,8 @@ The model list is entirely yours: **no built-in vendors, no default model, no bu
 ```
 
 Stored in `~/.config/feiyu/models.json`, mode 600; the key goes through a separate hidden prompt and never enters the input history. Leave the prices blank and you get token counts — there is no built-in price table because models are renamed and repriced constantly, and **a wrong price is worse than no price**.
+
+**Set `max_tokens` to what the model actually allows.** Blank falls back to a conservative 8192, and writing one long file will hit that ceiling — which costs you more than a half-finished sentence: tool arguments are JSON assembled from the stream, and one cut in the middle throws the whole call away. There is no way to detect the real limit (it differs per vendor and no endpoint reports it), so it has to be asked; set it higher than the API allows and the API simply errors.
 
 ## A note on safety
 
