@@ -232,6 +232,53 @@ class TestFreshness(Base):
         self.assertFalse(out.is_error)
 
 
+class TestListCap(Base):
+    """没有上限的话，在 ~ 里跑一次是三十多万个文件、好几秒 """
+
+    def test_到上限就停(self):
+        self.addCleanup(setattr, tools, "LIST_CAP", tools.LIST_CAP)
+        tools.LIST_CAP = 10
+        for i in range(40):
+            self.write("f%02d.txt" % i, "x")
+        out = self.box.run("list_files", {"pattern": "**/*"})
+        self.assertEqual(len(out.content.splitlines()[0:10]), 10)
+        self.assertIn("已截断", out.summary)
+        self.assertIn("只列了前 10 个", out.content)
+
+    def test_没到上限就不标截断(self):
+        self.write("a.py", "x")
+        out = self.box.run("list_files", {"pattern": "**/*"})
+        self.assertNotIn("截断", out.summary)
+        self.assertNotIn("只列了前", out.content)
+
+    def test_到上限就不再往下走(self):
+        """攒够就 break 是关键 不 break 的话整棵树照样走完，慢的还是那么慢 """
+        self.addCleanup(setattr, tools, "LIST_CAP", tools.LIST_CAP)
+        tools.LIST_CAP = 5
+        walked = [0]
+
+        class Fake:
+            def __init__(self, n):
+                self.n = n
+            def is_file(self):
+                return True
+            def relative_to(self, _root):
+                return Path("f%d.txt" % self.n)
+
+        class Root:
+            def glob(self, _pattern):
+                for i in range(100_000):
+                    walked[0] = i + 1
+                    yield Fake(i)
+
+        self.box.root = Root()
+        self.box.run("list_files", {"pattern": "**/*"})
+        self.assertLess(walked[0], 50)
+
+    def test_无匹配(self):
+        self.assertIn("无匹配", self.box.run("list_files", {"pattern": "*.没有"}).summary)
+
+
 class TestListSearch(Base):
     def setUp(self):
         super().setUp()

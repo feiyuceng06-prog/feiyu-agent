@@ -132,6 +132,12 @@ def main() -> int:
     print(ui.welcome(workspace, agent.name, agent.model, __version__,
                      STYLES[agent.style][0], MODES[agent.mode][0], project, shown))
     print()
+    if workspace == Path.home():
+        # 在家目录里跑，工作区就是整个家：列一次目录三十多万个文件，
+        # 沙箱那道"工作区外只读"也等于没有了
+        print(ui.warn("工作目录是你的家目录，它能读写这里的一切，列目录也会很慢"))
+        print(ui.notice("先 cd 进具体项目再跑，或者 feiyu -w <目录>"))
+        print()
     if not agent.ready:
         print(ui.warn("还没有模型 用 /key add 添加一个（接口地址 + 密钥 + 模型 id）"))
         print()
@@ -148,6 +154,10 @@ def main() -> int:
         if not agent.ready:
             return "%s  ·  %s" % (tag, "未设置模型")
         parts = [tag, agent.model]
+        # 风格只在不是默认时才显示 欢迎框是 scrollback，切完不会重画，
+        # 不放一份到这条常驻的状态栏上，用户切了风格就再也看不到它现在是什么
+        if agent.style != "default":
+            parts.append(STYLES[agent.style][0])
         # 上下文显示占满多少，不显示绝对值：每次请求都有一千多 token 的固定底噪，
         # 绝对数字既吓人又没法据此做任何决定，占比才说明还剩多少余地
         if agent.context:

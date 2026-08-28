@@ -272,6 +272,9 @@ TOOL_SCHEMAS = [
 ]
 
 _IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", "dist", "build"}
+# 列目录的上限 没有上限的话在 ~ 这种地方一跑就是三十多万个文件：
+# 走完要好几秒，拼出来的字符串几 MB，而模型看到的仍然只是被截断的前几十行
+LIST_CAP = 300
 SEARCH_CAP = 200          # 最多列这么多处 到顶了必须告诉模型，不能装作搜全了
 SEARCH_TIMEOUT = 30
 _MAX_OUTPUT = 30_000
@@ -943,16 +946,29 @@ class Toolbox:
     def _tool_list_files(self, args: dict) -> ToolResult:
         pattern = args.get("pattern", "**/*")
         matches = []
+        capped = False
+        # glob 是个生成器，攒够就 break —— 不 break 的话它会把整棵树走完
         for p in self.root.glob(pattern):
             if not p.is_file():
                 continue
-            if any(part in _IGNORE_DIRS for part in p.relative_to(self.root).parts):
+            rel = p.relative_to(self.root)
+            if any(part in _IGNORE_DIRS for part in rel.parts):
                 continue
-            matches.append(str(p.relative_to(self.root)))
+            matches.append(str(rel))
+            if len(matches) >= LIST_CAP:
+                capped = True
+                break
         matches.sort()
+        if not matches:
+            return ToolResult("（无匹配）", summary="无匹配")
+        body = "\n".join(matches)
+        if capped:
+            # 不说的话模型会以为这就是全部，"这个项目有哪些文件"之类的结论直接是错的
+            body += ("\n\n（只列了前 %d 个就停了，目录里还有更多 "
+                     "换个更窄的 pattern，或者用 search 直接找内容 ）" % LIST_CAP)
         return ToolResult(
-            "\n".join(matches) or "（无匹配）",
-            summary=f"{len(matches)} 个文件" if matches else "无匹配",
+            body,
+            summary=("%d+ 个文件（已截断）" % LIST_CAP) if capped else "%d 个文件" % len(matches),
             detail=_peek(matches),
         )
 
