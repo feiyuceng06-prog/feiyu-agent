@@ -98,3 +98,23 @@ def trim(messages, *, keep_last: int, limit: int, keep: int) -> int:
             % (MARK, cut, slot.text[:keep], slot.text[-keep:]))
         done += 1
     return done
+
+
+def shrink(messages, *, limit: int, keep: int) -> int:
+    """接口说"输入太长"之后的急救：所有超过 limit 的工具结果一律压成头尾
+
+    跟 trim 的区别：不留最近几条，折叠过的也照压——请求已经发不出去了，
+    这时候"正在用的东西不能碰"让位于"先让会话活下来"
+    压完每条最多 keep*2 加一句说明，所以是幂等的
+    """
+    done = 0
+    for slot in slots(messages):
+        if len(slot.text) <= limit:
+            continue
+        cut = len(slot.text) - keep * 2
+        slot.replace(
+            "%s 这条工具输出太长，上下文放不下，中间 %d 字符已经去掉 "
+            "要完整内容就重新跑一次 \n\n%s\n\n…（中间省略）…\n\n%s"
+            % (MARK, cut, slot.text[:keep], slot.text[-keep:]))
+        done += 1
+    return done

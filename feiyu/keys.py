@@ -69,22 +69,45 @@ def remove(name: str) -> bool:
     save(entries)
     if last() == name:
         set_last("")
+    if _state().get("helper") == name:
+        set_helper("")
     return True
 
 
-def last() -> str:
+def _state() -> dict:
     try:
         with open(STATE, encoding="utf-8") as f:
-            return json.load(f).get("last") or ""
-    except (OSError, ValueError, AttributeError):
-        return ""
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _set_state(**fields) -> None:
+    state = _state()
+    state.update(fields)
+    try:
+        _write(STATE, state)
+    except OSError:
+        pass
+
+
+def last() -> str:
+    return _state().get("last") or ""
 
 
 def set_last(name: str) -> None:
-    try:
-        _write(STATE, {"last": name})
-    except OSError:
-        pass
+    _set_state(last=name)
+
+
+def helper() -> str:
+    """做旁活（摘要、子 agent、网页提炼）用哪条配置 空串就是跟主模型一样 """
+    name = _state().get("helper") or ""
+    return name if name in load() else ""
+
+
+def set_helper(name: str) -> None:
+    _set_state(helper=name)
 
 
 def pick_default() -> str:

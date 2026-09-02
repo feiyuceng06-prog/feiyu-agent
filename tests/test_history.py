@@ -188,3 +188,40 @@ class TestFoldInAgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestShrink(unittest.TestCase):
+    def test_急救时最近的和折叠过的都压(self):
+        msgs = openai_history("A" * 5000, "B" * 5000)
+        history.trim(msgs, keep_last=0, limit=1000, keep=1500)     # 折叠过一次，仍然 3000+
+        self.assertEqual(history.shrink(msgs, limit=2000, keep=300), 2)
+        for body in (m["content"] for m in msgs if m["role"] == "tool"):
+            self.assertLess(len(body), 2000)
+            self.assertTrue(body.startswith(history.MARK))
+
+    def test_幂等(self):
+        msgs = openai_history("A" * 5000)
+        history.shrink(msgs, limit=2000, keep=300)
+        self.assertEqual(history.shrink(msgs, limit=2000, keep=300), 0)
+
+
+class TestFoldSearch(TestFoldInAgent):
+    def test_同样的参数再搜一次_旧结果折叠(self):
+        msgs = self.run_script([
+            ("", [call("a", "search", regex="x1 = 1")]),
+            ("", [call("b", "search", regex="x1 = 1")]),
+            ("看完了", []),
+        ])
+        first, second = self.bodies(msgs)
+        self.assertTrue(first.startswith(history.MARK))
+        self.assertIn("search", first)
+        self.assertIn("x1 = 1", second)
+        self.assertEqual(unpaired(msgs), set())
+
+    def test_参数不同的不折叠(self):
+        msgs = self.run_script([
+            ("", [call("a", "search", regex="x1 = 1")]),
+            ("", [call("b", "search", regex="x2 = 2")]),
+            ("看完了", []),
+        ])
+        self.assertFalse(self.bodies(msgs)[0].startswith(history.MARK))

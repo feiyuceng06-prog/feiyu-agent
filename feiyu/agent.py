@@ -1,5 +1,8 @@
 import concurrent.futures
+import datetime
 import difflib
+import json
+import platform
 import re
 import subprocess
 import time
@@ -12,7 +15,8 @@ from . import keys, memory, permissions, schema as schema_mod
 from . import subagent as subagent_mod
 from . import todo as todo_mod
 from . import tools as tools_mod
-from .providers import ToolOutput, build_backend
+from . import verify as verify_mod
+from .providers import SUMMARY_PROMPT, ToolOutput, build_backend
 from .tools import TOOL_SCHEMAS, Toolbox
 from .trace import Trace
 
@@ -22,8 +26,15 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 工作方式：
 - 先判断这句话要不要动手 打招呼、闲聊、你已经答得上来的问题，直接回答就行，别为了「先了解一下」去翻项目 只有真要动代码时才开始用工具 
 - 改动之前先用工具了解项目 编辑前先读文件、搜索，不要凭空猜测内容 （改已有文件时 write_file / edit_file 会强制要求你先读过它） 
-- 改动要聚焦 优先用 edit_file，而不是重写整个文件 不要添加任务没要求的功能、\
-抽象或错误处理 
+- 找代码用 search、看文件用 read_file、列目录用 list_files，别拿 bash 跑 grep / cat / find：\
+专用工具不用确认、几条能同时跑、输出也更省 bash 留给构建、测试、安装这些 
+- 要知道一个函数或类定义在哪、被谁用到，先用 symbol（语言服务器，按语义找）；\
+它说没有服务器再用 search 跨文件改名尤其要靠 symbol 的 references 才不会漏 
+- 版本库用 git 工具看状态、看 diff、看 log、提交 **用户没让你提交就不要 commit**；\
+要提交时先 diff 确认只有该进去的改动、先跑过测试，提交信息照着 log 里已有的风格写 \
+push / reset / checkout 这类会影响别人或丢改动的操作走 bash，而且要先说一声 
+- 改动要聚焦 优先用 edit_file，而不是重写整个文件；同一个文件要改几处就用它的 edits \
+一次交完，别一处一轮 不要添加任务没要求的功能、抽象或错误处理 
 - 改完代码要验证：用 bash 跑测试或相关命令 要跑很久或者根本不会自己停的命令（dev server、watch、长构建）用 background 挂后台，再用 job 看输出，别让它把一轮卡死 
 - 用户一口气提了好几件事、或者要动三个以上地方时，先用 todo 把清单列出来，
 每做完一步回去改状态 光靠记很容易做到一半就忘了还剩什么 
@@ -33,6 +44,8 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 代码里读一遍就知道的不用记；这次任务做到哪了也不用记，那个会自己留下 
 - 执行会改变状态的命令（删除、git push、安装）之前，先确认有足够依据支持这个\
 具体操作 
+- 用户指名的文件、函数或目标不存在时，别替他新建一个、也别猜一个相近的去改：\
+先说明找不到，列出相近的候选，等他确认 
 
 沟通：
 - 工具调用之间默认保持安静 只在有发现、要改变方向或遇到阻碍时说一句话 
@@ -58,7 +71,8 @@ TRIM_KEEP_LAST = 8       # 最近这么多条消息不动，正在用的东西�
 TRIM_LIMIT = 4000        # 单条超过这么多字符才值得压
 TRIM_KEEP = 1200         # 压完头尾各留这么多
 
-# 一次任务里最多连续调多少轮工具 纯保险：模型卡在某个循环里时不至于一直转下去
+# 连续调多少轮工具之后停下来问一句 纯保险：模型卡在某个循环里时不至于一直转下去
+# 撞上了不直接收手——大重构本来就要几十轮，问一声再接着跑（没人能回答时才停）
 MAX_ROUNDS = 25
 
 # 两个 SDK 自己会重试 429/5xx/连接错误（默认 2 次），但那只管**请求发出之前**
@@ -72,6 +86,24 @@ RETRY_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRY_NAMES = ("APIConnectionError", "APITimeoutError", "InternalServerError",
                "RateLimitError", "ConnectionError", "TimeoutError",
                "ReadTimeout", "RemoteProtocolError")
+
+# 接口说"输入太长"时的措辞 各家不一样，只认关键词：
+# DeepSeek "Input token exceed the limit"、OpenAI "maximum context length"、
+# anthropic "prompt is too long"、中转站 "context_length_exceeded"
+OVERFLOW_WORDS = re.compile(
+    r"(token|context|prompt|input).{0,60}(exceed|too long|too large|limit|maximum)"
+    r"|(exceed|maximum|too long|too large).{0,60}(token|context|length)", re.I | re.S)
+# 急救时把工具结果压到多小 比 TRIM_* 狠得多：请求已经发不出去了
+SHRINK_LIMIT = 2000
+SHRINK_KEEP = 600
+
+
+def overflow(exc: Exception) -> bool:
+    """这个错是不是"上下文塞不下了" 400 一类才算，网络错误不算 """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and code not in (400, 413, 422):
+        return False
+    return bool(OVERFLOW_WORDS.search(str(exc)))
 
 
 def transient(exc: Exception) -> bool:
@@ -110,6 +142,17 @@ def _clip_middle(text: str, limit: int) -> str:
     return text[:limit // 2] + "\n\n…（中间省略）…\n\n" + text[-limit // 2:]
 
 
+def _failure_note(r) -> str:
+    """要点在前、原文在后 几千字的堆栈里模型得自己找哪个用例挂了，先替它抠出来 """
+    head = "命令 `%s` **没有通过**（退出码 %d）" % (r.hook.command, r.code)
+    points = verify_mod.digest(r.output)
+    body = _clip_middle(r.output, VERIFY_MAX_CHARS)
+    if not points:
+        return head + "输出如下：\n\n" + body
+    return (head + "要点：\n" + "\n".join("- " + p for p in points)
+            + "\n\n完整输出：\n\n" + body)
+
+
 def find_verify(text: str) -> str:
     hit = VERIFY_LINE.search(text or "")
     return hit.group(1).strip() if hit else ""
@@ -141,10 +184,19 @@ MODE_ORDER = ("default", "auto", "plan", "readonly")
 # confirm 模式下要问一声的：改本地状态的，加上会把内容发到外网的
 # remember 也在里面：它写的东西会进以后每一次的系统提示，而内容可能间接来自网页，
 # 不问一声的话就是一条能跨会话的注入通道 好在它很少调，问一次不烦
-GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "remember"}
+GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "remember", "git"}
 # readonly 模式下直接拒绝的 web_fetch 不改任何东西，所以只读模式放行
 # remember 要拒：它不动工作区，但确实往磁盘上留了东西，只读就该是真的什么都不留
 WRITES = {"bash", "write_file", "edit_file", "remember"}
+# git 只有 commit 算写 status / diff / log 在只读和计划模式下都该能用
+GIT_WRITES = {"commit"}
+
+
+def mutates(call) -> bool:
+    """这次调用会不会改状态 只读 / 计划模式拒的是这个，不是工具名 """
+    if call.name == "git":
+        return isinstance(call.input, dict) and call.input.get("action") in GIT_WRITES
+    return call.name in WRITES
 # ask_user 三个集合都不进，都是有意的：进 GUARDED 等于问你之前先问你"要不要问你"；
 # 进 WRITES 的话只读模式下连问一句都不行；进 PARALLEL_SAFE 的话它会在工作线程里
 # 跑，而那里读不了 stdin
@@ -157,7 +209,7 @@ VERIFY_AFTER = {"write_file", "edit_file"}
 # bash 不在里面——它共享 self.cwd，两条并发的 cd 会互相盖掉；
 # 写类工具不在里面——同一批里改同一个文件就是竞态；
 # todo / exit_plan / remember 都改 agent 自己的状态，也不能并发
-PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "task"}
+PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "task", "symbol"}
 # 上限拦一下：一批十个 web_fetch 同时打同一个站点不礼貌，线程也不是免费的
 MAX_PARALLEL = 4
 
@@ -167,6 +219,45 @@ IDENTITY = (
     "\n\n关于你自己：你当前使用的模型是 {model}（配置名 {name}） "
     "用户问起你是什么模型时照这个回答，不要猜，也不要说成别家的模型 "
 )
+
+GIT_TIMEOUT = 2
+
+
+def _git_branch(workspace: Path) -> tuple[bool, str]:
+    """(是不是 git 仓库, 分支名) 没有 git、超时，都当不是
+
+    用 branch --show-current 而不是 rev-parse HEAD：后者在刚 init 还没提交的
+    仓库里直接报错，那种目录会被误报成"不是仓库"
+    """
+    try:
+        out = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=workspace,
+            capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    if out.returncode != 0:
+        return False, ""
+    return True, out.stdout.strip()
+
+
+def env_block(workspace: Path) -> str:
+    """它在哪、今天几号、什么系统、在哪个分支上
+
+    不给的话：写 CHANGELOG 和日志的日期基本靠编，会照着别的发行版建议装包命令，
+    而且每次想知道自己在哪都要多跑一条 pwd 或 git status 换一轮往返
+    """
+    rows = [
+        "工作目录：%s" % workspace,
+        "系统：%s %s" % (platform.system(), platform.release()),
+        "今天：%s" % datetime.date.today().isoformat(),
+    ]
+    repo, branch = _git_branch(workspace)
+    if not repo:
+        rows.append("git：这个目录不是 git 仓库")
+    else:
+        rows.append("git：当前在 %s 分支" % branch if branch
+                    else "git：是 git 仓库，但没有在任何分支上（detached HEAD）")
+    return "\n\n当前环境（这些是事实，不用再去查）：\n" + "\n".join("- " + r for r in rows)
 
 
 PLAN_PROMPT = """
@@ -223,6 +314,12 @@ class Feiyu:
         self.ask_user = None         # 界面层塞进来：(问题, 选项) -> 答复
         self.subagent_tokens = 0     # 子 agent 烧掉的量，不进主对话但照样计费
         self.subagent_cost = 0.0
+        # 旁活（摘要、网页提炼、子 agent）用的配置 空串就是跟主模型一样
+        # 后端按名字缓存一份：每次摘要都重建客户端太浪费
+        self.helper = keys.helper()
+        self._side = None
+        # 探一次就够：分支中途会变，但那是它自己 git checkout 出来的，它知道
+        self.env = env_block(workspace)
         self.context_file, self.context_text = load_project_context(workspace)
         # 上次在这个目录留下的半截进度 本次会话固定用启动时读到的这一份，
         # 它自己列了新清单之后就不再带（那份已经在对话里了）
@@ -261,7 +358,7 @@ class Feiyu:
         if self.backend is None:
             return ""
         try:
-            return (self.backend.ask(prompt) or "").strip()
+            return (self._side_backend().ask(prompt) or "").strip()
         except Exception:
             return ""
 
@@ -269,7 +366,8 @@ class Feiyu:
         """身份和风格都会变，每次变完重拼一遍系统提示 """
         if self.backend is None:
             return
-        text = SYSTEM_PROMPT + IDENTITY.format(model=self.model, name=self.name) + STYLES[self.style][1]
+        text = (SYSTEM_PROMPT + IDENTITY.format(model=self.model, name=self.name)
+                + self.env + STYLES[self.style][1])
         if self.mode == "plan":
             text += PLAN_PROMPT
         if self.context_text:
@@ -336,10 +434,34 @@ class Feiyu:
             results.append(outcome)
         return results
 
+    def set_helper(self, name: str) -> None:
+        self.helper = name
+        self._side = None
+        keys.set_helper(name)
+
+    def _helper_entry(self) -> dict | None:
+        """旁活该用哪条配置 没设、或设的那条被删了，就用主模型的 """
+        entries = keys.load()
+        if self.helper and self.helper in entries:
+            return entries[self.helper]
+        return entries.get(self.name)
+
+    def _side_backend(self):
+        """旁路请求走的后端 没设 helper 就是主后端本身（它的 ask 不进历史）"""
+        if not self.helper or self.helper == self.name:
+            return self.backend
+        if self._side is None:
+            entry = keys.load().get(self.helper)
+            if entry is None:
+                return self.backend
+            self._side = build_backend(entry, system="", tools=[])
+        return self._side
+
     @property
     def tokens(self) -> int:
-        """累计计费量 子 agent 的也算进来——它烧的钱不会因为看不见就不用付 """
-        return getattr(self.backend, "tokens_total", 0) + self.subagent_tokens
+        """累计计费量 子 agent 和旁活的也算进来——它们烧的钱不会因为看不见就不用付 """
+        side = getattr(self._side, "tokens_total", 0) if self._side is not None else 0
+        return getattr(self.backend, "tokens_total", 0) + self.subagent_tokens + side
 
     @property
     def context(self) -> int:
@@ -351,7 +473,11 @@ class Feiyu:
         """累计花费（人民币） 价格表里没有这个模型时返回 None """
         if not getattr(self.backend, "priced", False):
             return None
-        return getattr(self.backend, "cost", 0.0) + self.subagent_cost
+        side = self._side
+        if side is not None and not getattr(side, "priced", True):
+            return None
+        return (getattr(self.backend, "cost", 0.0) + self.subagent_cost
+                + (getattr(side, "cost", 0.0) if side is not None else 0.0))
 
     def reset(self) -> None:
         self.backend.reset()
@@ -406,7 +532,7 @@ class Feiyu:
     def _spawn(self, prompt: str) -> tuple[str, list]:
         """派一个子 agent 它用同一条模型配置，但后端和 Toolbox 都是全新的——
         带着主对话的历史就谈不上「独立去看」了，上下文也照样会被撑爆 """
-        entry = keys.load().get(self.name)
+        entry = self._helper_entry()
         if entry is None:
             return "（没有可用的模型配置，派不出去）", []
         report, lines, used = subagent_mod.run(
@@ -448,6 +574,7 @@ class Feiyu:
         rounds = 0
         nudged = False      # 清单没做完只提醒一次，提醒到底会转不出来
         retries = 0
+        rescued = 0         # 上下文溢出救过几次：第一次瘦身，第二次摘要，再不行就放弃
         while True:
             stream = ui.Stream()
             stream.start()
@@ -465,6 +592,12 @@ class Feiyu:
                 stream.finish()
                 self.trace.write("api_error", error="%s: %s" % (
                     type(exc).__name__, exc), said=len(stream.text) or None)
+                if not stream.text and overflow(exc) and rescued < 2:
+                    # 历史里那条大消息还在，不处理的话之后每次请求都会照样 400，
+                    # 会话就废了 先无损瘦身，还不行再摘要
+                    rescued += 1
+                    if self._rescue_overflow(rescued):
+                        continue
                 if not stream.text and transient(exc) and retries < STREAM_RETRIES:
                     # 一个字都还没吐出来，重发是安全的
                     retries += 1
@@ -523,7 +656,11 @@ class Feiyu:
                 self._fold(turn.tool_calls, outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
-                return self._stop_runaway(rounds)
+                said = self._round_limit(rounds)
+                if said is None:
+                    rounds = 0
+                else:
+                    return self._stop_runaway(rounds, said)
             self._maybe_compact(mid_turn=True)
 
     INTERRUPTED = (
@@ -576,7 +713,11 @@ class Feiyu:
         """把历史交给模型总结成一段交接说明，替换掉原文 返回摘要，失败返回空串 """
         if self.backend is None:
             return ""
-        summary = (self.backend.summarize() or "").strip()
+        side = self._side_backend()
+        try:
+            summary = (side.ask(SUMMARY_PROMPT + "\n\n" + self.backend.transcript()) or "").strip()
+        except Exception:
+            summary = ""
         if not summary:
             return ""
         self.backend.compact_to(summary)
@@ -666,16 +807,59 @@ class Feiyu:
                 "不要解释 " % "\n- ".join(problems))
         return None, ["重试了 %d 次仍然不合 schema" % schema_mod.MAX_REPAIR]
 
-    def _stop_runaway(self, rounds: int) -> str:
+    CONTINUE = "接着做"
+
+    def _round_limit(self, rounds: int) -> str | None:
+        """撞到轮数上限 返回 None 表示用户让它接着跑，否则返回该带给模型的话
+
+        上限本来是防"卡在循环里空转"的，但大重构本来就要几十轮 一律停掉的话，
+        做到一半的任务得靠用户再说一句话接上，而它未必接得回原来那条线
+        没人能回答（管道、一次性任务）照旧停：那些场景没人看着，空转很贵
+        """
+        answer = self._ask_user_cb(
+            "已经连续调了 %d 轮工具还没做完，要接着做吗？" % rounds,
+            [self.CONTINUE, "先停下，说说做到哪了"])
+        self.trace.write("round_limit", round=rounds, answer=answer or None)
+        return None if answer == self.CONTINUE else answer
+
+    def _stop_runaway(self, rounds: int, said: str = "") -> str:
         """连续调了太多轮工具还没收敛，收手 历史补一条 assistant 让角色保持交替 """
         note = (
             "连续调用了 %d 轮工具还没做完，我先停下来 "
             "可能是我卡在某个循环里了，也可能这个任务需要拆小一点 " % rounds
         )
+        if said:
+            # 用户在那个问句里说了别的（自由输入），带给模型 —— 丢掉的话
+            # 他下一句就得把同样的话再说一遍
+            note += "用户在这里说：" + said
         self.backend.messages.append({"role": "assistant", "content": note})
         print(ui.warn("已达到 %d 轮工具调用上限，自动停下 再说一句话可以让它接着做 " % rounds))
         print()
         return note
+
+    def _rescue_overflow(self, attempt: int) -> bool:
+        """接口拒收"输入太长"之后把历史压小 返回能不能重发
+
+        第一次：所有大块工具结果压成头尾（无损的部分留着）
+        第二次：整段摘要 摘要收尾是 assistant，得再补一条 user 把话接上
+        """
+        if attempt == 1:
+            done = history.shrink(self.backend.messages,
+                                  limit=SHRINK_LIMIT, keep=SHRINK_KEEP)
+            self.trace.write("overflow", attempt=attempt, shrunk=done)
+            if done:
+                print(ui.warn("接口说输入太长，已把 %d 段工具输出压成头尾，重发" % done))
+                print()
+                return True
+            attempt = 2     # 没有可压的，直接走摘要
+        if not self.compact():
+            self.trace.write("overflow", attempt=attempt, shrunk=0)
+            return False
+        self.trace.write("overflow", attempt=attempt, compacted=True)
+        print(ui.warn("接口说输入太长，已把早先的对话压成摘要，重发"))
+        print()
+        self.backend.add_user_message("（以上是压缩后的进展摘要）接着把刚才的任务做完 ")
+        return True
 
     def _maybe_trim(self) -> None:
         """摘要之前先做一次无损瘦身 压的是靠前那些很长的工具输出，
@@ -705,11 +889,11 @@ class Feiyu:
         print()
 
     def _gate(self, call, allow_all: bool):
-        if self.mode == "plan" and call.name in WRITES:
+        if self.mode == "plan" and mutates(call):
             return (False, False, "计划模式已拒绝",
                     "现在是计划模式，还不能动手 先把方案想完整，"
                     "再调 exit_plan 交给用户过目 他同意了才轮到你改东西 ")
-        if self.mode == "readonly" and call.name in WRITES:
+        if self.mode == "readonly" and mutates(call):
             return (False, False, "只读模式已拒绝",
                     "当前是只读模式，不允许写文件或执行命令 要做这一步，用户得先按 shift+tab "
                     "或用 /mode 切到 default（按允许列表）或 auto（直接执行） "
@@ -867,15 +1051,22 @@ class Feiyu:
         for call in calls:
             if call.id not in ok or not isinstance(call.input, dict):
                 continue
+            if call.name in ("search", "list_files"):
+                # 同样的参数又跑了一次：旧结果没用了 改过文件之后重搜一遍很常见
+                key = call.name + json.dumps(call.input, sort_keys=True, ensure_ascii=False)
+                self._expire(key, "这里原本是 %s 的结果，已经过期（后面用同样的参数又跑了一次）"
+                             "需要的话重新跑一次 " % call.name)
+                self._reads.setdefault(key, []).append(call.id)
+                continue
             shown = call.input.get("path")
             key = self._key_of(shown)
             if key is None:
                 continue
             if call.name == "read_file":
-                self._expire(key, shown, "后面有更新的一次读取")
+                self._expire(key, self._stale_read(shown, "后面有更新的一次读取"))
                 self._reads.setdefault(key, []).append(call.id)
             elif call.name in VERIFY_AFTER:
-                self._expire(key, shown, "这个文件后来被改过")
+                self._expire(key, self._stale_read(shown, "这个文件后来被改过"))
 
     def _key_of(self, shown) -> str | None:
         """按解析后的绝对路径认，模型写 ./x.py 和 x.py 指的是同一个文件 """
@@ -886,13 +1077,15 @@ class Feiyu:
         except (OSError, ValueError):
             return None
 
-    def _expire(self, key: str, shown: str, why: str) -> None:
+    @staticmethod
+    def _stale_read(shown: str, why: str) -> str:
+        return ("这里原本是 read_file 读到的 %s，内容已经过期（%s）"
+                "需要的话重新读一次 " % (shown, why))
+
+    def _expire(self, key: str, note: str) -> None:
         ids = self._reads.pop(key, [])
         if ids:
-            history.expire(
-                self.backend.messages, set(ids),
-                "这里原本是 read_file 读到的 %s，内容已经过期（%s）"
-                "需要的话重新读一次 " % (shown, why))
+            history.expire(self.backend.messages, set(ids), note)
 
     def _pre_tool(self, call) -> str:
         """PreToolUse 拦下就返回给模型看的说明 放在权限门**之前**：
@@ -974,10 +1167,7 @@ class Feiyu:
         failed = [r for r in results if not r.ok]
         if not failed:
             return
-        notes = "\n\n".join(
-            "命令 `%s` **没有通过**（退出码 %d）输出如下：\n\n%s" % (
-                r.hook.command, r.code, _clip_middle(r.output, VERIFY_MAX_CHARS))
-            for r in failed)
+        notes = "\n\n".join(_failure_note(r) for r in failed)
         last = outputs[-1]
         outputs[-1] = ToolOutput(
             id=last.id,

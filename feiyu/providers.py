@@ -24,6 +24,25 @@ def _field(block, name: str, default: str = ""):
     return getattr(block, name, default)
 
 
+# anthropic 的缓存断点 openai 兼容那边是服务端自动缓存，不用也不能声明
+CACHE_MARK = {"type": "ephemeral"}
+# 历史上留几个滚动断点 接口一共只认 4 个，system 和 tools 各占一个，
+# 剩下两个留给历史：新的那个负责这一轮写入，旧的那个保证上一轮写的那份一定命中
+CACHE_KEEP = 2
+
+
+def _cache_rejected(exc: Exception) -> bool:
+    """这个错是不是"接口不认 cache_control"
+
+    官方接口一定认，但用户多半连的是中转站，那边未必透传 认出来就降级重来一次，
+    不降级的话这一轮 400，而 400 一次整个会话就废了
+    """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and code not in (400, 404, 422):
+        return False
+    return "cache" in str(exc).lower()
+
+
 # 图片进了历史就一直在 摘要和存盘里只留这句，base64 原样带上是几十万字的垃圾
 IMAGE_NOTE = "（这里有一张图，原始数据没有保留）"
 
@@ -116,9 +135,13 @@ class Billing:
         self.cost = 0.0
         self.priced = True
 
-    def _charge(self, hit: int, miss: int, out: int) -> None:
-        self.tokens_context = hit + miss + out
-        self.tokens_total += self.tokens_context
+    def _charge(self, hit: int, miss: int, out: int, *, context: bool = True) -> None:
+        """context=False 是旁路请求（摘要、网页提炼）：要算钱，但不是"对话现在多大"
+        算进 context 的话，一次网页提炼就能把压缩阈值假撞上 """
+        size = hit + miss + out
+        if context:
+            self.tokens_context = size
+        self.tokens_total += size
         spent = pricing.cost(self.rates, hit, miss, out)
         if spent is None:
             self.priced = False
@@ -145,6 +168,8 @@ class AnthropicBackend(Billing):
         self.model = model
         self.max_tokens = int(max_tokens or self.MAX_TOKENS)
         self.messages: list[dict] = []
+        # 撞上不认 cache_control 的接口会自动关掉，之后这个会话都不再打断点
+        self.cache = True
         # total 是累计计费量（每轮都要重发全部历史，所以会一直涨）；
         # context 是最近一次请求的规模，也就是"这段对话现在多大"
         self._reset_usage()
@@ -180,6 +205,10 @@ class AnthropicBackend(Billing):
             model=self.model, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
+        usage = getattr(reply, "usage", None)
+        if usage is not None:
+            self._charge(getattr(usage, "cache_read_input_tokens", 0) or 0,
+                         usage.input_tokens or 0, usage.output_tokens or 0, context=False)
         return "".join(b.text for b in reply.content if b.type == "text")
 
     def summarize(self) -> str:
@@ -224,14 +253,68 @@ class AnthropicBackend(Billing):
              "source": {"type": "base64", "media_type": media, "data": data}},
         ]
 
+    def _cached_system(self):
+        """system 每轮原样重发，打个断点让它按缓存计价
+
+        风格、模式、memory 一变这里就换一份，缓存跟着作废——那本来就该作废
+        """
+        if not self.cache or not self.system:
+            return self.system
+        return [{"type": "text", "text": self.system, "cache_control": CACHE_MARK}]
+
+    def _cached_tools(self):
+        """只在最后一项上挂 缓存按前缀算，一个断点就盖住整个 tools 块 """
+        if not self.cache or not self.tools:
+            return self.tools
+        return self.tools[:-1] + [{**self.tools[-1], "cache_control": CACHE_MARK}]
+
+    def _mark_messages(self) -> None:
+        """在最近几条 user 消息末尾挂滚动断点，让历史也走缓存
+
+        **只挂 dict 形式的块**：assistant 那条 content 是 SDK 直出的对象，
+        塞不进字段；而 user 消息（tool_result 那些）本来就是我们自己拼的 dict
+        每轮重挂之前要先清干净，不清的话断点会一轮涨一个，很快超过接口认的 4 个
+        """
+        spots = []
+        for msg in self.messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            blocks = [b for b in content if isinstance(b, dict)]
+            for block in blocks:
+                block.pop("cache_control", None)
+            if msg.get("role") == "user" and blocks:
+                spots.append(blocks[-1])
+        if not self.cache:
+            return
+        for block in spots[-CACHE_KEEP:]:
+            block["cache_control"] = CACHE_MARK
+
     def run_turn(self, on_text, on_tool=None) -> TurnResult:
+        said = []
+
+        def watch(text):
+            said.append(1)
+            on_text(text)
+
+        try:
+            return self._turn(watch, on_tool)
+        except Exception as exc:
+            # 断点是请求参数，不认的话错在发出的那一刻，一个字都还没吐出来，重发是安全的
+            if self.cache and not said and _cache_rejected(exc):
+                self.cache = False
+                return self._turn(on_text, on_tool)
+            raise
+
+    def _turn(self, on_text, on_tool=None) -> TurnResult:
+        self._mark_messages()
         with self.client.messages.stream(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=self.system,
+            system=self._cached_system(),
             thinking={"type": "adaptive"},
             output_config={"effort": self.EFFORT},
-            tools=self.tools,
+            tools=self._cached_tools(),
             messages=self.messages,
         ) as stream:
             name, partial = "", ""
@@ -325,6 +408,10 @@ class OpenAICompatBackend(Billing):
             model=self.model, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
+        usage = getattr(reply, "usage", None)
+        if usage is not None:
+            self._charge(0, usage.prompt_tokens or 0, usage.completion_tokens or 0,
+                         context=False)
         return reply.choices[0].message.content or ""
 
     def summarize(self) -> str:
@@ -490,6 +577,6 @@ def _parse_args(raw: str) -> tuple[dict, str]:
     except json.JSONDecodeError:
         return {}, (
             "这次调用的参数不是完整的 JSON，多半是输出太长被截断了 "
-            "工具没有执行 重来一次，把内容拆成几次写，"
-            "或者改用 edit_file 只替换要改的那一段 "
+            "工具没有执行 重来一次：写文件的话先写前半段，再用 write_file 的 append "
+            "接着写后半段；或者改用 edit_file 只替换要改的那一段 "
         )

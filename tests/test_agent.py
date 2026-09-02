@@ -6,13 +6,18 @@ tool messages responding to each 'tool_call_id'"）而且损坏状态会被存�
 """
 
 import contextlib
+import datetime
 import io
+import os
 import json
+import platform
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from feiyu import agent as agent_mod
+from feiyu import permissions
 from feiyu.agent import Feiyu
 from feiyu.tools import ToolResult
 from tests.fakes import FakeBackend, call, unpaired
@@ -27,6 +32,8 @@ def quiet(fn, *a, **kw):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # 不换掉的话读的是用户真正的规则文件，断言会随他改过什么而变
+        permissions.STORE = os.path.join(self.tmp.name, "permissions.json")
         self.agent = Feiyu(Path(self.tmp.name))
         self.agent.name = "fake"
         self.agent.mode = "auto"
@@ -167,6 +174,39 @@ class TestToolLoop(Base):
         out = quiet(self.agent.send, "停不下来的任务")
         self.assertIn("停下来", out)
         self.assertEqual(b.messages[-1]["role"], "assistant")
+        self.assertEqual(len(self.ran), agent_mod.MAX_ROUNDS)
+
+    def test_用户说接着做就接着跑(self):
+        """上限是防空转的，不是拦大重构的 —— 几十轮的任务不该被一刀切掉 """
+        script = [("", [call("c%d" % i)]) for i in range(agent_mod.MAX_ROUNDS)]
+        script.append(("做完了", []))
+        b = self.use(script)
+        self.tools_ok()
+        asked = []
+        self.agent.ask_user = lambda q, o: asked.append((q, o)) or agent_mod.Feiyu.CONTINUE
+        self.assertEqual(quiet(self.agent.send, "很大的重构"), "做完了")
+        self.assertEqual(len(asked), 1)
+        self.assertIn(agent_mod.Feiyu.CONTINUE, asked[0][1])
+        self.assertEqual(len(self.ran), agent_mod.MAX_ROUNDS)
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_用户在那儿说了别的就带给模型(self):
+        """丢掉的话他下一句得把同样的话再说一遍 """
+        script = [("", [call("c%d" % i)]) for i in range(agent_mod.MAX_ROUNDS + 2)]
+        b = self.use(script)
+        self.tools_ok()
+        self.agent.ask_user = lambda q, o: "别改了，先看看 build.mjs"
+        out = quiet(self.agent.send, "停不下来的任务")
+        self.assertIn("别改了，先看看 build.mjs", out)
+        self.assertEqual(b.messages[-1]["role"], "assistant")
+        self.assertEqual(len(self.ran), agent_mod.MAX_ROUNDS)
+
+    def test_没人能回答照旧停下(self):
+        """管道和一次性任务没人看着，空转很贵 """
+        b = self.use([("", [call("c%d" % i)]) for i in range(agent_mod.MAX_ROUNDS + 2)])
+        self.tools_ok()
+        self.assertIsNone(self.agent.ask_user)
+        self.assertIn("停下来", quiet(self.agent.send, "停不下来的任务"))
         self.assertEqual(len(self.ran), agent_mod.MAX_ROUNDS)
 
     def test_参数没解析出来就不执行工具(self):
@@ -335,8 +375,29 @@ class TestModes(Base):
         self.assertTrue(agent_mod.WRITES <= agent_mod.GUARDED)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestEnvBlock(Base):
+    """不给它环境信息的话：日期靠编，装包命令按别的发行版给，
+    每次想知道自己在哪还要多跑一条 pwd """
+
+    def test_四项都在(self):
+        text = agent_mod.env_block(Path(self.tmp.name))
+        self.assertIn(self.tmp.name, text)
+        self.assertIn(datetime.date.today().isoformat(), text)
+        self.assertIn(platform.system(), text)
+
+    def test_不是仓库就说不是(self):
+        self.assertIn("不是 git 仓库", agent_mod.env_block(Path(self.tmp.name)))
+
+    def test_在仓库里要报出分支名(self):
+        root = Path(self.tmp.name)
+        subprocess.run(["git", "init", "-q", "-b", "话题分支"], cwd=root, check=True)
+        self.assertIn("话题分支", agent_mod.env_block(root))
+
+    def test_进得了系统提示(self):
+        self.agent.backend = FakeBackend([])
+        self.agent._refresh_system()
+        self.assertIn("当前环境", self.agent.backend.system)
+        self.assertIn(self.tmp.name, self.agent.backend.system)
 
 
 class TestVerifyConfig(unittest.TestCase):
@@ -612,3 +673,194 @@ class TestStreamRetry(Base):
     def test_重试计数每轮清零(self):
         # 第一轮重试过，不该影响后面几轮的额度
         self.assertEqual(agent_mod.STREAM_RETRIES, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class Overflowing(FakeBackend):
+    """前 n 次请求都回"输入太长"的 400，之后照脚本走 """
+
+    def __init__(self, script, fail=1, message="Input token exceed the limit"):
+        super().__init__(script)
+        self.fail = fail
+        self.message = message
+        self.compacted = 0
+
+    def run_turn(self, on_text, on_tool=None):
+        if self.fail:
+            self.fail -= 1
+            exc = Exception("Error code: 400 - " + self.message)
+            exc.status_code = 400
+            raise exc
+        return super().run_turn(on_text, on_tool)
+
+    def compact_to(self, summary):
+        self.compacted += 1
+        super().compact_to(summary)
+
+
+class TestOverflow(Base):
+    """接口说输入太长之后不能让会话废掉：先瘦身重发，再摘要重发 """
+
+    def setUp(self):
+        super().setUp()
+        self.tools_ok()
+
+    def test_有大块工具结果时先瘦身重发(self):
+        backend = self.use([("好了", [])])
+        big = Overflowing([("好了", [])], fail=1)
+        big.messages = backend.messages
+        # 历史里塞一条巨大的工具结果，模拟上一轮读了个大文件
+        big.messages += [
+            {"role": "user", "content": "读"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "r", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "r", "content": "X" * 20000},
+        ]
+        self.agent.backend = big
+        out = quiet(self.agent.send, "接着")
+        self.assertEqual(out, "好了")
+        body = [m for m in big.messages if m.get("role") == "tool"][0]["content"]
+        self.assertLess(len(body), 3000)
+        self.assertEqual(big.compacted, 0)
+        self.assertEqual(unpaired(big.messages), set())
+
+    def test_没得瘦身就摘要重发(self):
+        big = Overflowing([("好了", [])], fail=1)
+        self.agent.backend = big
+        out = quiet(self.agent.send, "接着")
+        self.assertEqual(out, "好了")
+        self.assertEqual(big.compacted, 1)
+        roles = [m["role"] for m in big.messages]
+        # 摘要之后要补一条 user，角色才交替得上
+        self.assertEqual(roles[:4], ["system", "user", "assistant", "user"])
+
+    def test_救两次还不行就放弃并保住历史(self):
+        big = Overflowing([("好了", [])], fail=3)
+        self.agent.backend = big
+        with self.assertRaises(Exception):
+            quiet(self.agent.send, "接着")
+        self.assertEqual(big.messages[-1]["role"], "assistant")
+
+    def test_别家措辞也认(self):
+        for text in ("This model's maximum context length is 128000 tokens",
+                     "prompt is too long: 213462 tokens > 200000 maximum",
+                     "context_length_exceeded"):
+            exc = Exception(text)
+            exc.status_code = 400
+            self.assertTrue(agent_mod.overflow(exc), text)
+
+    def test_普通_400_不当溢出(self):
+        exc = Exception("Invalid request: tool_use ids must be unique")
+        exc.status_code = 400
+        self.assertFalse(agent_mod.overflow(exc))
+        exc = Exception("Input token exceed the limit")
+        exc.status_code = 500
+        self.assertFalse(agent_mod.overflow(exc))
+
+
+class TestGitGate(Base):
+    """只读 / 计划模式拒的是 commit，不是整个 git 工具 """
+
+    def test_只读模式能看不能提交(self):
+        self.tools_ok()
+        self.agent.set_mode("readonly")
+        backend = self.use([
+            ("", [call("a", "git", action="status"), call("b", "git", action="commit", message="m")]),
+            ("完", []),
+        ])
+        quiet(self.agent.send, "看看")
+        got = self.tool_results(backend)
+        self.assertEqual(got[0], "ok")
+        self.assertIn("只读模式", got[1])
+        self.assertEqual(unpaired(backend.messages), set())
+
+    def test_计划模式同样(self):
+        self.tools_ok()
+        self.agent.set_mode("plan")
+        backend = self.use([
+            ("", [call("a", "git", action="diff"), call("b", "git", action="commit", message="m")]),
+            ("完", []),
+        ])
+        quiet(self.agent.send, "看看")
+        got = self.tool_results(backend)
+        self.assertEqual(got[0], "ok")
+        self.assertIn("计划模式", got[1])
+
+
+class TestHelperModel(Base):
+    """旁活（摘要、子 agent、网页提炼）走 helper 那条配置，钱也要算进来 """
+
+    def setUp(self):
+        super().setUp()
+        self.use([("好", [])])
+        self.side = FakeBackend([])
+        self.side.tokens_total = 700
+        self.side.cost = 0.7
+        self.agent.helper = "small"
+        self.agent._side = self.side
+
+    def test_摘要走旁路后端_主后端的_ask_不被调(self):
+        self.agent.backend.add_user_message("之前聊过的")
+        self.assertEqual(quiet(self.agent.compact), "这是摘要")
+        self.assertEqual(len(self.side.asked), 1)
+        self.assertIn("之前聊过的", self.side.asked[0])
+        self.assertEqual(self.agent.backend.asked, [])
+
+    def test_网页提炼也走旁路(self):
+        self.agent._ask_model("读这页")
+        self.assertEqual(self.side.asked, ["读这页"])
+
+    def test_旁路的用量算进总账(self):
+        self.agent.backend.tokens_total = 1000
+        self.agent.backend.cost = 1.0
+        self.assertEqual(self.agent.tokens, 1700)
+        self.assertAlmostEqual(self.agent.cost, 1.7)
+
+    def test_子_agent_用_helper_那条配置(self):
+        seen = {}
+        def fake_run(prompt, *, entry, workspace, trace=None):
+            seen["entry"] = entry
+            return "结论", [], {"tokens": 1, "priced": False, "cost": 0}
+        real_load, real_run = agent_mod.keys.load, agent_mod.subagent_mod.run
+        agent_mod.keys.load = lambda: {"fake": {"model": "big"}, "small": {"model": "tiny"}}
+        agent_mod.subagent_mod.run = fake_run
+        try:
+            self.agent._spawn("查一下")
+        finally:
+            agent_mod.keys.load = real_load
+            agent_mod.subagent_mod.run = real_run
+        self.assertEqual(seen["entry"]["model"], "tiny")
+
+    def test_没设_helper_就是主后端自己(self):
+        self.agent.helper = ""
+        self.agent._side = None
+        self.assertIs(self.agent._side_backend(), self.agent.backend)
+
+
+class TestSideCharge(unittest.TestCase):
+    def test_旁路请求算钱不算上下文(self):
+        b = FakeBackend([])
+        b.tokens_context = 5000
+        b._charge(0, 800, 200, context=False)
+        self.assertEqual(b.tokens_context, 5000)
+        self.assertEqual(b.tokens_total, 1000)
+
+
+class TestVerifyDigest(Base):
+    def test_校验失败时要点在前原文在后(self):
+        self.agent.verify = "python -c \"import sys; print('FAIL: test_a (m.T.test_a)'); print('AssertionError: 1 != 2'); sys.exit(1)\""
+        self.agent.approve_hooks = None
+        backend = self.use([
+            ("", [call("w", "write_file", path="x.py", content="x = 1\n")]),
+            ("完", []),
+        ])
+        quiet(self.agent.send, "写")
+        body = self.tool_results(backend)[0]
+        self.assertIn("要点：", body)
+        self.assertIn("- FAIL: test_a (m.T.test_a)", body)
+        self.assertIn("- AssertionError: 1 != 2", body)
+        self.assertLess(body.index("要点"), body.index("完整输出"))

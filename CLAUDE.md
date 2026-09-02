@@ -811,6 +811,66 @@ schema 里只留"怎么用"。**加新工具时，先问一句：系统提示里
 改成非阻塞（每轮 select 超时喂一个字符，全程都能回 CPR）之后警告就没了。
 **以后写这类夹具，喂键和读屏必须在同一个循环里。**
 
+## 0.31.0 四处（一次针对性的排查）
+
+### anthropic 后端从来没打过缓存断点
+
+`run_turn` 里 system / tools / messages 全是裸传，但 `_charge` 又在读
+`cache_read_input_tokens` —— 那个数在 anthropic 后端上**恒为 0**，状态栏里
+一直是盏不会亮的灯。openai 兼容那边是服务端自动缓存，所以这个洞被盖住了很久。
+
+- **三个断点：system 一个、`tools[-1]` 一个、历史上滚动 `CACHE_KEEP`(2) 个**，
+  一共 3-4 个，接口只认 4 个。历史上留两个而不是一个：新的那个负责这一轮写入，
+  旧的那个保证上一轮写进去的那份一定命中。
+- **每轮重挂之前必须先清干净**（`_mark_messages`）。不清的话断点一轮涨一个，
+  很快超过 4 个被接口拒掉。
+- **只挂 dict 形式的块**：assistant 那条 content 是 SDK 直出的对象，塞不进字段；
+  user 消息（tool_result 那些）本来就是我们自己拼的 dict。
+- **`_cached_tools()` 不能就地改 `self.tools`**，要拷一份——那份 schema 是共享的。
+- **必须能降级**：用户多半连的是中转站，未必透传 `cache_control`。
+  `_cache_rejected()` 认出来就 `self.cache = False` 重来一次。
+  **重来的前提是一个字都还没吐出来**（断点是请求参数，不认的话错在发出的那一刻），
+  这跟 0.20.0 那条「吐了字就不重发」是同一条规矩，用例专门盯着。
+
+### 系统提示里没有环境信息（`env_block`）
+
+原来只有 IDENTITY（模型名）。没有 cwd、平台、日期、git 分支，后果是实打实的：
+写 CHANGELOG 的日期靠编、照着别的发行版给装包命令、每次想知道自己在哪都要多跑
+一条 `pwd` 换一轮往返。
+
+- **`git branch --show-current` 而不是 `rev-parse --abbrev-ref HEAD`**：
+  后者在刚 `git init` 还没提交的仓库里直接报错，那种目录会被误报成"不是仓库"。
+  这是写测试时发现的。
+- 探测**只在 `__init__` 做一次**：`_refresh_system` 每次 remember / 切模式都会调，
+  不该每次都 fork 一个 git。分支中途变是它自己 checkout 出来的，它知道。
+
+### `search` 加了 `context` 和 `files_only`
+
+它是 13 个工具里调用最频繁的一个，改它的收益乘以调用次数。
+没有上下文行的话，每次找到 `def foo` 都得再 `read_file` 一次才知道函数体——
+**每次搜索都是两轮往返**。
+
+- **`SEARCH_MAX_CONTEXT = 10` 要封顶**：不封的话一句 `context=200`
+  就把整个文件拉进历史，而那正是 search 想省掉的事。
+- **截断单位跟着参数变**：带 context 时列出来的行数不等于匹配处数，
+  报「7 处匹配」是错的（实际是 1 处 + 6 行上下文）。
+- **顺带统一了两条路径的格式**：`_scan` 原来是 `f"{rel}:{i}: {line.strip()}"`
+  （多个空格、还 strip 掉缩进），rg 是 `rel:i:line`。**装没装 rg 输出长得不一样**，
+  这是既有的不一致。统一到 rg：主路径是它，兜底该向它看齐。
+  新用例里几条都是「两条路径结果必须逐字相等」。
+
+### 撞到 `MAX_ROUNDS` 不再一刀切
+
+原来到 25 轮直接 `_stop_runaway`。但上限是防「卡在循环里空转」的，
+**大重构本来就要几十轮**，一律停掉的话做到一半的任务得靠用户再说一句话接上，
+而它未必接得回原来那条线。
+
+现在 `_round_limit()` 问一句，选「接着做」就把 `rounds` 清零继续。
+- **没人能回答（管道、一次性任务、`ask_user` 没装）照旧停**：那些场景没人看着，空转很贵。
+  既有那条用例原样通过，说明非交互行为没变。
+- **用户在那儿自由输入的话要带给模型**（`_stop_runaway(said=)`）：
+  丢掉的话他下一句得把同样的话再说一遍。
+
 ## 已知问题（未修，用户知情）
 
 - ~~**写文件会盖掉用户在编辑器里的改动**~~ **0.21.0 已修**：`files.Watcher` + `_check_fresh`。
@@ -836,3 +896,122 @@ schema 里只留"怎么用"。**加新工具时，先问一句：系统提示里
 
 价格是每条配置自带的三项（缓存命中 / 输入 / 输出，¥ 每百万 token），没填就显示 token 数。
 `Feiyu.backend` 允许为 None（清单为空时），碰它之前先看 `agent.ready`。
+
+## 0.32.0：拿真实日志和题库定的五处
+
+用户要「更强、性能大幅提高」。没有凭感觉加功能，先看了三天的 trace 日志
+（36 次运行、250 次工具调用）和题库基线（deepseek-v4-flash，19/20），按证据改：
+
+- **bash 占了一半以上的调用，`search` 只用过 1 次** —— 模型宁可 `grep`。
+  两处修：系统提示加一句「找代码用 search / read_file / list_files，别拿 bash 跑
+  grep / cat / find」；`_tool_bash` 认出整条命令就是 grep/cat/find/ls 这类
+  （`_native_for`，带管道 / 重定向的不算）时在结果末尾提醒一次，
+  **`Toolbox.hinted` 只提醒一次**——跟 todo 的 `nudged` 同一个理由。
+- **`write_file` 参数截断 6 次**（默认 `max_tokens` 8192 的模型写长文件）。
+  截断的提示原来说「拆成几次写」，但根本没有拆着写的手段——加了 `append`。
+  追加也走 `_check_fresh`，没读过的文件照样拦。
+- **上下文溢出自愈**（`agent.overflow()` + `_rescue_overflow`）。
+  日志里有一次 `Input token exceed the limit` 之后**每一次**请求都 400：
+  历史里那条大消息还在。现在第一次 `history.shrink()`（所有超过 `SHRINK_LIMIT`
+  的工具结果一律压头尾，**折叠过的和最近的也压**——请求已经发不出去了，
+  「正在用的不能碰」让位于「先活下来」），第二次摘要重发并补一条 user。
+  `overflow()` 认关键词不认 SDK 类：DeepSeek / OpenAI / anthropic / 中转站措辞各不同。
+  只在**一个字都没吐出来**时才重发，跟 0.20.0 那条一致。
+- **`edit_file` 对不上时不要让它整份重读**。先按「每行去掉首尾空白」找一次
+  （`_loose_find`），恰好一处才替，替进去的 `new_str` 按文件的缩进挪（`_reindent`）；
+  多处照旧拒。完全找不到时 `_nearest` 拿 old_str 第一行去比相似度，
+  给出最像的那几行带行号——一份大文件重读一次就是上万 token，这几行省的就是那个。
+- **题库唯一挂的题**（「把 nowhere.py 里的 foo 改成 bar」，它把文件建出来了）：
+  系统提示加一条「指名的东西不存在时先说找不到、列候选，别替他建一个」。
+  照旧是「行为指令放系统提示」。
+- 顺带：`search` / `list_files` 同样参数再跑一次，旧结果也走 `expire()` 折叠。
+
+**启动 0.13 秒，没得省**；`-X importtime` 看过，一半在 prompt_toolkit。
+
+## git 工具（0.33.0）
+
+四个动作 `status / diff / log / commit`，就这四个。push / reset / checkout 刻意不进：
+会影响别人或丢改动，走 bash 让它先说一声、再点确认，是想要的摩擦。
+
+- **权限按 action 判**：`permissions.subject()` 对 git 返回 `"<action> <paths…>"`，
+  规则写 `Git(diff:*)`，出厂放行 status / diff / log，commit 要问；`suggest()` 生成
+  `Git(commit:*)`。**只读 / 计划模式拒的是 commit 不是工具名**：`agent.mutates(call)`
+  替代了 `_gate` 里两处 `call.name in WRITES`，加会改状态的工具时先想它是不是也该按参数判。
+- **commit 默认 `git add --update`，只带已跟踪文件**：新文件要模型写进 `paths`。
+  不然 `.env`、临时产物会跟着进版本库。结果里列出没提交的新文件，让它知道漏了什么。
+- **diff 超过 `GIT_DIFF_CAP` 只给 --stat 和开头**，提示按文件分次看。整份给的话
+  几个大文件就把上下文塞满，跟 `read_file` 的 `READ_CAP` 同一个道理。
+- **「用户没让提交就不 commit」写在系统提示里**，不是工具描述——照旧。
+- 确认前 `tools.preview()` 列出提交信息和会进去的文件，不然点确认等于盲签。
+
+### 老用户拿不到新出厂规则（顺带修的，比 git 工具本身更要紧）
+
+`permissions.json` 是整份存的，`load()` 见到 `allow` 是列表就原样用。结果
+0.16.0 之后加的 `Ask(*)`、`Job(*)` 到现在的 `Git(*)` **一条都没到老用户手里**——
+用户自己那份文件里就缺这三条。现在文件里多存一个 `known`（发过哪些出厂规则），
+没发过的补进去，发过但被用户删掉的不动；空列表当刻意清空，不补。
+**以后加出厂规则不用再管迁移**，`DEFAULT_ALLOW` 加一条就行。
+
+`tests/test_agent.py` 的 `Base` 之前没换 `permissions.STORE`，一直在读真实文件——
+这次才发现，因为新用例在有那份文件的机器上结果不一样。现在换了。
+
+## edit_file 批量改 + 题库基线对比（0.34.0）
+
+**没有另起 `multi_edit` 工具**，是 `edit_file` 加了个 `edits` 列表：少一份 schema、
+少一个权限名，模型也不用在两个工具之间选。`_apply_edit()` 是单处替换的纯函数
+（容错匹配、replace_all、报错措辞都在里面），单处和批量都走它。
+
+- **全部成功才写盘**。改到一半失败的话文件处在模型没见过的状态，下一次 edit 更难对上；
+  报错要带「第几处」和「一处都没写进文件」，不然它以为前面几处已经改了。
+- 按顺序应用，后一处看得到前一处的结果——这跟「改完再改」的直觉一致。
+- 「同一个文件几处就用 edits」写进系统提示。照旧：光有 schema 模型不会用。
+
+`evals.run --save 名字` / `--compare 名字`：结果存 `~/.local/state/feiyu/evals/`，
+不进版本库（跟模型和当天接口状态绑着）。**只有通过率降了才算变差**，token 涨跌
+有随机性，只标出来。改系统提示之前先 `--save`，改完 `--compare`，不然对比要靠肉眼。
+
+## 旁活用便宜模型（0.35.0）
+
+`/helper <名字>`，存在 `state.json` 的 `helper` 字段（`keys.helper()` /
+`set_helper()`）。三件事走它：压缩摘要、子 agent、`web_fetch` 的 prompt 提炼。
+`/review` 刻意不走：评分要的是判断力，省这点钱不值。
+
+- **`Feiyu._side_backend()` 按名字缓存一份后端**，没设 helper 就返回主后端自己
+  （它的 `ask()` 本来就不进历史）。每次摘要都重建客户端太浪费。
+- **旁路的用量要进 `tokens` / `cost`**，跟子 agent 一个道理：看不见的钱比看得见的危险。
+- **顺带修掉：`ask()` 这条路以前根本不计费**——摘要、网页提炼一次几万 token，
+  账上一个字都没有。现在两种后端的 `ask()` 都 `_charge(..., context=False)`：
+  **算钱但不动 `tokens_context`**。动了的话一次网页提炼就把压缩阈值假撞上，
+  用例专门盯着。
+- `keys.remove()` 删掉的那条正好是 helper 时要清掉，`keys.helper()` 也只认清单里
+  还在的名字——不然 `_side_backend` 会拿一条不存在的配置去建客户端。
+
+## symbol 工具：最小 LSP 客户端（0.36.0）
+
+`feiyu/lsp.py`，stdio JSON-RPC，只做 `textDocument/definition` 和 `references`，
+不引依赖。`SERVERS` 按扩展名选服务器（这是工具表不是模型表，命令行多年没变），
+`which()` 除了 PATH 还找 `~/.local/share/nvim/mason/bin`。
+
+- **读 stdout 必须自己缓冲、`os.read`**：第一版用 `BufferedReader.read1(1)` 配 `select`，
+  Reader 把 fd 上的数据整段吸进自己的缓冲区，之后 `select` 看 fd 是空的就一直等，
+  明明消息已经到了 —— 表现是每次请求都 45 秒超时。
+- **服务器反过来发的请求（注册能力、要配置）一律回 `null`**，不回它会等着，我们也在等。
+- **冷启动时 references 要先等 `WARMUP`**：实测 pyright 0 秒 1 处、0.5 秒后 3 处。
+  它是异步分析整个目录的，早问只报当前文件里的 —— 漏引用比慢一秒糟得多。
+  definition 不用等，跨文件也是当场解析。
+- 每次请求前 `didOpen` / `didChange` 把文件当前内容喂过去，版本号递增；
+  服务器只信最新那份，模型刚改过的文件不用等它自己刷新。
+- 模型报得出名字和大概行号，报不准列号，所以 `find_position()` 拿名字做整词匹配算位置。
+- 进 `PARALLEL_SAFE`（`Client.request` 有锁）、出厂 `Symbol(*)` 放行、
+  `_finish` 里 `toolbox.lsp.close()` 杀进程组。**没进子 agent 的工具集**：
+  每个子 agent 一个 Toolbox 就是一个服务器进程，先不给。
+- 没装服务器要明说并指回 search，测试里有一条盯着；真打 pyright 的用例
+  `skipUnless(lsp.which(...))`，跟沙箱那几条一个套路。
+
+## verify 失败先给要点（0.37.0）
+
+`feiyu/verify.py` 的 `digest()`：从测试 / 编译输出里抠「谁挂了、为什么、在哪行」，
+`agent._failure_note()` 把它放在原文前面 认 unittest、pytest、jest、gcc/clang、
+rustc（位置在下一行 `-->`，要拼上）、tsc、go 认不出就返回空，调用方照旧只给原文
+——**宁可没有要点，也不要错的要点**。上限 `MAX_ITEMS` 条，总结行（`FAILED (…)` /
+`N failed`）单独放最后。`note:` 这类不算。

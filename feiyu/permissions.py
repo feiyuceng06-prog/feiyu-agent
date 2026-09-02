@@ -34,6 +34,8 @@ RULE_NAME = {
     "exit_plan": "Plan",
     "job": "Job",
     "ask_user": "Ask",
+    "git": "Git",
+    "symbol": "Symbol",
 }
 
 # 出厂放行的：只暴露路径和版本库状态，读不到任意文件内容
@@ -63,6 +65,12 @@ DEFAULT_ALLOW = [
     # 只作用在它自己挂起来的后台命令上：看输出、停掉 起那条命令时已经确认过了，
     # 之后每轮询一次都要再点一次的话没人受得了
     "Job(*)",
+    # 只看不改的三个 commit 不在里面，要确认
+    "Git(status:*)",
+    "Git(diff:*)",
+    "Git(log:*)",
+    # 只读，走语言服务器
+    "Symbol(*)",
 ]
 
 # 出厂拦截的：碰这些路径的命令一律不放行，deny 优先所以 allow 里写了也没用
@@ -101,10 +109,18 @@ def load() -> dict:
     except (OSError, ValueError):
         raw = {}
     allow = raw.get("allow")
-    return {
-        "allow": list(allow) if isinstance(allow, list) else list(DEFAULT_ALLOW),
-        "deny": list(raw.get("deny") or []),
-    }
+    if not isinstance(allow, list):
+        return {"allow": list(DEFAULT_ALLOW), "deny": list(raw.get("deny") or [])}
+    # 文件是整份存的，新版本加的出厂规则到不了老用户手里（0.33.0 前
+    # Ask / Job / Git 三条都是这样漏掉的）"known" 记的是发过哪些出厂规则：
+    # 没发过的补进去，用户自己删掉的（发过但不在 allow 里）不动
+    known = raw.get("known") if isinstance(raw.get("known"), list) else []
+    # 空列表是「什么都不放行」，那是刻意清空的，别往里补
+    fresh = [r for r in DEFAULT_ALLOW if r not in known and r not in allow] if allow else []
+    rules = {"allow": list(allow) + fresh, "deny": list(raw.get("deny") or [])}
+    if fresh or known != list(DEFAULT_ALLOW):
+        save(rules)
+    return rules
 
 
 def save(rules: dict) -> None:
@@ -114,7 +130,8 @@ def save(rules: dict) -> None:
         # 别人读得到就等于知道从哪儿下手
         fd = os.open(STORE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"allow": rules["allow"], "deny": rules["deny"]}, f, ensure_ascii=False, indent=1)
+            json.dump({"allow": rules["allow"], "deny": rules["deny"],
+                       "known": list(DEFAULT_ALLOW)}, f, ensure_ascii=False, indent=1)
     except OSError:
         pass
 
@@ -132,6 +149,9 @@ def subject(tool: str, args: dict) -> str:
     """规则要匹配的那段文本：bash 是整条命令，其余是主参数 """
     if tool == "bash":
         return " ".join((args.get("command") or "").split())
+    if tool == "git":
+        # 规则按 action 写：Git(diff:*) 放行所有 diff，Git(commit:*) 放行提交
+        return " ".join([str(args.get("action") or "")] + [str(p) for p in args.get("paths") or []])
     for key in ("path", "pattern", "regex", "url"):
         if args.get(key):
             return str(args[key])
@@ -180,6 +200,8 @@ def verdict(tool: str, args: dict) -> str:
 def suggest(tool: str, args: dict) -> str:
     """按下"永久允许"时该写哪条规则 bash 取命令的头一两个词 """
     name = RULE_NAME.get(tool, tool)
+    if tool == "git":
+        return "%s(%s:*)" % (name, args.get("action") or "*")
     if tool != "bash":
         return "%s(*)" % name
     parts = segments(args.get("command") or "")

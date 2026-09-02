@@ -331,5 +331,135 @@ class TestToolSchemas(unittest.TestCase):
             self.assertTrue(item["function"]["description"])
 
 
+class _Stream:
+    """假的流式上下文 events 放完就给 final """
+
+    def __init__(self, final, events=()):
+        self.final, self.events = final, events
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self.events)
+
+    def get_final_message(self):
+        return self.final
+
+
+class _Final:
+    def __init__(self, content=(), stop="end_turn"):
+        self.content, self.stop_reason, self.usage = list(content), stop, None
+
+
+class TestAnthropicCache(unittest.TestCase):
+    """system / tools / 历史每轮都原样重发，不打断点就是每轮按原价重算一遍 """
+
+    def backend(self, messages=None, cache=True):
+        b = AnthropicBackend.__new__(AnthropicBackend)
+        b.system = "你是 Feiyu"
+        b.tools = [{"name": "read_file"}, {"name": "bash"}]
+        b.model, b.max_tokens = "claude-opus-5", 64_000
+        b.messages = messages if messages is not None else []
+        b.cache = cache
+        b._reset_usage()
+        return b
+
+    def test_system_和_tools_各打一个断点(self):
+        b = self.backend()
+        self.assertEqual(b._cached_system()[0]["cache_control"], providers.CACHE_MARK)
+        tools = b._cached_tools()
+        self.assertNotIn("cache_control", tools[0])
+        self.assertEqual(tools[-1]["cache_control"], providers.CACHE_MARK)
+
+    def test_打断点不能改坏原来的_tools(self):
+        b = self.backend()
+        b._cached_tools()
+        self.assertNotIn("cache_control", b.tools[-1])
+
+    def test_历史断点不超过接口认的个数(self):
+        msgs = []
+        for i in range(6):
+            msgs.append({"role": "assistant", "content": [
+                Block(type="tool_use", id="t%d" % i, name="read_file", input={})]})
+            msgs.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t%d" % i, "content": "ok"}]})
+        b = self.backend(msgs)
+        for _ in range(3):          # 反复重挂，断点不能一轮涨一个
+            b._mark_messages()
+        marked = [blk for m in msgs for blk in m["content"]
+                  if isinstance(blk, dict) and "cache_control" in blk]
+        self.assertEqual(len(marked), providers.CACHE_KEEP)
+        # 挂在最后那几条上：前面的历史靠前缀匹配自然命中
+        self.assertIs(marked[-1], msgs[-1]["content"][-1])
+
+    def test_不碰_sdk_对象那条(self):
+        msgs = [{"role": "assistant", "content": [Block(type="text", text="好")]}]
+        b = self.backend(msgs)
+        b._mark_messages()
+        self.assertFalse(hasattr(msgs[0]["content"][0], "cache_control"))
+
+    def test_关掉之后要把留下的断点清干净(self):
+        msgs = [{"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}]
+        b = self.backend(msgs)
+        b._mark_messages()
+        self.assertIn("cache_control", msgs[0]["content"][0])
+        b.cache = False
+        b._mark_messages()
+        self.assertNotIn("cache_control", msgs[0]["content"][0])
+        self.assertEqual(b._cached_system(), "你是 Feiyu")
+        self.assertNotIn("cache_control", b._cached_tools()[-1])
+
+    def test_接口不认就降级重来一次(self):
+        b = self.backend()
+        tries = []
+
+        def stream(**kw):
+            tries.append(kw)
+            if len(tries) == 1:
+                raise ValueError("invalid_request_error: cache_control is not supported")
+            return _Stream(_Final([Block(type="text", text="好了")]))
+
+        b.client = type("C", (), {"messages": type("M", (), {
+            "stream": staticmethod(stream)})()})()
+        out = b.run_turn(on_text=lambda t: None)
+        self.assertEqual(out.text, "好了")
+        self.assertFalse(b.cache)
+        self.assertEqual(len(tries), 2)
+        self.assertIsInstance(tries[1]["system"], str)   # 第二次不带断点
+
+    def test_吐过字就不能重发(self):
+        """重发会让模型把刚说的话再说一遍 —— 跟流中途断掉是同一条规矩 """
+        b = self.backend()
+        tries, said = [], []
+
+        def stream(**kw):
+            tries.append(kw)
+            return _Stream(_Final([]), events=_talk_then_fail())
+
+        b.client = type("C", (), {"messages": type("M", (), {
+            "stream": staticmethod(stream)})()})()
+        with self.assertRaises(ValueError):
+            b.run_turn(on_text=said.append)
+        self.assertEqual(len(tries), 1)
+        self.assertEqual(said, ["已经说了"])
+        self.assertTrue(b.cache)        # 没关掉：这个错不该赖到缓存头上
+
+    def test_别的报错不要误判成缓存问题(self):
+        self.assertFalse(providers._cache_rejected(ValueError("model not found")))
+        self.assertTrue(providers._cache_rejected(ValueError("cache_control unsupported")))
+
+
+def _talk_then_fail():
+    """先吐一句正文再断掉 """
+    yield type("E", (), {
+        "type": "content_block_delta",
+        "delta": type("D", (), {"type": "text_delta", "text": "已经说了"})()})()
+    raise ValueError("cache_control is not supported")
+
+
 if __name__ == "__main__":
     unittest.main()

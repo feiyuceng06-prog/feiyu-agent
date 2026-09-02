@@ -209,3 +209,55 @@ class TestStore(Isolated):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGitRules(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        permissions.STORE = os.path.join(self.tmp.name, "p.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_看的放行_提交要问(self):
+        for action in ("status", "diff", "log"):
+            self.assertEqual(permissions.verdict("git", {"action": action}), "allow", action)
+        self.assertEqual(permissions.verdict("git", {"action": "diff", "paths": ["a", "b"]}), "allow")
+        self.assertEqual(permissions.verdict("git", {"action": "commit", "message": "x"}), "ask")
+
+    def test_永久允许生成按_action_的规则(self):
+        self.assertEqual(permissions.suggest("git", {"action": "commit"}), "Git(commit:*)")
+        permissions.add_allow("Git(commit:*)")
+        self.assertEqual(permissions.verdict("git", {"action": "commit"}), "allow")
+
+
+class TestDefaultsMigration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        permissions.STORE = os.path.join(self.tmp.name, "p.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def dump(self, data):
+        with open(permissions.STORE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def test_老文件补上新出厂规则_并记下已发过(self):
+        self.dump({"allow": ["Bash(ls:*)", "Read(*)"], "deny": []})
+        rules = permissions.load()
+        self.assertIn("Git(status:*)", rules["allow"])
+        self.assertIn("Ask(*)", rules["allow"])
+        self.assertEqual(rules["allow"][:2], ["Bash(ls:*)", "Read(*)"])
+        with open(permissions.STORE, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["known"], permissions.DEFAULT_ALLOW)
+
+    def test_用户自己删掉的出厂规则不会被塞回来(self):
+        self.dump({"allow": ["Bash(ls:*)"], "deny": [], "known": list(permissions.DEFAULT_ALLOW)})
+        self.assertNotIn("Read(*)", permissions.load()["allow"])
+
+    def test_用户加的规则照旧保留(self):
+        self.dump({"allow": ["Bash(ls:*)", "Bash(cat:*)"], "deny": ["Bash(rm:*)"]})
+        rules = permissions.load()
+        self.assertIn("Bash(cat:*)", rules["allow"])
+        self.assertEqual(rules["deny"], ["Bash(rm:*)"])

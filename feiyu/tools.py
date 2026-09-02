@@ -18,12 +18,16 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import files, images, jobs as jobs_mod, memory, sandbox, todo
+from . import files, images, jobs as jobs_mod, lsp, memory, sandbox, todo
 
 
 # read_file 不给 limit 时最多读这么多行 原来是"整份读进来"，
 # 而整份会一直留在历史里被每一轮重发：本仓库 tools.py 一次就是 16180 token
 READ_CAP = 1500
+
+# search 一次最多带多少行上下文 不封顶的话一句 context=200 就把整个文件拉进历史，
+# 而那正是 search 想省掉的事
+SEARCH_MAX_CONTEXT = 10
 
 
 TOOL_SCHEMAS = [
@@ -99,12 +103,17 @@ TOOL_SCHEMAS = [
         "description": (
             "在工作区内创建或覆盖一个文本文件，父目录会自动创建 "
             "如果只是改动已有文件的一部分，优先用 edit_file "
+            "文件很长、一次写不完时分几次：第一次正常写，后面每次加 append 接着往后写 "
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "相对工作区根目录的文件路径 "},
                 "content": {"type": "string", "description": "要写入的完整文件内容 "},
+                "append": {
+                    "type": "boolean",
+                    "description": "追加到文件末尾而不是覆盖（默认 false） ",
+                },
             },
             "required": ["path", "content"],
         },
@@ -115,6 +124,9 @@ TOOL_SCHEMAS = [
             "替换已有文件里的一段精确文本 默认 old_str 必须在文件中恰好出现一次，"
             "否则编辑会被拒绝 多带一些上下文，让 old_str 唯一；"
             "确实要把每一处都换掉时加上 replace_all "
+            "行首行尾的空白差异会自动容忍；找不到时会告诉你最接近的位置 "
+            "同一个文件要改好几处时用 edits 一次交完：按顺序应用，有一处对不上就整个不写，"
+            "比一处一次省好几轮 "
         ),
         "input_schema": {
             "type": "object",
@@ -126,8 +138,21 @@ TOOL_SCHEMAS = [
                     "type": "boolean",
                     "description": "把出现的每一处都替换掉，而不是要求 old_str 唯一（默认 false） ",
                 },
+                "edits": {
+                    "type": "array",
+                    "description": "一次改多处 每项是 {old_str, new_str, replace_all?}，给了它就不用填上面三个 ",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_str": {"type": "string"},
+                            "new_str": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                        },
+                        "required": ["old_str", "new_str"],
+                    },
+                },
             },
-            "required": ["path", "old_str", "new_str"],
+            "required": ["path"],
         },
     },
     {
@@ -280,6 +305,55 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "git",
+        "description": (
+            "版本库的四个常用操作，输出比 bash 里跑 git 更紧凑、也不用确认（commit 除外） "
+            "status 看工作区状态；diff 看改动（默认未暂存的，staged 看已暂存的，"
+            "paths 只看某几个文件）；log 看最近的提交；"
+            "commit 提交：paths 给了就只提交这几个，不给就提交所有已跟踪文件的改动"
+            "（新文件不会自动带上，要提交新文件就写进 paths） "
+            "push / reset / checkout / rebase 这类不在这里，需要的话走 bash "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "diff", "log", "commit"],
+                },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "只看 / 只提交这几个路径（可选） ",
+                },
+                "staged": {"type": "boolean", "description": "diff 时看已暂存的改动 "},
+                "n": {"type": "integer", "description": "log 显示几条（默认 %d） " % 15},
+                "message": {"type": "string", "description": "commit 时的提交信息 "},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "symbol",
+        "description": (
+            "按语义找一个符号：definition 看它定义在哪，references 看哪些地方用到了它 "
+            "走语言服务器（pyright / clangd / rust-analyzer 等，装了才能用），"
+            "比 search 准：同名的变量、注释、字符串不会混进来 "
+            "跨文件改名、看某个函数被谁调用，优先用这个 "
+            "给出文件和符号名，最好带上它出现的行号；没装对应的服务器时会明说，那就退回 search "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["definition", "references"]},
+                "path": {"type": "string", "description": "符号出现在哪个文件（相对工作区） "},
+                "name": {"type": "string", "description": "符号名 "},
+                "line": {"type": "integer", "description": "它出现在第几行（1 起始，可选，给了更准） "},
+            },
+            "required": ["action", "path", "name"],
+        },
+    },
+    {
         "name": "search",
         "description": (
             "用正则表达式搜索文件内容，返回匹配的行及其所在文件和行号，类似 grep -rn "
@@ -289,6 +363,16 @@ TOOL_SCHEMAS = [
             "properties": {
                 "regex": {"type": "string", "description": "Python 正则表达式 "},
                 "glob": {"type": "string", "description": "只搜匹配该 glob 的文件（可选） "},
+                "context": {
+                    "type": "integer",
+                    "description": "顺带带上匹配行前后各几行（0-%d，默认 0）"
+                                   "看得到上下文就不用再 read_file 一次 " % SEARCH_MAX_CONTEXT,
+                },
+                "files_only": {
+                    "type": "boolean",
+                    "description": "只列命中的文件名，不列具体的行 "
+                                   "问「哪些文件涉及 X」时用这个，省很多篇幅 ",
+                },
             },
             "required": ["regex"],
         },
@@ -300,6 +384,10 @@ _IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_c
 # 走完要好几秒，拼出来的字符串几 MB，而模型看到的仍然只是被截断的前几十行
 LIST_CAP = 300
 SEARCH_CAP = 200          # 最多列这么多处 到顶了必须告诉模型，不能装作搜全了
+GIT_LOG_N = 15
+GIT_TIMEOUT = 60
+# diff 超过这么多字符就只给 --stat 加开头一段，让它按文件分次看
+GIT_DIFF_CAP = 12_000
 SEARCH_TIMEOUT = 30
 _MAX_OUTPUT = 30_000
 _WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -663,6 +751,113 @@ def _diff(old_text: str, new_text: str, keep: int = 6) -> list[tuple[str, str]]:
     return rows
 
 
+def _loose_find(text: str, old: str):
+    """按"每行去掉首尾空白"找 old 返回 (文件里的原文, 缩进差) / "many" / None
+
+    缩进差是"文件比 old 多几个前导空白字符"，替换进去的 new 也得照着挪
+    """
+    want = [line.strip() for line in old.splitlines()]
+    while want and not want[-1]:
+        want.pop()
+    if not want or not any(want):
+        return None
+    lines = text.splitlines(keepends=True)
+    bare = [line.strip() for line in lines]
+    hits = [i for i in range(len(lines) - len(want) + 1)
+            if bare[i:i + len(want)] == want]
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return "many"
+    i = hits[0]
+    span = "".join(lines[i:i + len(want)])
+    if not old.endswith("\n"):
+        span = span.rstrip("\r\n")
+    first_file = lines[i]
+    first_old = old.splitlines()[0]
+    file_indent = first_file[:len(first_file) - len(first_file.lstrip())]
+    old_indent = first_old[:len(first_old) - len(first_old.lstrip())]
+    return span, (old_indent, file_indent)
+
+
+def _reindent(new: str, indents: tuple[str, str]) -> str:
+    """old 的首行缩进是 old_indent，文件里对应那行是 file_indent，new 的每一行照着换
+    按前缀换而不是按字符数加减：tab 和空格混着时数字对不上 空行不动 """
+    old_indent, file_indent = indents
+    if old_indent == file_indent:
+        return new
+    out = []
+    for line in new.splitlines(keepends=True):
+        if not line.strip():
+            out.append(line)
+        elif line.startswith(old_indent):
+            out.append(file_indent + line[len(old_indent):])
+        else:
+            # 这一行比 old 首行还浅（比如 old 抄的是函数体、new 里加了个装饰器），
+            # 能减多少减多少
+            extra = len(file_indent) - len(old_indent)
+            out.append((file_indent[:extra] if extra > 0 else "") + line)
+    return "".join(out)
+
+
+def _apply_edit(text: str, old: str, new: str, every: bool):
+    """在内存里应用一处替换 成功返回 (新文本, 替换几处, 说明)，失败返回给模型看的话 """
+    if not old:
+        return "old_str 是空的 要新建文件用 write_file "
+    if old == new:
+        return "old_str 和 new_str 一模一样，这次编辑什么都不会改 "
+    count = text.count(old)
+    note = ""
+    if count == 0:
+        # 精确对不上时先按"每行去掉首尾空白"再找一次 模型抄回来的片段
+        # 缩进差一级、行尾少个空格是最常见的失败原因，为这个多跑一轮
+        # 再重读一遍文件太贵了 只有恰好一处时才敢替
+        loose = _loose_find(text, old)
+        if loose is None:
+            return ("文件中找不到 old_str " + _nearest(text, old) +
+                    "\n先按上面的位置核对，注意缩进和空白必须完全一致 ")
+        if loose == "many":
+            return ("old_str 精确匹配不到，忽略行首行尾空白后又匹配到好几处 "
+                    "多带几行上下文让它唯一 ")
+        old, new = loose[0], _reindent(new, loose[1])
+        count = 1
+        note = "（old_str 的空白/缩进跟文件不完全一致，已按去掉行首行尾空白后的唯一匹配替换）"
+    if count > 1 and not every:
+        return (f"old_str 匹配到 {count} 处 多带几行上下文让它唯一，"
+                "或者加 replace_all: true 把这 %d 处全换掉 " % count)
+    updated = text.replace(old, new) if every else text.replace(old, new, 1)
+    return updated, count, note
+
+
+NEAREST_WINDOW = 6
+
+
+def _nearest(text: str, old: str) -> str:
+    """找不到时指一下最像的地方 拿 old 的第一行去比，给出那附近几行带行号的原文
+
+    没有这个的话模型只能整份重读——一份大文件就是上万 token
+    """
+    probe = next((line.strip() for line in old.splitlines() if line.strip()), "")
+    lines = text.splitlines()
+    if not probe or not lines:
+        return ""
+    ratio = 0.0
+    where = -1
+    for i, line in enumerate(lines):
+        m = difflib.SequenceMatcher(None, probe, line.strip())
+        # quick_ratio 是上界，算得快 万行的文件逐行算 ratio 要几百毫秒
+        if m.quick_ratio() <= ratio:
+            continue
+        r = m.ratio()
+        if r > ratio:
+            ratio, where = r, i
+    if ratio < 0.6:
+        return "文件里也没有跟它相近的行 "
+    lo, hi = max(0, where - 1), min(len(lines), where + NEAREST_WINDOW)
+    shown = "\n".join("%d\t%s" % (n + 1, lines[n]) for n in range(lo, hi))
+    return "最接近的位置在第 %d 行附近：\n\n%s\n" % (where + 1, shown)
+
+
 # 确认之前给人看几行 太多的话确认框被顶到屏幕外，反而更看不见
 PREVIEW_LINES = 14
 
@@ -677,6 +872,16 @@ def preview(name: str, args: dict, root: Path) -> list[tuple[str, str]]:
         if name == "edit_file":
             target = (root / args["path"]).resolve()
             text = target.read_text(encoding="utf-8", errors="replace")
+            edits = args.get("edits")
+            if isinstance(edits, list) and edits:
+                updated = text
+                for edit in edits:
+                    outcome = _apply_edit(updated, str(edit.get("old_str", "")),
+                                          str(edit.get("new_str", "")), bool(edit.get("replace_all")))
+                    if isinstance(outcome, str):
+                        break
+                    updated = outcome[0]
+                return _diff(text, updated, keep=PREVIEW_LINES)
             old, new = args.get("old_str", ""), args.get("new_str", "")
             if old and old in text:
                 updated = (text.replace(old, new) if args.get("replace_all")
@@ -688,13 +893,23 @@ def preview(name: str, args: dict, root: Path) -> list[tuple[str, str]]:
         if name == "write_file":
             target = (root / args["path"]).resolve()
             content = args.get("content", "")
-            if target.is_file():
+            if target.is_file() and not args.get("append"):
                 return _diff(target.read_text(encoding="utf-8", errors="replace"),
                              content, keep=PREVIEW_LINES)
             rows = [("+", line) for line in content.splitlines()]
             if len(rows) > PREVIEW_LINES:
                 rows = rows[:PREVIEW_LINES] + [("", "… 还有 %d 行" % (len(rows) - PREVIEW_LINES))]
             return rows
+        if name == "git" and args.get("action") == "commit":
+            rows = [("", "提交信息：" + " ".join(str(args.get("message") or "").split()))]
+            paths = args.get("paths") or []
+            argv = ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"]
+            if paths:
+                argv += ["--"] + [str(p) for p in paths]
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+            for line in done.stdout.splitlines():
+                rows.append(("+", "  " + line.strip()))
+            return rows[:PREVIEW_LINES]
     except Exception:
         return []      # 预览崩了不能挡住确认本身
     return []
@@ -714,6 +929,8 @@ class Toolbox:
         self.files = files.Watcher()   # 写之前对一下版本，别盖掉模型没看见的改动
         self.jobs = jobs_mod.Jobs()    # bash 挂到后台的命令
         self.vision = False            # 当前模型认不认图片，由 agent 按模型配置写进来
+        self.hinted = False            # "这个用专用工具"只提醒一次，次次说会把它带跑偏
+        self.lsp = lsp.Pool(self.root)  # 语言服务器，按需起、退出时杀
 
     def _resolve(self, path: str) -> Path:
         target = (self.root / path).resolve()
@@ -776,6 +993,13 @@ class Toolbox:
                     "要动工作区外的东西，跟用户说一声让他自己做，或者让他 /sandbox off ）")
         out = _truncate(out)
         body = out if out.strip() else "（无输出）"
+        native = _native_for(command)
+        if native and not self.hinted:
+            # 实测一半以上的工具调用是 bash，其中不少是 grep / cat / find
+            # 那些活有专用工具：不用确认、能并行、输出也更省 只说一次
+            self.hinted = True
+            body += ("\n\n（提示：这类操作以后直接用 %s 工具，不用经过 bash：不需要确认、"
+                     "几条能同时跑、输出也更紧凑 ）" % native)
         lines = [line for line in out.splitlines() if line.strip()]
         if proc.returncode != 0:
             summary, detail = f"退出码 {proc.returncode}", _peek(lines, 4)
@@ -973,6 +1197,15 @@ class Toolbox:
                 return blocked
         target.parent.mkdir(parents=True, exist_ok=True)
         content = args["content"]
+        if args.get("append") and existed:
+            # 长文件分几次写 追加也算改动，前面的新鲜度检查照样过了才到这里
+            with open(target, "a", encoding="utf-8") as f:
+                f.write(content)
+            self.files.record(target, target.read_bytes())
+            total = target.read_text(encoding="utf-8").count("\n") + 1
+            n = content.count("\n") + 1
+            return ToolResult(f"已追加 {n} 行到 {args['path']}，现在共 {total} 行",
+                              summary=f"追加 {n} 行")
         target.write_text(content, encoding="utf-8")
         self.files.record(target, content.encode("utf-8"))
         n = content.count("\n") + 1
@@ -986,32 +1219,36 @@ class Toolbox:
         blocked = self._check_fresh(target, args["path"])
         if blocked is not None:
             return blocked
-        old, new = args["old_str"], args["new_str"]
-        if not old:
-            return ToolResult("old_str 是空的 要新建文件用 write_file ", is_error=True)
-        if old == new:
-            return ToolResult("old_str 和 new_str 一模一样，这次编辑什么都不会改 ", is_error=True)
+        edits = args.get("edits")
+        if not isinstance(edits, list) or not edits:
+            if "old_str" not in args or "new_str" not in args:
+                return ToolResult("要么给 old_str 和 new_str，要么给 edits 列表 ", is_error=True)
+            edits = [args]
         text = target.read_text(encoding="utf-8")
-        count = text.count(old)
-        if count == 0:
-            return ToolResult(
-                "文件中找不到 old_str 先 read_file 看一眼当前内容再改，"
-                "注意缩进和空白必须完全一致 ",
-                is_error=True,
-            )
-        every = bool(args.get("replace_all"))
-        if count > 1 and not every:
-            return ToolResult(
-                f"old_str 匹配到 {count} 处 多带几行上下文让它唯一，"
-                "或者加 replace_all: true 把这 %d 处全换掉 " % count,
-                is_error=True,
-            )
-        updated = text.replace(old, new) if every else text.replace(old, new, 1)
+        updated = text
+        total = 0
+        notes = []
+        # 全部成功才写盘 改到一半失败的话文件处在它没见过的状态，下一次 edit 更难对上
+        for i, edit in enumerate(edits, 1):
+            if not isinstance(edit, dict):
+                return ToolResult("edits 第 %d 项不是对象 " % i, is_error=True)
+            where = ("第 %d 处：" % i) if len(edits) > 1 else ""
+            outcome = _apply_edit(updated, str(edit.get("old_str", "")),
+                                  str(edit.get("new_str", "")), bool(edit.get("replace_all")))
+            if isinstance(outcome, str):
+                tail = " 这一批一处都没写进文件 " if len(edits) > 1 else ""
+                return ToolResult(where + outcome + tail, is_error=True)
+            updated, count, note = outcome
+            total += count
+            if note:
+                notes.append(where + note)
         target.write_text(updated, encoding="utf-8")
         self.files.record(target, updated.encode("utf-8"))
+        head = (f"已编辑 {args['path']}，{len(edits)} 处改动、替换 {total} 处" if len(edits) > 1
+                else (f"已编辑 {args['path']}，替换 {total} 处" if total > 1 else f"已编辑 {args['path']}"))
         return ToolResult(
-            f"已编辑 {args['path']}，替换 {count} 处" if every else f"已编辑 {args['path']}",
-            summary=f"已修改 {count} 处",
+            head + ("\n" + "\n".join(notes) if notes else ""),
+            summary=f"已修改 {total} 处",
             detail=_diff(text, updated),
         )
 
@@ -1167,23 +1404,184 @@ class Toolbox:
         return ToolResult(note, is_error=not ok,
                           summary="记住了" if ok else "没记：" + note[:40])
 
+    def _git(self, *argv: str) -> tuple[int, str]:
+        """在工作区根目录跑一条 git，返回 (退出码, 合并后的输出) """
+        try:
+            done = subprocess.run(
+                ["git", *argv], cwd=self.root, capture_output=True, text=True,
+                timeout=GIT_TIMEOUT, env=_child_env())
+        except FileNotFoundError:
+            return 127, "这台机器上没有 git"
+        except subprocess.TimeoutExpired:
+            return 124, "git 超过 %d 秒没结束" % GIT_TIMEOUT
+        return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+    def _tool_git(self, args: dict) -> ToolResult:
+        action = args.get("action")
+        code, _ = self._git("rev-parse", "--is-inside-work-tree")
+        if code == 127:
+            return ToolResult("这台机器上没有 git ", is_error=True, summary="没有 git")
+        if code != 0:
+            return ToolResult("工作区不是 git 仓库 要初始化的话用 bash 跑 git init ",
+                              is_error=True, summary="不是 git 仓库")
+        paths = [str(p) for p in (args.get("paths") or []) if str(p).strip()]
+        for p in paths:
+            self._resolve(p)       # 路径不能出工作区，跟别的工具一个规矩
+        handler = {"status": self._git_status, "diff": self._git_diff,
+                   "log": self._git_log, "commit": self._git_commit}.get(action)
+        if handler is None:
+            return ToolResult("action 只能是 status / diff / log / commit ",
+                              is_error=True, summary="不认识的 action")
+        return handler(args, paths)
+
+    def _git_status(self, args: dict, paths: list[str]) -> ToolResult:
+        code, out = self._git("status", "--porcelain=v1", "--branch", *(["--"] + paths if paths else []))
+        if code != 0:
+            return ToolResult(out, is_error=True, summary="git status 失败")
+        lines = out.splitlines()
+        head = lines[0][3:] if lines and lines[0].startswith("## ") else ""
+        rows = lines[1:] if head else lines
+        if not rows:
+            return ToolResult("分支 %s，工作区干净，没有改动 " % head, summary="干净")
+        body = "分支 %s\n%s" % (head, "\n".join(rows))
+        return ToolResult(body, summary="%d 处改动" % len(rows), detail=_peek(rows, 4))
+
+    def _git_diff(self, args: dict, paths: list[str]) -> ToolResult:
+        scope = ["--staged"] if args.get("staged") else []
+        tail = ["--"] + paths if paths else []
+        code, stat = self._git("diff", "--stat", *scope, *tail)
+        if code != 0:
+            return ToolResult(stat, is_error=True, summary="git diff 失败")
+        if not stat.strip():
+            return ToolResult("没有%s改动 " % ("已暂存的" if scope else ""), summary="没有改动")
+        code, body = self._git("diff", *scope, *tail)
+        if code != 0:
+            return ToolResult(body, is_error=True, summary="git diff 失败")
+        summary = stat.strip().splitlines()[-1].strip()
+        if len(body) > GIT_DIFF_CAP:
+            # 一次给整份的话几个大文件就把上下文塞满了 给统计和开头，让它按文件分次看
+            body = ("（diff 共 %d 字符，太长，下面只有开头 用 paths 按文件分次看）\n\n%s\n\n%s"
+                    % (len(body), stat.strip(), body[:GIT_DIFF_CAP]))
+            summary += "（已截断）"
+        return ToolResult(body, summary=summary,
+                          detail=_peek(stat.strip().splitlines()[:-1], 4))
+
+    def _git_log(self, args: dict, paths: list[str]) -> ToolResult:
+        n = max(1, min(int(args.get("n") or GIT_LOG_N), 200))
+        tail = ["--"] + paths if paths else []
+        code, out = self._git("log", "--oneline", "--no-decorate", "-n", str(n), *tail)
+        if code != 0:
+            if "does not have any commits" in out or "bad default revision" in out:
+                return ToolResult("还没有任何提交 ", summary="没有提交")
+            return ToolResult(out, is_error=True, summary="git log 失败")
+        rows = out.strip().splitlines()
+        return ToolResult(out.strip() or "还没有任何提交 ",
+                          summary="%d 条提交" % len(rows), detail=_peek(rows, 4))
+
+    def _git_commit(self, args: dict, paths: list[str]) -> ToolResult:
+        message = str(args.get("message") or "").strip()
+        if not message:
+            return ToolResult("commit 要带 message ", is_error=True, summary="没写提交信息")
+        if paths:
+            code, out = self._git("add", "--", *paths)
+        else:
+            # 只暂存已跟踪文件的改动 新文件要模型指名才带上，
+            # 不然 .env、临时产物这类会跟着一起进版本库
+            code, out = self._git("add", "--update")
+        if code != 0:
+            return ToolResult(out, is_error=True, summary="git add 失败")
+        code, staged = self._git("diff", "--staged", "--name-only")
+        if not staged.strip():
+            return ToolResult("没有可提交的改动 %s" % (
+                "" if paths else "（新文件不会自动带上，要提交新文件就写进 paths）"),
+                is_error=True, summary="没有改动可提交")
+        code, out = self._git("commit", "-m", message)
+        if code != 0:
+            return ToolResult(out, is_error=True, summary="git commit 失败")
+        _, short = self._git("rev-parse", "--short", "HEAD")
+        files = staged.strip().splitlines()
+        body = "已提交 %s：%s\n%s" % (short.strip(), message.splitlines()[0], "\n".join(files))
+        _, untracked = self._git("ls-files", "--others", "--exclude-standard")
+        left = untracked.strip().splitlines()
+        if left and not paths:
+            body += "\n\n没提交的新文件：%s" % "、".join(left[:10])
+        return ToolResult(body, summary="已提交 %s，%d 个文件" % (short.strip(), len(files)),
+                          detail=_peek(files, 4))
+
+    def _tool_symbol(self, args: dict) -> ToolResult:
+        action = args.get("action")
+        if action not in ("definition", "references"):
+            return ToolResult("action 只能是 definition 或 references ", is_error=True)
+        target = self._resolve(args["path"])
+        if not target.is_file():
+            return ToolResult(f"{args['path']} 不存在 ", is_error=True, summary="文件不存在")
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return ToolResult("name 是空的 ", is_error=True)
+        if lsp.server_for(target) is None:
+            return ToolResult(
+                "这种文件没有可用的语言服务器（%s 认的是 %s） 退回用 search 找 " % (
+                    target.suffix or "无后缀", "、".join(sorted({v[0] for v in lsp.SERVERS.values()}))),
+                is_error=True, summary="没有语言服务器")
+        text = target.read_text(encoding="utf-8", errors="replace")
+        spot = lsp.find_position(text, name, args.get("line"))
+        if spot is None:
+            where = "第 %s 行" % args["line"] if args.get("line") else "文件里"
+            return ToolResult(f"{where}找不到 {name} 这个词 ", is_error=True, summary="找不到符号")
+        try:
+            client = self.lsp.get(target)
+            client.open(target, text)
+            spots = client.locate(action, target, *spot)
+        except (OSError, RuntimeError) as exc:
+            return ToolResult("语言服务器出错：%s 退回用 search 找 " % exc,
+                              is_error=True, summary="语言服务器出错")
+        rows = []
+        for hit in spots:
+            path = hit["path"]
+            try:
+                rel = path.relative_to(self.root)
+            except ValueError:
+                rel = path      # 标准库、依赖里的定义，照样报出来
+            try:
+                line_text = path.read_text(encoding="utf-8", errors="replace").splitlines()[hit["line"]]
+            except (OSError, IndexError):
+                line_text = ""
+            rows.append(f"{rel}:{hit['line'] + 1}:{line_text}")
+        if not rows:
+            return ToolResult("语言服务器没找到 可能它还没分析完这个项目，或者这个名字它认不出来；"
+                              "退回用 search 试试 ", summary="没找到")
+        capped = len(rows) > lsp.MAX_RESULTS
+        rows = rows[:lsp.MAX_RESULTS]
+        label = "定义" if action == "definition" else "引用"
+        body = "\n".join(rows)
+        if capped:
+            body += "\n\n…（只列了前 %d 处，还有更多）" % lsp.MAX_RESULTS
+        return ToolResult(body, summary="%d 处%s%s" % (len(rows), label, "（已截断）" if capped else ""),
+                          detail=_peek(rows))
+
     def _tool_search(self, args: dict) -> ToolResult:
         regex = args["regex"]
         glob = args.get("glob", "")
+        context = max(0, min(int(args.get("context") or 0), SEARCH_MAX_CONTEXT))
+        files_only = bool(args.get("files_only"))
         re.compile(regex)      # 先在本地校验，语法错了当场报，别等 rg 吐一坨
-        hits, capped = _ripgrep(regex, glob, self.root)
+        hits, capped = _ripgrep(regex, glob, self.root, context, files_only)
         if hits is None:
-            hits, capped = self._scan(regex, glob)
+            hits, capped = self._scan(regex, glob, context, files_only)
         if not hits:
             return ToolResult("（无匹配）", summary="无匹配")
         # **截断必须说出来** 只报"200 处匹配"的话，模型会以为搜全了，
         # 「这个函数在哪些地方被调用」之类的结论就是错的
-        tail = ("\n\n…（只列了前 %d 处，还有更多没列出来 "
-                "把正则写窄一点，或者用 glob 限定范围）" % SEARCH_CAP) if capped else ""
-        note = "%d 处匹配%s" % (len(hits), "（已截断）" if capped else "")
+        # 带上下文时列出来的行数不等于匹配处数，别把两者混着报
+        unit = "个文件" if files_only else ("行（含上下文）" if context else "处匹配")
+        tail = ("\n\n…（只列了前 %d %s，还有更多没列出来 "
+                "把正则写窄一点，或者用 glob 限定范围）"
+                % (SEARCH_CAP, unit.split("（")[0])) if capped else ""
+        note = "%d %s%s" % (len(hits), unit, "（已截断）" if capped else "")
         return ToolResult("\n".join(hits) + tail, summary=note, detail=_peek(hits))
 
-    def _scan(self, regex: str, glob: str) -> tuple[list[str], bool]:
+    def _scan(self, regex: str, glob: str, context: int = 0,
+              files_only: bool = False) -> tuple[list[str], bool]:
         """没有 rg 时的兜底：纯 Python 逐行扫 141M 的仓库要 0.8 秒，rg 只要 6 毫秒 """
         rx = re.compile(regex)
         hits: list[str] = []
@@ -1196,15 +1594,40 @@ class Toolbox:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            for i, line in enumerate(text.splitlines(), 1):
-                if rx.search(line):
-                    hits.append(f"{path.relative_to(self.root)}:{i}: {line.strip()}")
+            rel = path.relative_to(self.root)
+            lines = text.splitlines()
+            if files_only:
+                if any(rx.search(line) for line in lines):
+                    hits.append(str(rel))
                     if len(hits) >= SEARCH_CAP:
                         return hits, True
+                continue
+            last = 0        # 上一处已经列到第几行，用来决定要不要插分隔线
+            for i, line in enumerate(lines, 1):
+                if not rx.search(line):
+                    continue
+                if not context:
+                    # 格式跟 rg 逐字一致（不 strip 缩进）：主路径是 rg，
+                    # 兜底得向它看齐，否则装没装 rg 输出长得不一样
+                    hits.append(f"{rel}:{i}:{line}")
+                else:
+                    lo, hi = max(1, i - context), min(len(lines), i + context)
+                    if last and lo > last + 1:
+                        hits.append("--")
+                    # 已经列过的行不再列一遍：两处匹配挨得近时窗口会重叠
+                    lo = max(lo, last + 1)
+                    for n in range(lo, hi + 1):
+                        # 跟 rg 一样：匹配行用 `:` 隔开，上下文行用 `-`
+                        sep = ":" if n == i else "-"
+                        hits.append(f"{rel}{sep}{n}{sep}{lines[n - 1]}")
+                    last = hi
+                if len(hits) >= SEARCH_CAP:
+                    return hits[:SEARCH_CAP], True
         return hits, False
 
 
-def _ripgrep(regex: str, glob: str, root: Path) -> tuple[list[str] | None, bool]:
+def _ripgrep(regex: str, glob: str, root: Path, context: int = 0,
+             files_only: bool = False) -> tuple[list[str] | None, bool]:
     """有 rg 就用 rg 返回 (命中行, 是否截断)；用不了返回 (None, False) 让调用方兜底
 
     rg 的正则是 Rust 那套，不支持反向引用和前后瞻 语法不合它就报错退出，
@@ -1212,8 +1635,11 @@ def _ripgrep(regex: str, glob: str, root: Path) -> tuple[list[str] | None, bool]
     """
     if not _shutil.which("rg"):
         return None, False
-    argv = ["rg", "--line-number", "--no-heading", "--color", "never",
-            "--no-messages", "-e", regex]
+    argv = ["rg", "--no-heading", "--color", "never", "--no-messages"]
+    argv += ["--files-with-matches"] if files_only else ["--line-number"]
+    if context and not files_only:
+        argv += ["-C", str(context)]
+    argv += ["-e", regex]
     if glob:
         argv += ["-g", glob]
     for name in _IGNORE_DIRS:
@@ -1231,6 +1657,27 @@ def _ripgrep(regex: str, glob: str, root: Path) -> tuple[list[str] | None, bool]
     rows = [line[2:] if line.startswith("./") else line
             for line in done.stdout.splitlines() if line.strip()]
     return rows[:SEARCH_CAP], len(rows) > SEARCH_CAP
+
+
+# bash 里这些命令都有专用工具 只看整条命令就一个简单段的情况，
+# 带管道 / 重定向 / && 的不算——那多半是真的在干别的
+_NATIVE = {"grep": "search", "rg": "search", "egrep": "search",
+           "cat": "read_file", "head": "read_file", "tail": "read_file",
+           "find": "list_files", "ls": "list_files", "tree": "list_files"}
+_SHELL_META = re.compile(r"[|&;<>`$]")
+
+
+def _native_for(command: str) -> str:
+    """这条 bash 命令有没有对应的专用工具 有就返回工具名，没有返回空串 """
+    if _SHELL_META.search(command):
+        return ""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return ""
+    if len(words) > 1 and words[0] == "git" and words[1] in ("status", "diff", "log", "commit"):
+        return "git"
+    return _NATIVE.get(words[0], "") if words else ""
 
 
 def _prune_web_cache() -> None:

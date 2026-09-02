@@ -70,7 +70,7 @@ class TestGoesParallel(Base):
         # task 也在里面：子 agent 的工具集限死在只读三件，本身不改任何东西
         self.assertEqual(
             agent_mod.PARALLEL_SAFE,
-            {"read_file", "list_files", "search", "web_fetch", "task"})
+            {"read_file", "list_files", "search", "web_fetch", "task", "symbol"})
 
     def test_结果按调用顺序排(self):
         # 谁先跑完是不确定的，但回给模型的顺序必须是定的

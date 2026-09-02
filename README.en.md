@@ -89,6 +89,7 @@ Type `/` for completion:
 | `/context` | Show and reload the project conventions file |
 | `/cost` | Recent token use and cost, by task |
 | `/compact` | Squash the history into one summary to save context |
+| `/helper <name>` | Use a cheaper entry for side work (summaries, subagents, page digests); `/helper off` goes back to the main model |
 | `/style` | Answer style: `default` / `concise` / `explanatory` / `teaching` |
 | `/clear` | Wipe the conversation and its saved session |
 | `/exit` | Quit |
@@ -100,8 +101,10 @@ Thirteen tools, each call printed as it happens:
 | Tool | Notes |
 |---|---|
 | `bash` | Run a shell command. `cd` persists between calls; long ones can go to the background |
-| `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root; images go straight to the model |
-| `list_files` `search` | Glob the tree, grep it with a regex |
+| `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root; images go straight to the model. `edit_file` tolerates leading/trailing whitespace differences, points at the nearest match when it fails, and takes several edits to one file in a single call (all or nothing); `write_file` can `append`, so long files can be written in pieces |
+| `list_files` `search` | Glob the tree, grep it with a regex (with context lines, or listing only the matching files) |
+| `symbol` | Semantic definition / references through a language server (pyright / clangd / rust-analyzer / typescript-language-server / gopls / lua-language-server; only when installed, nvim's mason dir is searched too). Same-named strings and prefixes stay out |
+| `git` | Status / diff / log / commit. The first three need no confirmation, commit does; it never commits unless asked, and untracked files only go in when named |
 | `web_fetch` | Fetch a page, HTML converted to Markdown |
 | `task` | Send a subagent to find something out and bring back only the conclusion |
 | `todo` | Keep the task list |
@@ -116,7 +119,7 @@ Thirteen tools, each call printed as it happens:
 
 **You see what it is writing while the arguments are still streaming**: `⠋ Write feiyu/tools.py · 42 lines so far`. A large file takes ten-odd seconds to generate, and a bare spinner does not tell you whether it is writing or stuck.
 
-A single task runs at most **25 rounds** of tool calls; at the cap it stops and says so, and one more message picks it up again.
+After **25 rounds** of tool calls in a row a task stops and asks whether to keep going — a large refactor genuinely takes dozens of rounds, and cutting it off means picking the half-finished work back up by hand. Where nobody can answer (a pipe, a one-shot task) it still just stops.
 
 **When a batch of calls is entirely read-only they run at the same time** (`read_file` / `list_files` / `search` / `web_fetch` / `task`, four at a time). One `bash` or file write in the batch and the whole batch goes back to serial — the write usually depends on what the reads found.
 
@@ -193,7 +196,7 @@ On by default when `bubblewrap` is installed:
 
 ## Automation
 
-**Run the tests after every edit**: put `verify: npm test` on a line of its own in the project conventions file. It then runs after every write or edit, and a failure goes straight back to the model to fix. Only `write_file` and `edit_file` trigger it.
+**Run the tests after every edit**: put `verify: npm test` on a line of its own in the project conventions file. It then runs after every write or edit, and a failure goes straight back to the model to fix, with a digest first (which tests failed, the assertion, the compile error and its line; unittest / pytest / jest / gcc / rustc / tsc / go are recognised) and the full output after it. Only `write_file` and `edit_file` trigger it.
 
 **Hooks**: for more than one rule, write a `hooks.json` — globally in `~/.config/feiyu/hooks.json`, per project in `.feiyu/hooks.json`.
 
@@ -236,9 +239,13 @@ On by default when `bubblewrap` is installed:
 
 **Sessions**: saved every turn; `feiyu --resume` picks up where you left off. The file holds **the whole transcript** (including file contents it read), in `~/.local/state/feiyu/sessions/`, mode 600. `/clear` deletes it too.
 
-**Shrinking the history**: every request resends the whole history, so one copy of a file sitting in there is paid for again on every later turn. Two mechanisms keep it down automatically: when a file is read again, or edited, the older copies in the history are replaced by a one-line note (the model wants the latest version anyway); and past the halfway mark, long tool outputs from earlier in the conversation keep only their head and tail. Measured on a "read three files, make two edits, re-read each to verify" task, the history went from 55k to 33k tokens. `read_file` without an explicit `limit` reads 1500 lines and tells the model how to continue.
+**Shrinking the history**: every request resends the whole history, so one copy of a file sitting in there is paid for again on every later turn. Two mechanisms keep it down automatically: when a file is read again, or edited, the older copies in the history are replaced by a one-line note (the model wants the latest version anyway); and past the halfway mark, long tool outputs from earlier in the conversation keep only their head and tail. Measured on a "read three files, make two edits, re-read each to verify" task, the history went from 55k to 33k tokens. `read_file` without an explicit `limit` reads 1500 lines and tells the model how to continue. Re-running `search` / `list_files` with the same arguments folds the older result too.
+
+**Caching**: on anthropic, the system prompt, the tool table and the history carry cache breakpoints, so the resent part is billed at the cache rate (usually a tenth of the normal one). OpenAI-compatible endpoints cache server-side and need no declaration. A proxy that does not accept the field is detected and the request is retried without it rather than failing. That is where the hit count in the status bar comes from.
 
 **Compaction**: only if it is still past 75% after that does it summarise the earlier conversation into a handover note and carry on, mid-task included. The limit defaults to 128k; override per model with `"limit": 32000` in `models.json`. `/compact` does it on demand. A summary is lossy — the model has to restate everything — so shrinking is preferred as long as it holds.
+
+**"Input too long" from the API is recoverable too**: one oversized tool result, or a model whose real limit is smaller than configured, gets the request rejected with a 400 — and the big message is still in the history, so every later request would fail the same way. Now the first retry squashes every large tool output to head and tail; if that is not enough it compacts to a summary and retries once more; only then does it give up.
 
 ## Piping it into other programs
 

@@ -222,6 +222,8 @@ _LABEL = {
     "exit_plan": "Plan",
     "job": "Job",
     "ask_user": "Ask",
+    "git": "Git",
+    "symbol": "Symbol",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -235,6 +237,8 @@ _HEADLINE_ARG = {
     "remember": "fact",
     "task": "prompt",
     "job": "action",
+    "git": "action",
+    "symbol": "name",
     # 问句本身就是这次调用的全部内容，不显出来那行就只剩一个 Ask
     "ask_user": "question",
 }
@@ -775,7 +779,8 @@ def ask_text(name: str, args: dict) -> str:
     """确认时问什么 —— 要认得出对象 光问「要执行 Update 吗」等于让人盲签 """
     what = str(args.get(_HEADLINE_ARG.get(name, ""), "")).replace("\n", " ")
     verb = {"write_file": "写", "edit_file": "改", "read_file": "读",
-            "web_fetch": "抓", "remember": "记住", "bash": "执行"}.get(name, "执行")
+            "web_fetch": "抓", "remember": "记住", "bash": "执行",
+            "git": "git"}.get(name, "执行")
     return "要%s吗？" % verb if not what else "要%s %s 吗？" % (verb, what)
 
 
@@ -985,6 +990,7 @@ SLASH = {
     "/hooks": "看在哪些时机会跑哪些外部命令",
     "/sandbox": "bash 沙箱：off / workspace / strict",
     "/jobs": "看 / 停掉挂在后台跑的命令",
+    "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
     "/clear": "清空对话历史和存盘，重新开始",

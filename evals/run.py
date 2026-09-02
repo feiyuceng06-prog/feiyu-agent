@@ -12,6 +12,7 @@
 import argparse
 import contextlib
 import io
+import json
 import os
 import statistics
 import sys
@@ -22,6 +23,8 @@ from pathlib import Path
 from evals.tasks import TASKS
 
 CRASHES: list[str] = []
+# --save 存到这里，--compare 从这里读 不进版本库：结果跟模型和当天的接口状态绑着
+RESULTS = Path.home() / ".local" / "state" / "feiyu" / "evals"
 
 
 def _isolate(box: str) -> None:
@@ -71,7 +74,17 @@ def main() -> int:
     ap.add_argument("-m", "--model", default="", help="/key 清单里的名字，默认用上次那个")
     ap.add_argument("--mode", default="auto", help="权限模式，默认 auto（没人能回答确认）")
     ap.add_argument("--only", nargs="*", default=None, help="只跑这几题")
+    ap.add_argument("--save", default="", help="把这次结果存成基线，起个名字")
+    ap.add_argument("--compare", default="", help="跟之前存的哪份基线比")
     args = ap.parse_args()
+    base = {}
+    if args.compare:
+        try:
+            with open(RESULTS / (args.compare + ".json"), encoding="utf-8") as f:
+                base = json.load(f)["tasks"]
+        except (OSError, ValueError, KeyError) as exc:
+            print("读不到基线 %s：%s" % (args.compare, exc), file=sys.stderr)
+            return 2
 
     box = tempfile.mkdtemp(prefix="feiyu-evals-")
     _isolate(box)
@@ -88,6 +101,8 @@ def main() -> int:
     print("─" * 78)
 
     rows, wins = [], 0
+    saved = {}
+    worse = []
     for name, setup, prompt, check in chosen:
         marks, runs = [], []
         for _ in range(args.repeat):
@@ -97,11 +112,25 @@ def main() -> int:
             rows.append((name, got))
             wins += bool(got["ok"])
         bad = next((r["why"] for r in runs if not r["ok"]), "")
+        passed = sum(bool(r["ok"]) for r in runs)
+        tokens = statistics.median(r["tokens"] for r in runs)
+        saved[name] = {"passed": passed, "runs": len(runs), "tokens": tokens,
+                       "rounds": statistics.median(r["rounds"] for r in runs)}
+        note = bad[:34]
+        old = base.get(name)
+        if old:
+            # 通过率降了才算变差 token 涨跌有随机性，只标出来不判输赢
+            was = old["passed"] / max(1, old["runs"])
+            now = passed / max(1, len(runs))
+            delta = tokens - old["tokens"]
+            flag = "↓" if now < was else ("↑" if now > was else " ")
+            if now < was:
+                worse.append(name)
+            note = "%s 基线 %d/%d %+5d tok  %s" % (flag, old["passed"], old["runs"], delta, note)
         print("%-14s %-8s %5.1fs %2d轮 %2d工具 %6d tok  %s" % (
             name, "".join(marks), statistics.median(r["s"] for r in runs),
             statistics.median(r["rounds"] for r in runs),
-            statistics.median(r["tools"] for r in runs),
-            statistics.median(r["tokens"] for r in runs), bad[:34]))
+            statistics.median(r["tools"] for r in runs), tokens, note))
 
     total = len(rows)
     print("─" * 78)
@@ -115,7 +144,15 @@ def main() -> int:
         sum(r["s"] for _, r in rows), sum(r["tokens"] for _, r in rows),
         ("¥%.3f" % sum(r["cost"] for _, r in rows)) if any(r["cost"] for _, r in rows)
         else "没配价格"))
-    return 0 if wins == total else 1
+    if args.save:
+        RESULTS.mkdir(parents=True, exist_ok=True)
+        with open(RESULTS / (args.save + ".json"), "w", encoding="utf-8") as f:
+            json.dump({"model": model, "mode": args.mode, "repeat": args.repeat,
+                       "tasks": saved}, f, ensure_ascii=False, indent=1)
+        print("已存成基线 %s" % args.save)
+    if base:
+        print("变差的题：%s" % ("、".join(worse) if worse else "没有"))
+    return 0 if wins == total and not worse else 1
 
 
 if __name__ == "__main__":

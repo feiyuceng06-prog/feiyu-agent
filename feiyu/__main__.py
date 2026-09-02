@@ -232,6 +232,8 @@ def main() -> int:
                 print(_hooks(agent))
             elif cmd == "/sandbox":
                 print(_sandbox(arg))
+            elif cmd == "/helper":
+                print(_helper(agent, arg))
             elif cmd == "/jobs":
                 print(_jobs(agent, arg))
             else:
@@ -269,6 +271,21 @@ def _model(agent: Feiyu, arg: str) -> str:
         rows.append("   " + tick + " " + label + ui.paint("grey", note))
     rows += ["", ui.notice("/model <名字> 切换 · /key add 添加 · /key rm <名字> 删除")]
     return "\n".join(rows)
+
+
+def _helper(agent: Feiyu, arg: str) -> str:
+    entries = keys.load()
+    if arg in ("off", "none", "无"):
+        agent.set_helper("")
+        return ui.notice("旁活改回用主模型")
+    if arg:
+        if arg not in entries:
+            return ui.error(f"清单里没有 {arg}，/model 看有哪些")
+        agent.set_helper(arg)
+        return ui.notice(f"摘要、子 agent、网页提炼改用 {arg}（{entries[arg]['model']}）")
+    if not agent.helper:
+        return ui.notice("旁活现在用主模型 /helper <名字> 换一条便宜的，/helper off 改回来")
+    return ui.notice(f"旁活用 {agent.helper} /helper off 改回主模型")
 
 
 def _mode(agent: Feiyu, arg: str) -> str:
@@ -468,6 +485,7 @@ def _finish(agent: Feiyu, tracer, code: int) -> int:
     progress.save(agent.toolbox.root, agent.task, agent.toolbox.todos.items)
     # 后台命令跟着 feiyu 一起收摊 留着的话用户关掉窗口之后那些进程还在跑，
     # 而他已经没有任何句柄能找到它们了
+    agent.toolbox.lsp.close()
     left = agent.toolbox.jobs.running()
     if left:
         agent.toolbox.jobs.kill_all()
