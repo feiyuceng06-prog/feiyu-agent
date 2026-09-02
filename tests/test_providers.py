@@ -316,6 +316,16 @@ class TestBilling(unittest.TestCase):
         self.b._charge(100, 100, 50)
         self.assertFalse(self.b.priced)
 
+    def test_缓存写入按第四项算_没填按输入价(self):
+        self.b.rates = (1.0, 2.0, 4.0, 2.5)
+        self.b._charge(0, 100, 0, write=1_000_000)
+        self.assertAlmostEqual(self.b.cost, 2.5 + 100 * 2.0 / 1e6)
+        self.assertEqual(self.b.tokens_context, 1_000_100)
+        self.b._reset_usage()
+        self.b.rates = (1.0, 2.0, 4.0)
+        self.b._charge(0, 0, 0, write=1_000_000)
+        self.assertAlmostEqual(self.b.cost, 2.0)
+
     def test_配了价格就累加(self):
         self.b.rates = (1.0, 1.0, 1.0)
         self.b._charge(1_000_000, 0, 0)
@@ -325,6 +335,12 @@ class TestBilling(unittest.TestCase):
 class TestRates(unittest.TestCase):
     def test_三项齐全(self):
         self.assertEqual(providers._as_rates({"hit": 0.5, "input": 2, "output": 8}),
+                         (0.5, 2.0, 8.0))
+
+    def test_写入价是可选的第四项(self):
+        self.assertEqual(providers._as_rates({"hit": 0.5, "input": 2, "output": 8, "write": 2.5}),
+                         (0.5, 2.0, 8.0, 2.5))
+        self.assertEqual(providers._as_rates({"hit": 0.5, "input": 2, "output": 8, "write": None}),
                          (0.5, 2.0, 8.0))
 
     def test_缺一项就当没配(self):

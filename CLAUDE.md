@@ -1089,3 +1089,10 @@ README 写的 `"limit": 32000` 是空话。所以所有模型一律 128k：窗�
 `context` 属性把它算进去（状态栏也跟着更诚实），`run_turn` 成功返回就清零——
 接口刚报过准确的数。`reset` / `compact` / `restore` 同样清零。
 三个字符一个 token 对中文是高估，高估的代价是早压一次，低估的代价是 400，只往这个方向错。
+
+## 缓存写入价（0.40.0）
+
+anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价算，官方是 1.25 倍。
+现在 `price` 里多一个可选的 `write`，`_as_rates` 有它就返回四元组，`pricing.cost` 没第四项
+就按输入价——**不内置 1.25 这个倍率**，跟不内置价格表同一个理由。`_charge` 多一个
+`write=` 关键字参数，只有 anthropic 的 `run_turn` 传它；`tokens_context` 照旧把它算进规模。

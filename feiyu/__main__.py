@@ -472,6 +472,13 @@ def _ask_price(ask) -> dict | None:
         except ValueError:
             print(ui.error(f"「{raw}」不是数字，价格这块跳过"))
             return None
+    # anthropic 直连写缓存按输入价的 1.25 倍收，别家多半不另收 不内置倍率，问一句
+    raw = ask("  缓存写入价（留空按输入价算）: ")
+    if raw:
+        try:
+            out["write"] = float(raw)
+        except ValueError:
+            print(ui.error(f"「{raw}」不是数字，写入价按输入价算"))
     return out
 
 

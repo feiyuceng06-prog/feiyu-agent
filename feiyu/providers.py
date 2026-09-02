@@ -110,11 +110,14 @@ def build_backend(entry: dict, *, system: str, tools: list[dict]):
     return backend
 
 
-def _as_rates(price) -> tuple[float, float, float] | None:
+def _as_rates(price) -> tuple | None:
     if not isinstance(price, dict):
         return None
     try:
-        return (float(price["hit"]), float(price["input"]), float(price["output"]))
+        rates = (float(price["hit"]), float(price["input"]), float(price["output"]))
+        if price.get("write") is not None:
+            rates += (float(price["write"]),)
+        return rates
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -135,14 +138,16 @@ class Billing:
         self.cost = 0.0
         self.priced = True
 
-    def _charge(self, hit: int, miss: int, out: int, *, context: bool = True) -> None:
+    def _charge(self, hit: int, miss: int, out: int, *, write: int = 0,
+                context: bool = True) -> None:
         """context=False 是旁路请求（摘要、网页提炼）：要算钱，但不是"对话现在多大"
-        算进 context 的话，一次网页提炼就能把压缩阈值假撞上 """
-        size = hit + miss + out
+        算进 context 的话，一次网页提炼就能把压缩阈值假撞上
+        write 是新写进缓存的输入（anthropic 的 cache_creation），价可能跟普通输入不同 """
+        size = hit + miss + out + write
         if context:
             self.tokens_context = size
         self.tokens_total += size
-        spent = pricing.cost(self.rates, hit, miss, out)
+        spent = pricing.cost(self.rates, hit, miss, out, write)
         if spent is None:
             self.priced = False
         else:
@@ -335,8 +340,8 @@ class AnthropicBackend(Billing):
         usage = getattr(response, "usage", None)
         if usage is not None:
             hit = getattr(usage, "cache_read_input_tokens", 0) or 0
-            miss = (usage.input_tokens or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
-            self._charge(hit, miss, usage.output_tokens or 0)
+            written = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            self._charge(hit, usage.input_tokens or 0, usage.output_tokens or 0, write=written)
 
         text = "".join(b.text for b in response.content if b.type == "text")
         calls = [

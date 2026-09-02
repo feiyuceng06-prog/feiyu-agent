@@ -286,9 +286,10 @@ The model list is entirely yours: **no built-in vendors, no default model, no bu
      Cache hit price (0 if there's no cache): 0.02
      Input price: 1
      Output price: 2
+     Cache write price (blank = same as input): 
 ```
 
-Stored in `~/.config/feiyu/models.json`, mode 600; the key goes through a separate hidden prompt and never enters the input history. Leave the prices blank and you get token counts — there is no built-in price table because models are renamed and repriced constantly, and **a wrong price is worse than no price**.
+Stored in `~/.config/feiyu/models.json`, mode 600; the key goes through a separate hidden prompt and never enters the input history. Leave the prices blank and you get token counts — there is no built-in price table because models are renamed and repriced constantly, and **a wrong price is worse than no price**. The cache-write price only matters for direct Anthropic access (billed at 1.25× input); leave it blank elsewhere.
 
 **Set `max_tokens` to what the model actually allows.** Blank falls back to a conservative 8192, and writing one long file will hit that ceiling — which costs you more than a half-finished sentence: tool arguments are JSON assembled from the stream, and one cut in the middle throws the whole call away. There is no way to detect the real limit (it differs per vendor and no endpoint reports it), so it has to be asked; set it higher than the API allows and the API simply errors.
 
