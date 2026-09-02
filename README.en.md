@@ -69,6 +69,8 @@ Also `--mode` (`default` / `auto` / `plan` / `readonly` — nobody is there to a
 
 `⏎` send · `\⏎` newline · `shift+tab` cycle permission mode · `esc` interrupt · `ctrl-d` quit · `↑` `↓` history.
 
+Markdown in replies is rendered: bold, inline code, headings, lists (wrapped lines align after the marker), code blocks, tables (columns aligned), rules, links (text plus URL). Italics are deliberately not recognised — `*` is usually a glob in a shell.
+
 The top border shows **how full the context is** and **what this session has cost**. Context is a percentage, not a token count — every request carries ~1.5k tokens of fixed overhead, and the absolute number is both alarming and useless to act on. Models with no price configured show no money at all.
 
 Type `/` for completion:
@@ -243,7 +245,7 @@ On by default when `bubblewrap` is installed:
 
 **Caching**: on anthropic, the system prompt, the tool table and the history carry cache breakpoints, so the resent part is billed at the cache rate (usually a tenth of the normal one). OpenAI-compatible endpoints cache server-side and need no declaration. A proxy that does not accept the field is detected and the request is retried without it rather than failing. That is where the hit count in the status bar comes from.
 
-**Compaction**: only if it is still past 75% after that does it summarise the earlier conversation into a handover note and carry on, mid-task included. The limit defaults to 128k; override per model with `"limit": 32000` in `models.json`. `/compact` does it on demand. A summary is lossy — the model has to restate everything — so shrinking is preferred as long as it holds.
+**Compaction**: only if it is still past 75% after that does it summarise the earlier conversation into a handover note and carry on, mid-task included. The limit defaults to 128k; `/key add` asks for the model's window (`"limit"` in `models.json`). Left blank, **one "input too long" error is enough for it to learn** the real limit of that model (the number in the error if there is one, otherwise the size of the last successful request), compact earlier next time, and show it in `/key`. An unrecognised 400 past 60% of the window is treated as overflow too. `/compact` does it on demand. A summary is lossy — the model has to restate everything — so shrinking is preferred as long as it holds.
 
 **"Input too long" from the API is recoverable too**: one oversized tool result, or a model whose real limit is smaller than configured, gets the request rejected with a 400 — and the big message is still in the history, so every later request would fail the same way. Now the first retry squashes every large tool output to head and tail; if that is not enough it compacts to a summary and retries once more; only then does it give up.
 

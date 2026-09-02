@@ -713,6 +713,9 @@ class _Markdown(HTMLParser):
         return raw.strip()
 
 
+_REQUIRED = {t["name"]: tuple(t["input_schema"].get("required") or ()) for t in TOOL_SCHEMAS}
+
+
 @dataclass
 class ToolResult:
     content: str                                  # 喂给模型的
@@ -943,6 +946,12 @@ class Toolbox:
             handler = getattr(self, f"_tool_{name}")
         except AttributeError:
             return ToolResult(f"未知工具: {name}", is_error=True)
+        missing = [key for key in _REQUIRED.get(name, ()) if key not in args]
+        if missing:
+            # 直接跑会抛一句裸的 KeyError: 'regex'，模型多半看不出是自己漏了参数
+            return ToolResult("缺少参数 %s，这个工具必须给：%s" % (
+                " / ".join(missing), " / ".join(_REQUIRED[name])), is_error=True,
+                summary="缺少参数 " + " / ".join(missing))
         try:
             return handler(args)
         except Exception as exc:

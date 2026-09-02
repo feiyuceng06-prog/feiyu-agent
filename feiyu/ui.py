@@ -371,8 +371,10 @@ def tokens(n: int) -> str:
 class MarkdownStream:
     """把流进来的 markdown 切成 (文本, 样式) 片段 样式由 Stream 上色
 
-    只认终端里真正有用的那几样：**粗体**、`行内代码`、# 标题、- 列表、``` 代码块
-    斜体不认——`*` 在命令行里多半是通配符，认了反而到处误伤
+    只认终端里真正有用的那几样：**粗体**、`行内代码`、# 标题、- / 1. 列表、``` 代码块、
+    | 表格 |、--- 分隔线 斜体不认——`*` 在命令行里多半是通配符，认了反而到处误伤
+
+    表格是整张攒齐了才出（列宽要看完所有行才知道），其余都是流式的
 
     是流式的：一次只喂到几个字符，末尾那个还判不出来的（半个 `**`、半行 ```）
     先攒着，等下一批或者 flush
@@ -390,6 +392,8 @@ class MarkdownStream:
         self.quote = False      # > 引用，到行尾为止
         self._buf = ""
         self._sol = True        # 停在行首
+        self._rows: list[str] = []      # 攒着还没画的表格行（原文）
+        self.limit = MAX_WIDTH          # 表格最宽画到这里，Stream 会按终端宽度改
 
     def feed(self, chunk: str) -> list[tuple[str, str]]:
         self._buf += chunk
@@ -414,10 +418,11 @@ class MarkdownStream:
     def _drain(self, final: bool) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
 
-        def push(text: str) -> None:
+        def push(text: str, style: str | None = None) -> None:
             if not text:
                 return
-            style = self._style()
+            if style is None:
+                style = self._style()
             if out and out[-1][1] == style:
                 out[-1] = (out[-1][0] + text, style)
             else:
@@ -433,7 +438,65 @@ class MarkdownStream:
             take = self._inline(final, push)
             if not take:
                 return out
+        if final and self._rows:
+            self._table(push)
         return out
+
+    _SEP_CELL = re.compile(r":?-+:?")
+    _LINK = re.compile(r"\[([^\]\n]*)\]\(([^)\n]*)\)")
+    # 还没收完但仍可能长成一个链接的样子
+    _LINK_HEAD = re.compile(r"\[[^\]\n]*(\]\(?[^)\n]*)?")
+    _ORDERED = re.compile(r"\d{1,3}[.)] ")
+
+    @staticmethod
+    def _cells(row: str) -> list[str]:
+        row = row.strip()
+        if row.startswith("|"):
+            row = row[1:]
+        if row.endswith("|"):
+            row = row[:-1]
+        # 单元格里的记号不再细分样式，只把它们拿掉，宽度才算得准
+        return [c.strip().replace("**", "").replace("`", "") for c in row.split("|")]
+
+    def _table(self, push) -> None:
+        """把攒下的表格行画成对齐的列 首行下面有 |---| 就当表头 """
+        rows = [self._cells(r) for r in self._rows]
+        self._rows = []
+        aligns: list[str] | None = None
+        body: list[list[str]] = []
+        for cells in rows:
+            if cells and all(self._SEP_CELL.fullmatch(c) for c in cells):
+                if aligns is None and len(body) == 1:
+                    aligns = ["right" if c.endswith(":") and not c.startswith(":") else "left"
+                              for c in cells]
+                continue
+            body.append(cells)
+        if not body:
+            return
+        ncol = max(len(r) for r in body)
+        body = [r + [""] * (ncol - len(r)) for r in body]
+        aligns = (aligns or []) + ["left"] * (ncol - len(aligns or []))
+        widths = [max(get_cwidth(r[i]) for r in body) for i in range(ncol)]
+        # 装不下就从最宽的列削，削到 4 格为止，再宽也只能让它折行
+        while sum(widths) + 2 * (ncol - 1) > self.limit - 2 and max(widths) > 4:
+            widths[widths.index(max(widths))] -= 1
+
+        def line(cells: list[str]) -> str:
+            out = []
+            for cell, w, align in zip(cells, widths, aligns):
+                cell = clip(cell, w)
+                pad = " " * (w - get_cwidth(cell))
+                out.append(pad + cell if align == "right" else cell + pad)
+            return "  ".join(out).rstrip()
+
+        for i, cells in enumerate(body):
+            if i == 0 and aligns is not None and len(body) > 1:
+                push(line(cells), "bold")
+                push("\n", "")
+                push("  ".join("─" * w for w in widths), "rule")
+            else:
+                push(line(cells), "")
+            push("\n", "")
 
     def _open_line(self, final: bool, push) -> bool | None:
         """处理行首的记号 返回 True 表示吃掉了东西要重来，None 表示还判不出来 """
@@ -461,6 +524,28 @@ class MarkdownStream:
             self._sol = False
             return False
 
+        if stripped.startswith("|"):
+            # 表格行要整行到齐才收，列宽得看完所有行才知道
+            if nl < 0 and not final:
+                return None
+            self._rows.append(head)
+            self._buf = buf[nl + 1:] if nl >= 0 else ""
+            return True
+        if self._rows:
+            if not stripped and nl < 0 and not final:
+                return None     # 可能只是下一行的缩进还没到
+            self._table(push)
+
+        if stripped and set(stripped.rstrip()) <= set("-*_"):
+            # 可能是 --- 分隔线，也可能是 - 列表或 **粗体 的开头，得看到下一个字符
+            if nl < 0 and not final:
+                return None
+            bare = stripped.rstrip()
+            if len(bare) >= 3 and len(set(bare)) == 1:
+                push("─", "hr")
+                self._buf = buf[nl + 1:] if nl >= 0 else ""
+                return True
+
         if stripped.startswith(self.FENCE):
             if nl < 0 and not final:
                 return None
@@ -482,8 +567,19 @@ class MarkdownStream:
             if len(stripped) < 2 and not final and nl < 0:
                 return None
             if stripped[1:2] == " ":
-                push(" " * indent + "• ")
+                push(" " * indent + "• ", "mark")
                 self._buf = buf[indent + 2:]
+                self._sol = False
+                return True
+
+        if stripped[:1].isdigit():
+            if nl < 0 and not final and len(stripped) < 5 and \
+                    stripped.rstrip(".) ").isdigit():
+                return None
+            found = self._ORDERED.match(stripped)
+            if found:
+                push(" " * indent + found.group(0), "mark")
+                self._buf = buf[indent + found.end():]
                 self._sol = False
                 return True
 
@@ -521,6 +617,18 @@ class MarkdownStream:
                 self.code = not self.code
                 self._buf = buf[i + 1:]
                 return True
+            if ch == "[" and not self.code:
+                found = self._LINK.match(buf, i)
+                if found:
+                    # [文字](地址) → 文字 (地址)：地址留着，终端里多半能直接点
+                    push(buf[:i] + found.group(1))
+                    push(" (%s)" % found.group(2), "rule")
+                    self._buf = buf[found.end():]
+                    return True
+                if not final and self._LINK_HEAD.fullmatch(buf, i):
+                    push(buf[:i])
+                    self._buf = buf[i:]
+                    return False    # 可能是半个链接，攒着
             if ch == "*" and not self.code:
                 if i + 1 >= len(buf):
                     if not final:
@@ -545,9 +653,9 @@ class MarkdownStream:
 class Stream:
     """turn 期间的输出：先转 spinner，出正文后逐字吐，正文缩进两格 """
 
-    # 离右边界还有这么多列时才开始攒词 攒词是为了在词边界折行，
-    # 但攒着就意味着整个词一起蹦出来，所以只在真的可能要折行的地方攒
-    WRAP_MARGIN = 24
+    # 攒到这么长还没结束的词，肯定是路径或者 URL 这类整块的东西：
+    # 一整行装不下也只能硬断，那就不必再攒
+    WORD_MAX = 60
     # 状态行的重画间隔；IDLE_TICK 是没东西可放时的轮询间隔 ——
     # 转得比重画快，是为了正文一来就能接上，又不必按吐字的节奏空转
     STATUS_TICK = 0.12
@@ -566,8 +674,11 @@ class Stream:
         self._word = ""
         self._limit = width()
         self._md = MarkdownStream()
+        self._md.limit = self._limit
         self._style = ""        # 当前这段文字的 markdown 样式
         self._newline = True    # 刚换过行（跟 _fresh_line 不同：折行不算）
+        self._hang = 0          # 列表项折行后续行多缩这么多，对齐到记号后面
+        self._line_start = 0    # 这一行正文从哪一列开始，用来判断「行上已经有东西」
         self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
         self._status_drawn = False
         self._status_at = 0.0
@@ -615,19 +726,34 @@ class Stream:
     _PAINT = {"bold": lambda t: bold(t),
               "code": lambda t: paint("brown", t),
               "block": lambda t: paint("grey", t),
-              "quote": lambda t: paint("grey", t)}
+              "quote": lambda t: paint("grey", t),
+              "rule": lambda t: paint("grey", t)}
 
     def _emit(self, chunk: str) -> None:
         self._runs(self._md.feed(chunk))
 
     def _runs(self, runs: list[tuple[str, str]]) -> None:
         for text, style in runs:
+            if style == "hr":
+                self._flush_word()
+                self._rule()
+                continue
             if style != self._style:
                 # 样式一变就得把攒着的词吐出去，否则整个词会被后来的样式染上
                 self._flush_word()
                 self._style = style
             self._chars(text)
+            if style == "mark":
+                self._flush_word()
+                self._hang = self._col - self._gutter_width
         sys.stdout.flush()
+
+    def _rule(self) -> None:
+        if not self._fresh_line:
+            sys.stdout.write("\n")
+            self._fresh_line = True
+        sys.stdout.write(self._gutter() + paint("grey", "─" * (self._limit - 4)) + "\n")
+        self._fresh_line, self._col, self._newline, self._hang = True, 0, True, 0
 
     def _chars(self, chunk: str) -> None:
         """按框宽折行并保持两格缩进 英文断在词边界，CJK 可以任意断 """
@@ -637,6 +763,7 @@ class Stream:
                 sys.stdout.write("\n")
                 self._fresh_line, self._col = True, 0
                 self._newline = True    # 换行之后的空格是缩进，折行之后的不是
+                self._hang = 0
             elif ch.isspace():
                 self._flush_word()
                 if self._newline:
@@ -649,8 +776,10 @@ class Stream:
                 self._flush_word()
                 self._put(ch)
             else:
+                # 西文攒成整词再放，折行才能落在词边界上 —— 只在右边界附近攒的话，
+                # 一条长 URL 会先放出去半截、剩下那截再折到下一行（踩过）
                 self._word += ch
-                if self._col + len(self._word) < self._limit - self.WRAP_MARGIN:
+                if len(self._word) >= self.WORD_MAX:
                     self._flush_word()
 
     def _flush_word(self) -> None:
@@ -659,20 +788,23 @@ class Stream:
             self._put(word)
 
     def _put(self, text: str) -> None:
+        wrapped = not self._newline     # 不是原文换行来的新行，就是折行的续行
         self._newline = False
         while text:
             if self._fresh_line:
-                sys.stdout.write(self._gutter())
-                self._fresh_line, self._col = False, self._gutter_width
+                indent = self._hang if wrapped else 0
+                sys.stdout.write(self._gutter() + " " * indent)
+                self._col = self._gutter_width + indent
+                self._fresh_line, self._line_start = False, self._col
             room = self._limit - self._col
             width_left = get_cwidth(text)
             if width_left <= room:
                 sys.stdout.write(self._painted(text))
                 self._col += width_left
                 return
-            if self._col > 2:
+            if self._col > self._line_start:
                 sys.stdout.write("\n")
-                self._fresh_line, self._col = True, 0
+                self._fresh_line, self._col, wrapped = True, 0, True
                 continue
             # 一整行都装不下：超长路径或标识符，只能硬断
             cut, used = 0, 0

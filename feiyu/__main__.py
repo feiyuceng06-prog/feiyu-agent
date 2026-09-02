@@ -373,12 +373,19 @@ def _key(agent: Feiyu, arg: str) -> str:
         rows.append("   " + ui.bold(name))
         rows.append(
             "      "
-            + ui.paint("grey", "%s   %s   %s%s" % (
+            + ui.paint("grey", "%s   %s   %s%s%s" % (
                 e["model"], e.get("base_url") or "(厂商默认地址)", keys.mask(e["key"]),
-                "   看得了图" if e.get("vision") else ""))
+                "   看得了图" if e.get("vision") else "", _limit_note(name, e)))
         )
     rows += ["", ui.notice("/key add 添加 · /key rm <名字> 删除 · /model <名字> 切过去")]
     return "\n".join(rows)
+
+
+def _limit_note(name: str, entry: dict) -> str:
+    if entry.get("limit"):
+        return "   窗口 %s" % ui.tokens(int(entry["limit"]))
+    learned = keys.learned_limit(name)
+    return "   窗口 ~%s（撞墙学到的）" % ui.tokens(learned) if learned else ""
 
 
 def _key_add() -> str:
@@ -402,6 +409,7 @@ def _key_add() -> str:
         # 出厂那个 8192 对现在的模型普遍偏小：写一个长文件就撞上限，
         # 半截的 JSON 参数还会把这轮调用废掉 填不填由用户定，探测不出来
         cap = _ask_cap(ask)
+        limit = _ask_limit(ask)
         print(ui.notice("下面三项是价格，人民币每百万 token，留空就只显示 token 数不算钱"))
         price = _ask_price(ask)
     except (KeyboardInterrupt, EOFError):
@@ -412,13 +420,28 @@ def _key_add() -> str:
     if kind not in ("openai", "anthropic"):
         return ui.error(f"接口类型只能是 openai 或 anthropic，收到 {kind}，已取消")
     keys.add(name, base_url=base_url, model=model, key=secret, kind=kind,
-             price=price, vision=vision, max_tokens=cap)
+             price=price, vision=vision, max_tokens=cap, limit=limit)
     tail = "，已带价格" if price else "，未填价格（界面上显示 token 数）"
+    if limit:
+        tail += "，上下文窗口 %s" % ui.tokens(limit)
     if vision:
         tail += "，标了能看图"
     if cap:
         tail += "，单轮输出上限 %d" % cap
     return ui.notice(f"已保存{tail} 用 /model {name} 切过去")
+
+
+def _ask_limit(ask) -> int | None:
+    """上下文窗口 留空按 128k 算，撞过一次墙会自动记住真实的上限 """
+    raw = ask("上下文窗口 token 数（留空按 128k，撞过一次会自己记住）: ")
+    if not raw:
+        return None
+    try:
+        value = int(raw.lower().rstrip("k")) * (1000 if raw.lower().endswith("k") else 1)
+    except ValueError:
+        print(ui.error(f"「{raw}」不是整数，这项跳过"))
+        return None
+    return value if value > 0 else None
 
 
 def _ask_cap(ask) -> int | None:

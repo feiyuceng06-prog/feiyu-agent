@@ -1,6 +1,7 @@
 """两个后端里跟真实网络无关的部分：参数解析、transcript、计价 """
 
 import json
+import types
 import unittest
 
 from feiyu import providers
@@ -190,6 +191,22 @@ class TestOpenAIStream(unittest.TestCase):
         # 每次报的都是「到目前为止」的完整片段，越来越长
         self.assertEqual([len(p) for _, p in seen], sorted(len(p) for _, p in seen))
         self.assertEqual(turn.tool_calls[0].input, {"path": "a.py", "content": "x = 1"})
+
+    def test_两个_chunk_都带_usage_只算一次(self):
+        """DeepSeek 有时在收尾前后两个 chunk 上都带 usage，数值一样
+        逐个算的话累计量和花费翻倍 —— 日志里几次 run 的总量正好是各轮之和的两倍 """
+        usage = types.SimpleNamespace(prompt_tokens=1000, completion_tokens=50,
+                                      prompt_cache_hit_tokens=600)
+        last = _Chunk(_Delta(content="好"), finish="stop")
+        last.usage = usage
+        tail = _Chunk(_Delta())
+        tail.choices, tail.usage = [], usage
+        b = self.backend([_Chunk(_Delta(content="你")), last, tail])
+        b.rates = (1.0, 10.0, 100.0)
+        b.run_turn(on_text=lambda t: None)
+        self.assertEqual(b.tokens_total, 1050)
+        self.assertEqual(b.tokens_context, 1050)
+        self.assertAlmostEqual(b.cost, (600 * 1 + 400 * 10 + 50 * 100) / 1e6)
 
     def test_截断的参数不能原样留在历史里(self):
         """半截 JSON 留在历史里 = 之后每一次请求都 400，用户实测撞到过

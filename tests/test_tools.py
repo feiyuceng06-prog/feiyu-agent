@@ -449,7 +449,12 @@ class TestDispatch(Base):
         self.assertIn("未知工具", out.content)
 
     def test_少参数报错但不崩(self):
-        self.assertTrue(self.box.run("bash", {}).is_error)
+        out = self.box.run("bash", {})
+        self.assertTrue(out.is_error)
+        # 裸的 KeyError: 'command' 模型看不出是自己漏了参数
+        self.assertIn("缺少参数 command", out.content)
+        self.assertNotIn("KeyError", out.content)
+        self.assertIn("缺少参数", self.box.run("search", {"path": "."}).summary)
         self.assertTrue(self.box.run("read_file", {}).is_error)
 
     def test_每个_schema_都有对应实现(self):

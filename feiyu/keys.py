@@ -15,7 +15,7 @@ _DIR = os.path.join(
 STORE = os.path.join(_DIR, "models.json")
 STATE = os.path.join(_DIR, "state.json")
 
-FIELDS = ("kind", "base_url", "model", "key", "price", "vision", "max_tokens")
+FIELDS = ("kind", "base_url", "model", "key", "price", "vision", "max_tokens", "limit")
 
 
 def _write(path: str, data) -> None:
@@ -47,7 +47,7 @@ def save(entries: dict[str, dict]) -> None:
 
 
 def add(name, *, base_url, model, key, kind="openai", price=None, vision=False,
-        max_tokens=None) -> None:
+        max_tokens=None, limit=None) -> None:
     entries = load()
     entries[name] = {
         "kind": kind,
@@ -57,8 +57,10 @@ def add(name, *, base_url, model, key, kind="openai", price=None, vision=False,
         "price": price,
         "vision": bool(vision),
         "max_tokens": int(max_tokens) if max_tokens else None,
+        "limit": int(limit) if limit else None,
     }
     save(entries)
+    forget_limit(name)      # 重新填过的配置，之前学到的上限不再作数
 
 
 def remove(name: str) -> bool:
@@ -71,6 +73,7 @@ def remove(name: str) -> bool:
         set_last("")
     if _state().get("helper") == name:
         set_helper("")
+    forget_limit(name)
     return True
 
 
@@ -108,6 +111,25 @@ def helper() -> str:
 
 def set_helper(name: str) -> None:
     _set_state(helper=name)
+
+
+def learned_limit(name: str) -> int:
+    """撞过墙之后记下来的上下文上限 0 表示没学过 """
+    limits = _state().get("limits") or {}
+    value = limits.get(name) if isinstance(limits, dict) else None
+    return int(value) if isinstance(value, int) and value > 0 else 0
+
+
+def learn_limit(name: str, tokens: int) -> None:
+    limits = dict(_state().get("limits") or {})
+    limits[name] = int(tokens)
+    _set_state(limits=limits)
+
+
+def forget_limit(name: str) -> None:
+    limits = dict(_state().get("limits") or {})
+    if limits.pop(name, None) is not None:
+        _set_state(limits=limits)
 
 
 def pick_default() -> str:

@@ -106,6 +106,30 @@ def overflow(exc: Exception) -> bool:
     return bool(OVERFLOW_WORDS.search(str(exc)))
 
 
+def rejected(exc: Exception) -> bool:
+    """是不是接口拒收请求那一类的错（不管它怎么措辞）"""
+    return getattr(exc, "status_code", None) in (400, 413, 422)
+
+
+# 报错文本里的上限数字："maximum context length is 65536 tokens"、
+# "213462 tokens > 200000 maximum" 都要认 数字紧挨着 maximum/limit 这类词
+_LIMIT_IN_ERROR = re.compile(
+    r"(?:maximum|max|limit|上限)[^\d]{0,40}(\d{4,8})|(\d{4,8})\s*(?:tokens?\s*)?"
+    r"(?:maximum|max|limit|上限)", re.I)
+# 学到的上限再低也不低于这个 更低多半是把一次异常当成了窗口大小，
+# 会让它之后每两轮就压缩一次
+MIN_LEARNED_LIMIT = 16_000
+
+
+def limit_in_error(exc: Exception) -> int:
+    """从"输入太长"的报错里抠出接口说的上限 抠不到返回 0 """
+    for found in _LIMIT_IN_ERROR.finditer(str(exc)):
+        value = int(found.group(1) or found.group(2))
+        if value >= MIN_LEARNED_LIMIT:
+            return value
+    return 0
+
+
 def transient(exc: Exception) -> bool:
     """这个错值不值得再试一次 按状态码和类名判断，不绑任何一家 SDK """
     code = getattr(exc, "status_code", None)
@@ -342,6 +366,7 @@ class Feiyu:
         self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
         self.name = ""           # 当前用的是 /key 里的哪一条
         self.context_limit = DEFAULT_CONTEXT_LIMIT
+        self.limit_source = "default"   # default / config / learned，/key 列表里要说明
         self.backend = None
         if model:
             self.use_model(model)
@@ -516,7 +541,7 @@ class Feiyu:
         self.backend = fresh
         self.toolbox.vision = getattr(fresh, "vision", False)
         self.name = name
-        self.context_limit = int(entry.get("limit") or DEFAULT_CONTEXT_LIMIT)
+        self._apply_limit(name, entry)
         keys.set_last(name)
         self._refresh_system()
         return True
@@ -593,10 +618,15 @@ class Feiyu:
                 stream.finish()
                 self.trace.write("api_error", error="%s: %s" % (
                     type(exc).__name__, exc), said=len(stream.text) or None)
-                if not stream.text and overflow(exc) and rescued < 2:
+                # 措辞认不出的 400 也可能是溢出（中转站各说各的）：
+                # 上下文已经过了六成就按溢出处理，压小重发不会有坏处
+                crowded = rejected(exc) and self.context > self.context_limit * 0.6
+                if not stream.text and (overflow(exc) or crowded) and rescued < 2:
                     # 历史里那条大消息还在，不处理的话之后每次请求都会照样 400，
                     # 会话就废了 先无损瘦身，还不行再摘要
                     rescued += 1
+                    if rescued == 1:
+                        self._learn_limit(exc)
                     if self._rescue_overflow(rescued):
                         continue
                 if not stream.text and transient(exc) and retries < STREAM_RETRIES:
@@ -837,6 +867,32 @@ class Feiyu:
         print(ui.warn("已达到 %d 轮工具调用上限，自动停下 再说一句话可以让它接着做 " % rounds))
         print()
         return note
+
+    def _apply_limit(self, name: str, entry: dict) -> None:
+        """上下文上限从哪来：配置里填的 > 撞墙学到的 > 出厂 128k """
+        if entry.get("limit"):
+            self.context_limit, self.limit_source = int(entry["limit"]), "config"
+        elif keys.learned_limit(name):
+            self.context_limit, self.limit_source = keys.learned_limit(name), "learned"
+        else:
+            self.context_limit, self.limit_source = DEFAULT_CONTEXT_LIMIT, "default"
+
+    def _learn_limit(self, exc: Exception) -> None:
+        """撞了一次墙就把这个模型的窗口记下来，下次提前压缩，不用再撞
+
+        报错里写了上限就用它；没写就按上一次成功请求的大小算——真正的上限在
+        那个数和这次失败的请求之间，取小的那个是安全的一边
+        """
+        if self.limit_source == "config":
+            return      # 用户明确填过的不动，填错了该由他改
+        found = limit_in_error(exc) or self.context
+        if found < MIN_LEARNED_LIMIT or found >= self.context_limit:
+            return
+        self.context_limit, self.limit_source = found, "learned"
+        keys.learn_limit(self.name, found)
+        self.trace.write("limit_learned", model=self.name, limit=found)
+        print(ui.notice("记住了：%s 的上下文上限约 %s，以后会提前压缩" % (
+            self.name, ui.tokens(found))))
 
     def _rescue_overflow(self, attempt: int) -> bool:
         """接口拒收"输入太长"之后把历史压小 返回能不能重发

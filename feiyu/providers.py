@@ -480,18 +480,13 @@ class OpenAICompatBackend(Billing):
         reasoning = ""
         finish = ""
         pending: dict[int, dict] = {}
+        usage = None
         for chunk in stream:
-            # 带 usage 的那个收尾 chunk 没有 choices
-            usage = getattr(chunk, "usage", None)
-            if usage is not None:
-                hit = getattr(usage, "prompt_cache_hit_tokens", None)
-                if hit is None:
-                    # 有些兼容接口把命中数放在 prompt_tokens_details.cached_tokens
-                    details = getattr(usage, "prompt_tokens_details", None)
-                    hit = getattr(details, "cached_tokens", 0) if details else 0
-                hit = hit or 0
-                prompt = usage.prompt_tokens or 0
-                self._charge(hit, max(0, prompt - hit), usage.completion_tokens or 0)
+            # 带 usage 的那个收尾 chunk 没有 choices 只记住最后一份、循环结束再算账：
+            # DeepSeek 有时会在两个 chunk 上都带 usage（数值一样），见一份算一份
+            # 的话累计量和花费恰好翻倍 —— 日志里几次 run 的总量正好是各轮之和的两倍
+            if getattr(chunk, "usage", None) is not None:
+                usage = chunk.usage
             if not chunk.choices:
                 continue
             finish = chunk.choices[0].finish_reason or finish
@@ -514,6 +509,16 @@ class OpenAICompatBackend(Billing):
                     slot["args"] += tc.function.arguments
                 if on_tool and slot["name"]:
                     on_tool(slot["name"], slot["args"])
+
+        if usage is not None:
+            hit = getattr(usage, "prompt_cache_hit_tokens", None)
+            if hit is None:
+                # 有些兼容接口把命中数放在 prompt_tokens_details.cached_tokens
+                details = getattr(usage, "prompt_tokens_details", None)
+                hit = getattr(details, "cached_tokens", 0) if details else 0
+            hit = hit or 0
+            prompt = usage.prompt_tokens or 0
+            self._charge(hit, max(0, prompt - hit), usage.completion_tokens or 0)
 
         ordered = [pending[i] for i in sorted(pending)]
 

@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 from feiyu import agent as agent_mod
-from feiyu import permissions
+from feiyu import keys, permissions
 from feiyu.agent import Feiyu
 from feiyu.tools import ToolResult
 from tests.fakes import FakeBackend, call, unpaired
@@ -34,6 +34,9 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         # 不换掉的话读的是用户真正的规则文件，断言会随他改过什么而变
         permissions.STORE = os.path.join(self.tmp.name, "permissions.json")
+        # 学到的上下文上限写在 state.json 里，不换掉会写进用户真正的那份
+        keys.STORE = os.path.join(self.tmp.name, "models.json")
+        keys.STATE = os.path.join(self.tmp.name, "state.json")
         self.agent = Feiyu(Path(self.tmp.name))
         self.agent.name = "fake"
         self.agent.mode = "auto"
@@ -760,6 +763,81 @@ class TestOverflow(Base):
         exc = Exception("Input token exceed the limit")
         exc.status_code = 500
         self.assertFalse(agent_mod.overflow(exc))
+
+
+class TestLearnLimit(Base):
+    """上下文上限：配置里填的 > 撞墙学到的 > 出厂 128k 撞过一次就不该再撞 """
+
+    def test_报错里写了上限就记下来(self):
+        big = Overflowing([("好了", [])], fail=1,
+                          message="This model's maximum context length is 65536 tokens")
+        self.agent.backend = big
+        big.tokens_context = 60000
+        quiet(self.agent.send, "接着")
+        self.assertEqual(self.agent.context_limit, 65536)
+        self.assertEqual(self.agent.limit_source, "learned")
+        self.assertEqual(keys.learned_limit("fake"), 65536)
+
+    def test_报错没写数字就按上次成功的大小算(self):
+        big = Overflowing([("好了", [])], fail=1)
+        self.agent.backend = big
+        big.tokens_context = 70000
+        quiet(self.agent.send, "接着")
+        self.assertEqual(self.agent.context_limit, 70000)
+
+    def test_太小的数不学(self):
+        big = Overflowing([("好了", [])], fail=1)
+        self.agent.backend = big
+        big.tokens_context = 3000        # 第一轮就 400，多半不是窗口的问题
+        quiet(self.agent.send, "接着")
+        self.assertEqual(self.agent.context_limit, agent_mod.DEFAULT_CONTEXT_LIMIT)
+        self.assertEqual(keys.learned_limit("fake"), 0)
+
+    def test_用户填了的不动(self):
+        self.agent.limit_source = "config"
+        self.agent.context_limit = 200000
+        big = Overflowing([("好了", [])], fail=1,
+                          message="maximum context length is 65536 tokens")
+        self.agent.backend = big
+        big.tokens_context = 100000
+        quiet(self.agent.send, "接着")
+        self.assertEqual(self.agent.context_limit, 200000)
+
+    def test_学到的下次启动还在_配置优先(self):
+        keys.save({"m": {"kind": "openai", "model": "m", "key": "k"},
+                   "c": {"kind": "openai", "model": "c", "key": "k", "limit": 32000}})
+        keys.learn_limit("m", 50000)
+        keys.learn_limit("c", 50000)
+        a = Feiyu(Path(self.tmp.name))
+        a._apply_limit("m", keys.load()["m"])
+        self.assertEqual((a.context_limit, a.limit_source), (50000, "learned"))
+        a._apply_limit("c", keys.load()["c"])
+        self.assertEqual((a.context_limit, a.limit_source), (32000, "config"))
+
+    def test_措辞认不出的_400_上下文过半也当溢出(self):
+        big = Overflowing([("好了", [])], fail=1, message="Provider returned error")
+        self.agent.backend = big
+        big.tokens_context = int(self.agent.context_limit * 0.7)
+        out = quiet(self.agent.send, "接着")
+        self.assertEqual(out, "好了")
+        self.assertEqual(big.compacted, 1)
+
+    def test_措辞认不出且上下文很小的_400_照旧报错(self):
+        big = Overflowing([("好了", [])], fail=1, message="Provider returned error")
+        self.agent.backend = big
+        big.tokens_context = 2000
+        with self.assertRaises(Exception):
+            quiet(self.agent.send, "接着")
+
+    def test_从报错里抠上限(self):
+        cases = {
+            "This model's maximum context length is 128000 tokens": 128000,
+            "prompt is too long: 213462 tokens > 200000 maximum": 200000,
+            "Input token exceed the limit": 0,
+            "max_tokens 8192 is too large": 0,      # 那是输出上限，不是窗口
+        }
+        for text, want in cases.items():
+            self.assertEqual(agent_mod.limit_in_error(Exception(text)), want, text)
 
 
 class TestGitGate(Base):

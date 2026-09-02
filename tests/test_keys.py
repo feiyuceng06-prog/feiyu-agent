@@ -24,6 +24,21 @@ class TestHelper(unittest.TestCase):
         keys.set_last("small")
         self.assertEqual(keys.helper(), "small")
 
+    def test_limit_字段能存能读(self):
+        keys.add("w", base_url="", model="w", key="k", limit=32000)
+        self.assertEqual(keys.load()["w"]["limit"], 32000)
+
+    def test_学到的上限跟着配置走(self):
+        keys.learn_limit("big", 60000)
+        self.assertEqual(keys.learned_limit("big"), 60000)
+        self.assertEqual(keys.learned_limit("small"), 0)
+        keys.remove("big")
+        self.assertEqual(keys.learned_limit("big"), 0)
+        # 重新填过配置，旧的学习结果作废
+        keys.learn_limit("small", 60000)
+        keys.add("small", base_url="", model="s", key="k")
+        self.assertEqual(keys.learned_limit("small"), 0)
+
     def test_指向的配置被删了就当没设(self):
         keys.set_helper("small")
         keys.remove("small")

@@ -203,6 +203,55 @@ class TestMarkdown(unittest.TestCase):
         for size in range(2, 13):
             self.assertEqual(self.merged(text, size), want, "chunk=%d" % size)
 
+    def test_编号列表的记号单独成段(self):
+        out = self.run_md("1. 一\n12) 二\n")
+        self.assertEqual([t for t, s in out if s == "mark"], ["1. ", "12) "])
+        self.assertEqual(self.plain("1. 一\n12) 二\n"), "1. 一\n12) 二\n")
+        # 年份、版本号这种不是列表
+        self.assertEqual(self.styled("2026 年\n1.5 倍\n", "mark"), "")
+
+    def test_分隔线(self):
+        out = self.run_md("上\n---\n下\n")
+        self.assertEqual([s for _, s in out if s == "hr"], ["hr"])
+        self.assertEqual(self.plain("上\n---\n下\n").replace("─", ""), "上\n下\n")
+        # 两个减号不是分隔线，- 列表更不是
+        self.assertEqual(self.plain("--\n- 一\n"), "--\n• 一\n")
+
+    def test_表格对齐并画表头线(self):
+        text = "| 文件 | 行数 |\n|---|---:|\n| calc.py | 2 |\n| 很长的文件名.py | 123 |\n完\n"
+        out = self.plain(text)
+        rows = out.split("\n")
+        # 第一列宽 15（六个汉字 + .py），「文件」占 4，补 11 格再加两格列距
+        self.assertEqual(rows[0].rstrip(), "文件" + " " * 13 + "行数")
+        self.assertTrue(set(rows[1]) <= set("─ "))
+        self.assertEqual(rows[2].rstrip(), "calc.py" + " " * 13 + "2")     # 右对齐
+        self.assertEqual(rows[3].rstrip(), "很长的文件名.py   123")
+        self.assertEqual(rows[4], "完")
+        self.assertEqual(self.styled(text, "bold"), "文件" + " " * 13 + "行数")
+
+    def test_表格太宽就削最宽的列(self):
+        m = ui.MarkdownStream()
+        m.limit = 30
+        out = m.feed("| a | b |\n|---|---|\n| %s | %s |\n" % ("x" * 40, "y" * 40))
+        out += m.flush()
+        for row, _ in out:
+            for line in row.split("\n"):
+                self.assertLessEqual(ui.visible(line), 28)
+
+    def test_链接变成文字加地址(self):
+        text = "看 [文档](https://x.y/z) 吧"
+        self.assertEqual(self.plain(text), "看 文档 (https://x.y/z) 吧")
+        self.assertEqual(self.styled(text, "rule"), " (https://x.y/z)")
+        # 不是链接的方括号原样出
+        self.assertEqual(self.plain("数组 a[0] 和 [x] 是"), "数组 a[0] 和 [x] 是")
+
+    def test_任何切法结果都一样_表格分隔线链接(self):
+        text = ("| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n\n1. 见 [doc](http://d) 好\n"
+                "- 二\n\n**粗** 了\n")
+        want = self.merged(text, 1)
+        for size in range(2, 13):
+            self.assertEqual(self.merged(text, size), want, "chunk=%d" % size)
+
     def test_没收完的记号在_flush_时吐出来(self):
         m = ui.MarkdownStream()
         got = "".join(t for t, _ in m.feed("话说到一半 *"))
@@ -336,3 +385,24 @@ class TestGutter(unittest.TestCase):
         got = self.render("a" * 150 + "\n")
         self.assertEqual(got.count(ui.BULLET), 1)
         self.assertTrue(got.startswith(ui.BULLET + " "))
+
+    def test_列表项折行后续行对齐到记号后面(self):
+        got = self.render("- " + "字" * 60 + "\n1. " + "x " * 60 + "\n正文\n")
+        rows = got.split("\n")
+        self.assertTrue(rows[0].startswith(ui.BULLET + " • "))
+        self.assertTrue(rows[1].startswith("    字"))       # 两格缩进 + 两格悬挂
+        self.assertTrue(rows[2].startswith("  1. x"))
+        self.assertTrue(rows[3].startswith("     x"))       # 「1. 」三格宽
+        self.assertTrue(rows[-2].startswith("  正文"))       # 换行之后不再悬挂
+        self.assertTrue(all(ui.visible(r) <= ui.width() for r in rows))
+
+    def test_长_URL_整个挪到下一行而不是劈开(self):
+        url = "https://docs.example.org/en/stable/getting-started.html"
+        got = self.render("参考这里这里这里这里这里这里这里这里这里这里这里这里 " + url + "\n")
+        self.assertIn(url, got)
+
+    def test_分隔线占满一行(self):
+        got = self.render("上\n---\n下\n")
+        rows = got.split("\n")
+        self.assertEqual(rows[1], "  " + "─" * (ui.width() - 4))
+        self.assertEqual(rows[2], "  下")
