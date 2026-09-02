@@ -1080,3 +1080,12 @@ README 写的 `"limit": 32000` 是空话。所以所有模型一律 128k：窗�
   中转站各说各的，压小重发没有坏处；上下文很小时照旧报错。
 - `tests/test_agent.py` 的 `Base` 之前没换 `keys.STORE / STATE`——这回学到的上限会写
   state.json 才发现，跟 0.33.0 那次 `permissions.STORE` 是同一个坑。
+
+## 追加进历史、还没发过的工具结果要先估进上下文（0.39.1）
+
+`tokens_context` 只在接口回 usage 时更新，一次 `read_file` 读进 16k token 之后，
+压缩判断看到的仍是上一轮的数——顺序变成「先超、再 400、再急救」，而不是提前压。
+`Feiyu._pending` 在 `add_tool_results` 之后按 `CHARS_PER_TOKEN = 3` 粗算加上，
+`context` 属性把它算进去（状态栏也跟着更诚实），`run_turn` 成功返回就清零——
+接口刚报过准确的数。`reset` / `compact` / `restore` 同样清零。
+三个字符一个 token 对中文是高估，高估的代价是早压一次，低估的代价是 400，只往这个方向错。

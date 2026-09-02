@@ -93,6 +93,9 @@ RETRY_NAMES = ("APIConnectionError", "APITimeoutError", "InternalServerError",
 OVERFLOW_WORDS = re.compile(
     r"(token|context|prompt|input).{0,60}(exceed|too long|too large|limit|maximum)"
     r"|(exceed|maximum|too long|too large).{0,60}(token|context|length)", re.I | re.S)
+# 刚追加、还没发出去的工具结果按这个粗算 token 数 中英混排下三个字符一个 token
+# 偏保守（中文会高估），高估的代价是早压一次，低估的代价是 400
+CHARS_PER_TOKEN = 3
 # 急救时把工具结果压到多小 比 TRIM_* 狠得多：请求已经发不出去了
 SHRINK_LIMIT = 2000
 SHRINK_KEEP = 600
@@ -367,6 +370,10 @@ class Feiyu:
         self.name = ""           # 当前用的是 /key 里的哪一条
         self.context_limit = DEFAULT_CONTEXT_LIMIT
         self.limit_source = "default"   # default / config / learned，/key 列表里要说明
+        # 上一次请求之后追加进历史、接口还没见过的那些工具结果，估出来的 token 数
+        # 不加上它的话，一次 read_file 读进 16k token，压缩判断看到的仍是上一轮的数：
+        # 顺序会变成「先超、再 400、再急救」，而不是提前压
+        self._pending = 0
         self.backend = None
         if model:
             self.use_model(model)
@@ -491,8 +498,8 @@ class Feiyu:
 
     @property
     def context(self) -> int:
-        """最近一次请求的规模，即当前对话占了多少上下文 """
-        return getattr(self.backend, "tokens_context", 0)
+        """当前对话占了多少上下文：最近一次请求的规模，加上之后追加进来还没发过的 """
+        return getattr(self.backend, "tokens_context", 0) + self._pending
 
     @property
     def cost(self) -> float | None:
@@ -508,6 +515,7 @@ class Feiyu:
     def reset(self) -> None:
         self.backend.reset()
         self._reads.clear()
+        self._pending = 0
 
     @property
     def model(self) -> str:
@@ -608,6 +616,7 @@ class Feiyu:
                 # 中断/报错时也必须停掉 spinner 线程，否则它会继续往屏幕上糊帧
                 turn = self.backend.run_turn(on_text=stream.write,
                                              on_tool=stream.progress)
+                self._pending = 0       # 接口刚报过准确的数，估算作废
             except KeyboardInterrupt:
                 # 流到一半被打断，run_turn 没来得及把 assistant 写进历史
                 # 不补的话已经说出口的话丢掉，而且角色不再交替
@@ -684,6 +693,7 @@ class Feiyu:
                     self._after_tools(changed, outputs)
                 self._note_jobs(outputs)
                 self.backend.add_tool_results(outputs)
+                self._pending += sum(len(o.content) for o in outputs) // CHARS_PER_TOKEN
                 self._fold(turn.tool_calls, outputs)
             rounds += 1
             if rounds >= MAX_ROUNDS:
@@ -723,6 +733,7 @@ class Feiyu:
         name = data.get("model") or ""
         if not name or not self.use_model(name):
             return False
+        self._pending = 0
         if data.get("style") in STYLES:
             self.style = data["style"]
         if data.get("mode") in MODES:
@@ -753,6 +764,7 @@ class Feiyu:
             return ""
         self.backend.compact_to(summary)
         self.backend.tokens_context = 0
+        self._pending = 0
         # 历史整个换成了摘要，之前登记的那些 id 在历史里已经不存在
         self._reads.clear()
         return summary

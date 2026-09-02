@@ -312,6 +312,21 @@ class TestCompact(Base):
         quiet(self.agent._maybe_compact)
         self.assertEqual(b.messages[-1]["role"], "assistant")
 
+    def test_刚读进来的大文件在下一次请求前就算进上下文(self):
+        """接口报的 tokens_context 是上一轮的数，一次 read_file 读进 16k token 之后
+        它仍然显示没满，等真发出去就是 400 追加的工具结果要先粗算进去 """
+        self.agent.toolbox.run = lambda name, args: ToolResult("X" * 30000, summary="读了")
+        b = self.use([("看", [call("r1", "read_file", path="big.py")]), ("好了", [])])
+        b.tokens_context = int(self.agent.context_limit * 0.7)
+        seen = []
+        real = self.agent._maybe_compact
+        self.agent._maybe_compact = lambda **kw: seen.append(self.agent.context)
+        quiet(self.agent.send, "读一下")
+        # 30000 字符按三个字符一个 token 估，加上去就过了 75% 的线
+        self.assertGreater(seen[0], self.agent.context_limit * 0.75)
+        # run_turn 回来之后接口报了准确的数，估算作废
+        self.assertEqual(self.agent.context, b.tokens_context)
+
     def test_没到阈值不压(self):
         b = self.use([])
         b.tokens_context = int(self.agent.context_limit * 0.5)
