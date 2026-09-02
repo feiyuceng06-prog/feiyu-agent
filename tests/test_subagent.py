@@ -66,12 +66,12 @@ class Base(unittest.TestCase):
 
 
 class TestToolset(unittest.TestCase):
-    def test_只有只读三件(self):
+    def test_只有只读四件(self):
         # 不带 web_fetch：子 agent 跑在工作线程里没法要确认，
         # 而且那是「读了网页然后被诱导去干别的」的注入路径
-        self.assertEqual(subagent.TOOLS, ("read_file", "list_files", "search"))
+        self.assertEqual(subagent.TOOLS, ("read_file", "list_files", "search", "symbol"))
 
-    def test_这三个都真实存在(self):
+    def test_这几个都真实存在(self):
         names = {s["name"] for s in TOOL_SCHEMAS}
         for tool in subagent.TOOLS:
             self.assertIn(tool, names)
@@ -227,3 +227,39 @@ class TestInLoop(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSharedLsp(Base):
+    """symbol 走主 Toolbox 的语言服务器：一个子 agent 一个 Toolbox，各起一个进程太贵 """
+
+    def test_传进来的客户端真被用上(self):
+        from feiyu.tools import Toolbox
+        seen = {}
+        real = Toolbox.run
+
+        def run(box, name, args):
+            if name == "symbol":
+                seen["lsp"] = box.lsp
+                return ToolResult("没装", is_error=True)
+            return real(box, name, args)
+        Toolbox.run = run
+        self.addCleanup(lambda: setattr(Toolbox, "run", real))
+        self.fake_sub([("看", [ToolCall("s", "symbol", {"action": "references", "path": "a.py",
+                                                       "name": "handle"})]), ("完", [])])
+        spy = object()
+        subagent.run("handle 在哪被调用", entry={"model": "m", "key": "k"},
+                     workspace=self.root, lsp=spy)
+        self.assertIs(seen.get("lsp"), spy)
+
+    def test_主_agent_派活时把自己的传过去(self):
+        self.fake_sub([("完", [])])
+        got = {}
+        real = subagent.run
+
+        def spy(prompt, **kw):
+            got.update(kw)
+            return real(prompt, **kw)
+        agent_mod.subagent_mod.run = spy
+        self.addCleanup(lambda: setattr(agent_mod.subagent_mod, "run", real))
+        self.agent._spawn("问题")
+        self.assertIs(got.get("lsp"), self.agent.toolbox.lsp)

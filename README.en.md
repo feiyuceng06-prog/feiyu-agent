@@ -133,7 +133,7 @@ Interrupting with `esc` is safe: whatever it had already said stays in the histo
 
 A question like "how does this project handle interrupts" takes a dozen files to answer, all of which would bloat the conversation. It sends a subagent and keeps only the conclusion. Measured on one run: **the subagent burned 41,579 tokens; the main conversation grew by 2,284.**
 
-A subagent can only read (`read_file` / `list_files` / `search`) — no writes, no network. It cannot see your conversation with the main agent, which is why the main agent writes it a self-contained question. Its usage counts towards the status bar and `/cost`.
+A subagent can only read (`read_file` / `list_files` / `search` / `symbol`, sharing the main conversation's language-server process) — no writes, no network. It cannot see your conversation with the main agent, which is why the main agent writes it a self-contained question. Its usage counts towards the status bar and `/cost`.
 
 ### Task list and plan mode
 

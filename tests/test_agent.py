@@ -915,7 +915,7 @@ class TestHelperModel(Base):
 
     def test_子_agent_用_helper_那条配置(self):
         seen = {}
-        def fake_run(prompt, *, entry, workspace, trace=None):
+        def fake_run(prompt, *, entry, workspace, trace=None, lsp=None):
             seen["entry"] = entry
             return "结论", [], {"tokens": 1, "priced": False, "cost": 0}
         real_load, real_run = agent_mod.keys.load, agent_mod.subagent_mod.run

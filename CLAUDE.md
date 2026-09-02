@@ -213,7 +213,7 @@ ods 还要处理 `number-columns-repeated`（连续空列会被压成一个单�
 `feiyu/subagent.py`。存在的**全部理由是上下文隔离**：实测一次派活，
 子 agent 烧 41579 token，主对话只涨 2284。改这块前先想清楚会不会破坏这一点。
 
-- **工具集限死 `TOOLS = (read_file, list_files, search)`**，三个性质捆在一起：
+- **工具集限死 `TOOLS = (read_file, list_files, search, symbol)`**，三个性质捆在一起：
   改不了东西 → 不需要中途要确认（它跑在工作线程里，读不了 stdin）→ 因此能进
   `PARALLEL_SAFE`。没有 `web_fetch` 也就掐掉了「读网页被诱导去干别的」这条注入路径。
   **想给它加工具前先确认这三条还成立。**
@@ -1096,3 +1096,10 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
 现在 `price` 里多一个可选的 `write`，`_as_rates` 有它就返回四元组，`pricing.cost` 没第四项
 就按输入价——**不内置 1.25 这个倍率**，跟不内置价格表同一个理由。`_charge` 多一个
 `write=` 关键字参数，只有 anthropic 的 `run_turn` 传它；`tokens_context` 照旧把它算进规模。
+
+## 子 agent 有 `symbol` 了（0.41.0）
+
+0.36.0 没给是因为「一个子 agent 一个 Toolbox 就是一个语言服务器进程」。解法是
+`subagent.run(lsp=)` 把主 Toolbox 的 `lsp.Pool` 传进去共用，不另起进程：`Client.request`
+有锁，`didOpen` 每次都喂当前文件内容，子 agent 和主对话看的是同一份。
+三个条件照旧成立：只读、不用中途确认、可并行。

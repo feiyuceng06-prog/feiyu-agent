@@ -570,7 +570,8 @@ class Feiyu:
         if entry is None:
             return "（没有可用的模型配置，派不出去）", []
         report, lines, used = subagent_mod.run(
-            prompt, entry=entry, workspace=self.toolbox.root, trace=self.trace)
+            prompt, entry=entry, workspace=self.toolbox.root, trace=self.trace,
+            lsp=self.toolbox.lsp)
         self.subagent_tokens += used["tokens"]
         if used["priced"]:
             self.subagent_cost += used["cost"]

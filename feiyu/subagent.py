@@ -4,26 +4,30 @@
 文件、几百行原文，全进主对话就把上下文撑爆了 派个子 agent 去看，主对话只收到
 它写的一段结论
 
-**工具集限死在只读三件**（read_file / list_files / search），这不是省事，是三个
-性质一起来的：
+**工具集限死在只读四件**（read_file / list_files / search / symbol），这不是省事，
+是三个性质一起来的：
 - 它不会改任何东西，所以不需要中途向用户要确认（子 agent 跑在工作线程里，
   没法读 stdin）
 - 因此它天然可并行，`task` 能进 PARALLEL_SAFE
 - 没有 web_fetch，就没有「子 agent 读了个网页然后被诱导去干别的」这条注入路径
 
 代价是它做不了需要联网或者动手的活 那些让主 agent 自己做
+
+symbol 走的是主 Toolbox 那个语言服务器（`lsp=` 传进来共用）：一个子 agent 一个
+Toolbox，各起一个服务器进程太贵，而 Client.request 本来就有锁，共用是安全的
 """
 
-TOOLS = ("read_file", "list_files", "search")
+TOOLS = ("read_file", "list_files", "search", "symbol")
 MAX_ROUNDS = 12
 MAX_REPORT = 6000
 
 SYSTEM = """你是被派出来摸情况的 有人给你一个问题，你去代码库里查清楚，然后写一段回答 
 
-你只能读：read_file、list_files、search 改不了任何东西，也上不了网 
+你只能读：read_file、list_files、search、symbol 改不了任何东西，也上不了网 
 
 怎么干：
 - 先用 search / list_files 把范围缩小，再读关键的那几个文件 别一上来就整个读一遍 
+- 问的是「谁调用了 / 定义在哪」就用 symbol，文本搜索会把同名的和注释里的混进来 
 - 查到够回答问题就停，不要顺手把周边都摸一遍 
 
 怎么答：
@@ -37,7 +41,7 @@ def describe(prompt: str, limit: int = 60) -> str:
     return " ".join((prompt or "").split())[:limit]
 
 
-def run(prompt: str, *, entry: dict, workspace, trace=None) -> tuple[str, list, dict]:
+def run(prompt: str, *, entry: dict, workspace, trace=None, lsp=None) -> tuple[str, list, dict]:
     """跑一个子 agent 返回 (结论, 给人看的过程行, 用量)
 
     过程行不当场打印而是带回去：并行跑几个子 agent 时，各自往屏幕上写会交叉成
@@ -51,6 +55,8 @@ def run(prompt: str, *, entry: dict, workspace, trace=None) -> tuple[str, list, 
     # 自己的 Toolbox：cwd、清单这些状态跟主 agent 和别的子 agent 都不共享
     box = Toolbox(workspace)
     box.vision = getattr(backend, "vision", False)
+    if lsp is not None:
+        box.lsp = lsp
     backend.add_user_message(prompt)
 
     lines: list[tuple[str, str]] = []
