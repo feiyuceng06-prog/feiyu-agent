@@ -864,3 +864,21 @@ class TestVerifyDigest(Base):
         self.assertIn("- FAIL: test_a (m.T.test_a)", body)
         self.assertIn("- AssertionError: 1 != 2", body)
         self.assertLess(body.index("要点"), body.index("完整输出"))
+
+
+class TestPreviewOnce(Base):
+    def test_确认前画过_diff_结果里就不再画(self):
+        (Path(self.tmp.name) / "a.py").write_text("x = 1\n")
+        self.agent.toolbox.files.record(Path(self.tmp.name) / "a.py")
+        self.agent.mode = "default"
+        self.agent.approve = lambda name, args: "yes"
+        backend = self.use([
+            ("", [call("e", "edit_file", path="a.py", old_str="x = 1", new_str="x = 2")]),
+            ("完", []),
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.agent.send("改")
+        self.assertEqual(out.getvalue().count("- x = 1"), 1)
+        self.assertEqual(out.getvalue().count("+ x = 2"), 1)
+        self.assertIn("已修改 1 处", out.getvalue())

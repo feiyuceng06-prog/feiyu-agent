@@ -338,6 +338,7 @@ class Feiyu:
         # 路径 -> 这个文件在历史里还有效的那几条 read_file 结果的 id
         # 同一个文件再读一次、或者被改过，之前那几份就该从历史里折叠掉
         self._reads: dict[str, list[str]] = {}
+        self._previewed: set[str] = set()   # 确认前已经画过 diff 的调用，结果里不再画一遍
         self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
         self.name = ""           # 当前用的是 /key 里的哪一条
         self.context_limit = DEFAULT_CONTEXT_LIMIT
@@ -916,6 +917,7 @@ class Feiyu:
         rows = tools_mod.preview(call.name, call.input, self.toolbox.root)
         if rows:
             print(ui.tool_preview(rows))
+            self._previewed.add(call.id)
         answer = self.approve(call.name, call.input)
         if answer == "always":
             return self._ALL
@@ -1021,7 +1023,9 @@ class Feiyu:
             began = time.monotonic()
             result = self.toolbox.run(call.name, call.input)
             summary = result.summary or result.content.splitlines()[0][:80]
-            print(ui.tool_result(summary, result.detail, is_error=result.is_error))
+            # 确认前已经把 diff 画过一遍，结果里再画就是同一段出现两次
+            detail = [] if call.id in self._previewed and not result.is_error else result.detail
+            print(ui.tool_result(summary, detail, is_error=result.is_error))
             print()
             self.trace.write("tool", name=call.name, args=call.input,
                              ok=not result.is_error, summary=summary,

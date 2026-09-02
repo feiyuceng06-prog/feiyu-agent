@@ -308,3 +308,31 @@ class TestSlashCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGutter(unittest.TestCase):
+    """正文每行开头那两格：第一行是 ⏺，代码块是竖线，其余两个空格 """
+
+    def render(self, text):
+        ui._COLOR = False
+        s = ui.Stream()
+        s._tty = True       # 走渲染那条路，但不起线程：直接喂
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            s._emit(text)
+            s._runs(s._md.flush())
+        return out.getvalue()
+
+    def test_第一行带标记_后面的行两格缩进(self):
+        got = self.render("第一句\n第二句\n")
+        self.assertEqual(got, ui.BULLET + " 第一句\n  第二句\n")
+
+    def test_代码块用竖线隔开_缩进留住(self):
+        got = self.render("说明\n```python\ndef f():\n    return 1\n```\n完\n")
+        self.assertIn("\n│ def f():\n│     return 1\n", got)
+        self.assertTrue(got.endswith("  完\n"))
+
+    def test_标记只出现一次_折行的续行也不带(self):
+        got = self.render("a" * 150 + "\n")
+        self.assertEqual(got.count(ui.BULLET), 1)
+        self.assertTrue(got.startswith(ui.BULLET + " "))

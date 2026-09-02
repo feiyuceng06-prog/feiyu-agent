@@ -571,6 +571,7 @@ class Stream:
         self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
         self._status_drawn = False
         self._status_at = 0.0
+        self._lead = True       # 正文第一行还没开始：开头带一个 ⏺，跟工具行区分开
         self.wrote_text = False
         self.text = ""      # 中断时要靠它把已经说出口的话补回历史
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -661,8 +662,8 @@ class Stream:
         self._newline = False
         while text:
             if self._fresh_line:
-                sys.stdout.write("  ")
-                self._fresh_line, self._col = False, 2
+                sys.stdout.write(self._gutter())
+                self._fresh_line, self._col = False, self._gutter_width
             room = self._limit - self._col
             width_left = get_cwidth(text)
             if width_left <= room:
@@ -684,6 +685,18 @@ class Stream:
             sys.stdout.write(self._painted(text[:cut]) + "\n")
             text = text[cut:]
             self._fresh_line, self._col = True, 0
+
+    _gutter_width = 2
+
+    def _gutter(self) -> str:
+        """每行开头那两格 正文第一行放 ⏺（跟工具调用行同一套记号，颜色分开），
+        代码块用一条竖线把它跟正文隔开，其余是两个空格 """
+        if self._lead:
+            self._lead = False
+            return paint("brown", BULLET) + " "
+        if self._style == "block":
+            return paint("grey", "│ ")
+        return "  "
 
     def _painted(self, text: str) -> str:
         """宽度是按原文算好的，这里只负责套色 —— 先上色再量宽度就会把转义序列算进去 """
