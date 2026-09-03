@@ -28,6 +28,7 @@ RULE_NAME = {
     "list_files": "List",
     "search": "Search",
     "web_fetch": "Fetch",
+    "web_search": "WebSearch",
     "remember": "Remember",
     "task": "Task",
     "todo": "Todo",
@@ -163,7 +164,7 @@ def subject(tool: str, args: dict) -> str:
         return " ".join([str(args.get("action") or "")] + [str(p) for p in args.get("paths") or []])
     if tool.startswith("mcp_"):
         return MCP_SUBJECTS.get(tool, tool[4:])
-    for key in ("path", "pattern", "regex", "url"):
+    for key in ("path", "pattern", "regex", "url", "query"):
         if args.get(key):
             return str(args[key])
     return ""

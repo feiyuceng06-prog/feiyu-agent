@@ -30,6 +30,8 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 专用工具不用确认、几条能同时跑、输出也更省 bash 留给构建、测试、安装这些 
 - 大文件（几百行以上）别整份读：先 search 定位到行号，再用 read_file 的 offset / limit 只读那一段 \
 读过的段落会留在上下文里，同一段不用再读 
+- 不认识的库、看不懂的报错、拿不准的版本或接口，先 web_search 搜一下，再用 web_fetch 带 prompt 读正文；\
+别凭记忆猜 API 
 - 要知道一个函数或类定义在哪、被谁用到，先用 symbol（语言服务器，按语义找）；\
 它说没有服务器再用 search 跨文件改名尤其要靠 symbol 的 references 才不会漏 
 - 版本库用 git 工具看状态、看 diff、看 log、提交 **用户没让你提交就不要 commit**；\
@@ -220,7 +222,7 @@ MODE_ORDER = ("default", "auto", "plan", "readonly")
 # confirm 模式下要问一声的：改本地状态的，加上会把内容发到外网的
 # remember 也在里面：它写的东西会进以后每一次的系统提示，而内容可能间接来自网页，
 # 不问一声的话就是一条能跨会话的注入通道 好在它很少调，问一次不烦
-GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "remember", "git"}
+GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "web_search", "remember", "git"}
 # readonly 模式下直接拒绝的 web_fetch 不改任何东西，所以只读模式放行
 # remember 要拒：它不动工作区，但确实往磁盘上留了东西，只读就该是真的什么都不留
 WRITES = {"bash", "write_file", "edit_file", "remember"}
@@ -249,7 +251,7 @@ VERIFY_AFTER = {"write_file", "edit_file"}
 # bash 不在里面——它共享 self.cwd，两条并发的 cd 会互相盖掉；
 # 写类工具不在里面——同一批里改同一个文件就是竞态；
 # todo / exit_plan / remember 都改 agent 自己的状态，也不能并发
-PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "task", "symbol"}
+PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "web_search", "task", "symbol"}
 # 上限拦一下：一批十个 web_fetch 同时打同一个站点不礼貌，线程也不是免费的
 MAX_PARALLEL = 4
 
@@ -1207,7 +1209,7 @@ class Feiyu:
         for call in calls:
             if call.id not in ok or not isinstance(call.input, dict):
                 continue
-            if call.name in ("search", "list_files"):
+            if call.name in ("search", "list_files", "web_search"):
                 # 同样的参数又跑了一次：旧结果没用了 改过文件之后重搜一遍很常见
                 key = call.name + json.dumps(call.input, sort_keys=True, ensure_ascii=False)
                 self._expire(key, "这里原本是 %s 的结果，已经过期（后面用同样的参数又跑了一次）"

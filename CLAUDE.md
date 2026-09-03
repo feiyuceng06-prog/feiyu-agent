@@ -1113,6 +1113,23 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
 就按输入价——**不内置 1.25 这个倍率**，跟不内置价格表同一个理由。`_charge` 多一个
 `write=` 关键字参数，只有 anthropic 的 `run_turn` 传它；`tokens_context` 照旧把它算进规模。
 
+## web_search（0.46.0）
+
+用户发现 web_fetch 抓搜索引擎结果页本来就能用，只是糙：一次 12k 字（开头一千多字是筛选菜单）、
+链接是 DDG 的跳转地址、系统提示没提所以它不会主动搜 `web_search` 就是把这条路收拾干净。
+
+- `_fetch_page` 拆出 `_fetch_raw`（不转 Markdown、不进缓存、可放行内网），搜索走它拿原始 HTML
+  或 JSON；结果按 `search:<后端>:<词>:<条数>` 进同一个 `_web_cache`。
+- 出厂 DuckDuckGo 的 HTML 端点，`_DuckParser` 只认 `result__a` / `result__snippet` 两种 a，
+  `_unwrap_ddg` 从 `uddg=` 解出真地址；页面上有 anomaly / captcha 字样就明说要验证码，
+  **别回空结果**——空结果模型会换个词一直试。
+- 后端配置 `~/.config/feiyu/search.json`（`SEARCH_CONFIG`）：brave（JSON 接口、要 key）、
+  searxng（本机自建，`allow_local=True` 绕过内网拦截——那是用户自己配的地址）。
+  provider 认不出来直接报错，不静默退回 DDG。
+- 进 `GUARDED` 和 `PARALLEL_SAFE`（跟 web_fetch 一样），规则名 `WebSearch`，`subject` 认 `query`；
+  同一个词再搜一次旧结果折叠（跟 search / list_files 一路）。
+- 系统提示加「不认识的库、看不懂的报错先 web_search」——照旧：光有 schema 模型不会用。
+
 ## 0.45.0：真实仓库实测修掉的一处，加十道中等题
 
 拿两个真实仓库（博客 SSG 的 2634 行 build.mjs、nvim 配置的 cp.lua）跑了五个任务，

@@ -277,6 +277,17 @@ feiyu --json-schema review.schema.json "检查 calc.py 有没有 bug" > out.json
 
 **历史会自己瘦身**，不等到快满才压缩：同一个文件又读了一次或被改过，旧的那份换成一句说明；bash / job 的输出过了六轮只留开头一截；再往上才是按头尾截断和整段摘要。这些都只换工具结果的内容，不删消息。
 
+## 上网搜索
+
+`web_search` 返回若干条「标题 / 网址 / 摘要」，正文再用 `web_fetch` 抓。出厂走 DuckDuckGo，零配置；系统提示里让它遇到不认识的库、看不懂的报错先搜再猜。想换后端写 `~/.config/feiyu/search.json`：
+
+```json
+{"provider": "brave", "key": "…"}
+{"provider": "searxng", "url": "http://localhost:8080"}
+```
+
+Brave 有每月免费额度；SearXNG 是本机自建的，地址会绕过内网拦截（那是你自己配的）。搜索词会出网，所以跟 `web_fetch` 一样在默认模式下要确认，规则写 `WebSearch(*)` 放行。DuckDuckGo 被搜得太频繁会要验证码，这时它会明说，而不是回空结果。
+
 ## MCP
 
 外部 [MCP](https://modelcontextprotocol.io) 服务器的工具可以直接给它用。配置跟 Claude Code 一个格式，全局写在 `~/.config/feiyu/mcp.json`，项目写在 `.feiyu/mcp.json`：

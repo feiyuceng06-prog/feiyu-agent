@@ -277,6 +277,17 @@ The hit rate is the share of resent history billed at the cache price. Every tur
 
 **The history slims itself down** rather than waiting for the compaction threshold: a file read again or edited has its older copy replaced by a one-line note; bash / job output older than six rounds keeps only its head; only above that come head-and-tail truncation and full summarisation. All of these swap the content of a tool result, never delete a message.
 
+## Web search
+
+`web_search` returns a handful of title / URL / snippet rows; the page itself is then read with `web_fetch`. DuckDuckGo out of the box, no configuration; the system prompt tells the agent to search before guessing at an unfamiliar library or an error it does not recognise. To switch backends, write `~/.config/feiyu/search.json`:
+
+```json
+{"provider": "brave", "key": "…"}
+{"provider": "searxng", "url": "http://localhost:8080"}
+```
+
+Brave has a free monthly quota; SearXNG is self-hosted, and its address bypasses the private-network block (you configured it yourself). The query leaves the machine, so like `web_fetch` it asks for confirmation in default mode; `WebSearch(*)` allows it. When DuckDuckGo demands a captcha after too many requests the tool says so instead of returning nothing.
+
 ## MCP
 
 Tools from external [MCP](https://modelcontextprotocol.io) servers can be handed straight to the agent. The config has the same shape as Claude Code's: `~/.config/feiyu/mcp.json` globally, `.feiyu/mcp.json` per project:

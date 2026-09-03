@@ -253,6 +253,7 @@ _LABEL = {
     "list_files": "List",
     "search": "Search",
     "web_fetch": "Fetch",
+    "web_search": "WebSearch",
     "remember": "Remember",
     "task": "Task",
     "todo": "Todo",
@@ -270,6 +271,7 @@ _HEADLINE_ARG = {
     "list_files": "pattern",
     "search": "regex",
     "web_fetch": "url",
+    "web_search": "query",
     # 确认时人只看得到这一行，不把 fact 显出来就等于让人盲签
     "remember": "fact",
     "task": "prompt",
@@ -297,7 +299,7 @@ def tool_target(name: str, args: dict) -> str:
 
 # 参数还在流式生成时，从没收完的 JSON 里抠出目标 这几个键就是 _HEADLINE_ARG 的键
 _ARG_HINT = re.compile(
-    r'"(path|command|url|regex|pattern|prompt|fact|plan|question)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    r'"(path|command|url|regex|pattern|prompt|fact|plan|question|query)"\s*:\s*"((?:[^"\\]|\\.)*)"')
 # 参数短的时候没什么可报的进度，别抖着一个「已生成 1 行」
 _PROGRESS_MIN = 200
 
@@ -975,7 +977,7 @@ def ask_text(name: str, args: dict) -> str:
     """确认时问什么 —— 要认得出对象 光问「要执行 Update 吗」等于让人盲签 """
     what = str(args.get(_headline_key(name, args) or "", "")).replace("\n", " ")
     verb = {"write_file": "写", "edit_file": "改", "read_file": "读",
-            "web_fetch": "抓", "remember": "记住", "bash": "执行",
+            "web_fetch": "抓", "web_search": "搜", "remember": "记住", "bash": "执行",
             "git": "git"}.get(name, "执行")
     if name.startswith("mcp_"):
         verb = "调 " + tool_label(name) + " "
