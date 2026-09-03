@@ -203,6 +203,8 @@ On by default when `bubblewrap` is installed:
 
 **Reads are only blanked in a few places — that is not isolation.** The rest of the filesystem is still readable. Real read isolation would mean mounting only what is allowed, which breaks most build tooling.
 
+When a bare `python` / `pytest` hits a missing module and the workspace has a `.venv/`, the output ends with a pointer to `.venv/bin/python` — after `--resume` it tends to forget that and spend several rounds poking at the environment.
+
 Git remotes over ssh fail inside the sandbox because `~/.ssh` is emptied (no known_hosts, no ssh config), and `strict` also cuts the network; both failures are recognised in the output and explained instead of retried blindly. https remotes with `gh`'s credential helper keep working.
 
 `/sandbox` switches; `FEIYU_SANDBOX=off` overrides the config for one run. Without bubblewrap it degrades to off and the welcome box says so.
@@ -363,7 +365,7 @@ Standard-library `unittest`, no test framework:
 python -m unittest discover -s tests -t .
 ```
 
-755 cases, twenty seconds, no real API calls, everything in temporary directories — your keys and rules under `~/.config/feiyu/` are never touched. Without bubblewrap the sandbox group skips itself.
+761 cases, twenty seconds, no real API calls, everything in temporary directories — your keys and rules under `~/.config/feiyu/` are never touched. Without bubblewrap the sandbox group skips itself.
 
 What they watch hardest is the **shape of the history**: one `tool_use` left without a matching result, or roles that stop alternating, and the next request is a 400 the conversation never recovers from. An interrupt landing mid-stream and one landing during tool execution are two different paths, and both have cases.
 

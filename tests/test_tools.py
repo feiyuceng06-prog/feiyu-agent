@@ -1071,3 +1071,37 @@ class TestSandboxNote(unittest.TestCase):
 
     def test_普通报错不加话(self):
         self.assertEqual("", tools._sandbox_note("Traceback ...\nKeyError: 'x'", "strict"))
+
+
+class TestVenvHint(Base):
+    """裸 python 撞缺模块、工作区有 .venv 时指一下解释器；别的情况一个字不加 """
+
+    def _venv(self):
+        (self.root / ".venv" / "bin").mkdir(parents=True)
+        (self.root / ".venv" / "bin" / "python").write_text("")
+
+    def test_有_venv_裸_python_缺模块要提示(self):
+        self._venv()
+        note = tools._venv_hint("python -m pytest -q", "ModuleNotFoundError: No module named 'httpx'", self.root)
+        self.assertIn(".venv/bin/python", note)
+
+    def test_已经用了_venv_不提示(self):
+        self._venv()
+        self.assertEqual("", tools._venv_hint(".venv/bin/python -m pytest", "ImportError: x", self.root))
+
+    def test_没有_venv_不提示(self):
+        self.assertEqual("", tools._venv_hint("python x.py", "ModuleNotFoundError: x", self.root))
+
+    def test_不是缺模块的错不提示(self):
+        self._venv()
+        self.assertEqual("", tools._venv_hint("python x.py", "AssertionError: 1 != 2", self.root))
+
+    def test_不是_python_命令不提示(self):
+        self._venv()
+        self.assertEqual("", tools._venv_hint("node x.js", "Error: Cannot find module 'x'", self.root))
+
+    def test_走完整的_bash_工具也带提示(self):
+        self._venv()
+        out = self.box.run("bash", {"command": "python3 -c 'import definitely_missing_mod_xyz'"})
+        self.assertTrue(out.is_error)
+        self.assertIn(".venv/bin/python", out.content)

@@ -1150,6 +1150,20 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
   不然跑测试留下的 `__pycache__` 会被当成脏改动（参考答案验的时候撞到的）。
   `--only` 匹配时题名里的空格会被去掉，所以 `--only PR` 而不是 `--only "提 PR"`。
 
+### 真实 PR 跑出来的四处（0.47.1）
+
+拿 elarmuzik1993/llm-parliament#19 真开了一条 PR（#28），feiyu 做对了，但日志里四个毛病：
+
+- **`--resume` 回来忘了用 `.venv/bin/python`**，裸 python 报 ImportError 后翻了五轮环境。
+  没压缩过（trace 里没有 compact），提示词就在历史里它也没看——所以不靠提示词，
+  `tools._venv_hint()` 认出「裸 python / pytest 缺模块 + 工作区有 .venv」就指路，确定性的事不让它猜。
+  顺带系统提示的 remember 那条改成「用户交代了解释器 / 测试命令 / 不能动的东西当场记」，
+  `SUMMARY_PROMPT` 要求把测试命令连解释器路径原样抄进摘要。
+- **`ruff --fix` 整文件跑**，把三个无关测试的 import 顺序也换了。系统提示加一条：自动修复只处理自己改的行。
+- **每条 bash 都 `cd <绝对路径> &&`**，系统提示加一句「bash 本来就在工作区里、cd 跨调用保持」。
+- **非交互撞 25 轮上限**只说「再说一句话」，可一次性任务没人能说——`_stop_runaway` 按 `said` 是否为空
+  区分，空的就提示 `feiyu --resume "接着做"`。
+
 ## 0.45.0：真实仓库实测修掉的一处，加十道中等题
 
 拿两个真实仓库（博客 SSG 的 2634 行 build.mjs、nvim 配置的 cp.lua）跑了五个任务，

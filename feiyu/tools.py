@@ -439,6 +439,27 @@ _NET_FAILS = ("Could not resolve host", "Network is unreachable",
               "Temporary failure in name resolution", "Name or service not known")
 
 
+_BARE_PY = re.compile(r"(?:^|[\s;&|(])(?:python3?|pytest|ruff|pip3?|mypy|black)\b")
+_MISSING = ("ModuleNotFoundError", "ImportError", "No module named", "command not found")
+
+
+def _venv_hint(command: str, out: str, root: Path) -> str:
+    """裸 python / pytest 撞上缺模块、而工作区里有 .venv 时，指一下解释器在哪
+
+    实测 --resume 回来后它把「用 .venv/bin/python」忘了，裸 python 报 ImportError 之后
+    花了五轮翻环境（连 find / 都用上了） 这是确定性的事，不该让它猜
+    """
+    if not any(mark in out for mark in _MISSING) or ".venv/" in command:
+        return ""
+    if not _BARE_PY.search(command):
+        return ""
+    for name in (".venv", "venv"):
+        if (root / name / "bin" / "python").exists():
+            return ("\n\n（工作区里有 %s/，依赖多半装在那里：用 %s/bin/python、%s/bin/pytest "
+                    "这样的路径来跑，别用裸的 python ）" % (name, name, name))
+    return ""
+
+
 def _sandbox_note(out: str, level: str) -> str:
     """返回该追加在输出末尾的说明，不是沙箱造成的就返回空串 只说原因和出路，
     模型才不会闷头重试同一条命令 """
@@ -1082,8 +1103,10 @@ class Toolbox:
             except OSError:
                 pass
         out = (proc.stdout or "") + (proc.stderr or "")
-        if boxed and proc.returncode != 0:
-            out += _sandbox_note(out, sandbox.effective()[0])
+        if proc.returncode != 0:
+            out += _venv_hint(command, out, self.root)
+            if boxed:
+                out += _sandbox_note(out, sandbox.effective()[0])
         out = _truncate(out)
         body = out if out.strip() else "（无输出）"
         native = _native_for(command)
