@@ -28,6 +28,8 @@ SYSTEM_PROMPT = """你是 Feiyu，一个在真实终端工作区里干活的编�
 - 改动之前先用工具了解项目 编辑前先读文件、搜索，不要凭空猜测内容 （改已有文件时 write_file / edit_file 会强制要求你先读过它） 
 - 找代码用 search、看文件用 read_file、列目录用 list_files，别拿 bash 跑 grep / cat / find：\
 专用工具不用确认、几条能同时跑、输出也更省 bash 留给构建、测试、安装这些 
+- 大文件（几百行以上）别整份读：先 search 定位到行号，再用 read_file 的 offset / limit 只读那一段 \
+读过的段落会留在上下文里，同一段不用再读 
 - 要知道一个函数或类定义在哪、被谁用到，先用 symbol（语言服务器，按语义找）；\
 它说没有服务器再用 search 跨文件改名尤其要靠 symbol 的 references 才不会漏 
 - 版本库用 git 工具看状态、看 diff、看 log、提交 **用户没让你提交就不要 commit**；\
@@ -1217,10 +1219,15 @@ class Feiyu:
             if key is None:
                 continue
             if call.name == "read_file":
-                self._expire(key, self._stale_read(shown, "后面有更新的一次读取"))
-                self._reads.setdefault(key, []).append(call.id)
+                # 按「路径 + 范围」认，不按路径：大文件是分段读的，读了 1..1500 再读
+                # 1800..1900 时前一段并没过期 按路径折的话它每读一段就丢一段，
+                # 只能反复重读——真实仓库里一个 2634 行的文件让它读了二十多次才发现
+                ranged = "%s#%s:%s" % (key, call.input.get("offset", 1), call.input.get("limit", ""))
+                self._expire(ranged, self._stale_read(shown, "后面同一段又读了一次"))
+                self._reads.setdefault(ranged, []).append(call.id)
             elif call.name in VERIFY_AFTER:
-                self._expire(key, self._stale_read(shown, "这个文件后来被改过"))
+                for ranged in [k for k in self._reads if k == key or k.startswith(key + "#")]:
+                    self._expire(ranged, self._stale_read(shown, "这个文件后来被改过"))
 
     def _age(self, calls, outputs: list[ToolOutput]) -> None:
         """bash / job 的长输出登记下来，过了 AGE_ROUNDS 批就只留开头 出错的也登记：

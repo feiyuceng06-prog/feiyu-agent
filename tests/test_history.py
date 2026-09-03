@@ -151,6 +151,32 @@ class TestFoldInAgent(unittest.TestCase):
         self.assertIn("被改过", self.bodies(msgs)[0])
         self.assertEqual(unpaired(msgs), set())
 
+    def test_同一个文件不同范围都留着(self):
+        """大文件分段读：读了前一段再读后一段，前一段不能折 """
+        msgs = self.run_script([
+            ("", [call("a", "read_file", path="big.py", offset=1, limit=100)]),
+            ("", [call("b", "read_file", path="big.py", offset=200, limit=50)]),
+            ("看完了", []),
+        ])
+        first, second = self.bodies(msgs)
+        self.assertIn("x0 = 0", first)
+        self.assertIn("x199 = 199", second)
+
+    def test_同一范围再读一次才折_改过之后各段全折(self):
+        msgs = self.run_script([
+            ("", [call("a", "read_file", path="big.py", offset=1, limit=100)]),
+            ("", [call("b", "read_file", path="big.py", offset=200, limit=50)]),
+            ("", [call("c", "read_file", path="big.py", offset=1, limit=100)]),
+            ("", [call("d", "edit_file", path="big.py", old_str="x0 = 0", new_str="x0 = 9")]),
+            ("改完了", []),
+        ])
+        bodies = self.bodies(msgs)
+        self.assertTrue(bodies[0].startswith(history.MARK))
+        self.assertIn("同一段", bodies[0])
+        self.assertTrue(bodies[1].startswith(history.MARK))     # 改过之后全折
+        self.assertTrue(bodies[2].startswith(history.MARK))
+        self.assertEqual(unpaired(msgs), set())
+
     def test_不同文件之间互不影响(self):
         (self.root / "other.py").write_text("y = 2\n", encoding="utf-8")
         msgs = self.run_script([

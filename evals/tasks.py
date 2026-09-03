@@ -370,6 +370,8 @@ def check_long(root, answer):
     return _ran(_run(root, "-m", "unittest", "test_all"), "改完测试没过")
 
 
+from evals.tasks_medium import MEDIUM  # noqa: E402  中等规模的十题，单独一个文件
+
 TASKS = [
     ("改名", setup_rename, "把 calc.py 里的 sub 函数改名成 minus，别动别的函数", check_rename),
     ("修 bug", setup_bug, "test_lib.py 跑不过，修好 lib.py 让它全绿", check_bug),
@@ -393,3 +395,4 @@ TASKS = [
      "把 fetch_record 改名成 load_record：所有用到它的模块、测试、README 都要改 "
      "每改完一个文件都跑一遍 python -m unittest test_all 确认没弄坏，最后再跑一次总结", check_long),
 ]
+TASKS += MEDIUM
