@@ -1048,3 +1048,26 @@ class TestWebSearch(Base):
     def test_空搜索词(self):
         out = self.box.run("web_search", {"query": "  "})
         self.assertTrue(out.is_error)
+
+
+class TestSandboxNote(unittest.TestCase):
+    """报错原文认得出是沙箱造成的才追加说明；认不出就一个字不加 """
+
+    def test_只读文件系统(self):
+        self.assertIn("只读", tools._sandbox_note("sh: x: Read-only file system", "workspace"))
+
+    def test_ssh_远端在沙箱里挂了要说明_ssh_被挖空(self):
+        note = tools._sandbox_note("Host key verification failed.\nfatal: Could not read from remote repository.",
+                                   "workspace")
+        self.assertIn(".ssh", note)
+        self.assertIn("https", note)
+
+    def test_strict_档断网要说明(self):
+        note = tools._sandbox_note("fatal: unable to access 'https://x/': Could not resolve host: x", "strict")
+        self.assertIn("不联网", note)
+
+    def test_workspace_档联网照旧_解析失败不算沙箱的事(self):
+        self.assertEqual("", tools._sandbox_note("Could not resolve host: x", "workspace"))
+
+    def test_普通报错不加话(self):
+        self.assertEqual("", tools._sandbox_note("Traceback ...\nKeyError: 'x'", "strict"))

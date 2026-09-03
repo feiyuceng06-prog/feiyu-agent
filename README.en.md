@@ -109,7 +109,7 @@ Thirteen tools, each call printed as it happens:
 | `read_file` `write_file` `edit_file` | Read / write / exact replace. Paths are always relative to the workspace root; images go straight to the model. `edit_file` tolerates leading/trailing whitespace differences, points at the nearest match when it fails, and takes several edits to one file in a single call (all or nothing); `write_file` can `append`, so long files can be written in pieces |
 | `list_files` `search` | Glob the tree, grep it with a regex (with context lines, or listing only the matching files) |
 | `symbol` | Semantic definition / references through a language server (pyright / clangd / rust-analyzer / typescript-language-server / gopls / lua-language-server; only when installed, nvim's mason dir is searched too). Same-named strings and prefixes stay out |
-| `git` | Status / diff / log / commit. The first three need no confirmation, commit does; it never commits unless asked, and untracked files only go in when named |
+| `git` | Status / diff / log / commit. The first three need no confirmation, commit does; it never commits unless asked, and untracked files only go in when named. Push and opening a PR go through bash and are confirmed every time |
 | `web_fetch` | Fetch a page, HTML converted to Markdown |
 | `task` | Send a subagent to find something out and bring back only the conclusion |
 | `todo` | Keep the task list |
@@ -131,6 +131,12 @@ After **25 rounds** of tool calls in a row a task stops and asks whether to keep
 **It has to read a file before it may change it**, and if the file moved on after that read — you edited it in your editor, a formatter rewrote it — the write is refused until it reads again. This gate covers the one failure that actually loses work: overwriting a whole file from a copy it fetched minutes ago, silently wiping out whatever landed in between.
 
 Interrupting with `esc` is safe: whatever it had already said stays in the history, and any call that didn't finish gets an "interrupted by the user" result, so the conversation is never left broken.
+
+### Pull requests and open-source contributions
+
+There is no dedicated PR tool; it uses `git` and `gh` through bash (works once `gh` is installed and logged in). The system prompt fixes the order: read CONTRIBUTING and the templates under `.github` first, **branch before changing anything**, run the tests before committing, push to a remote you have access to, point `gh pr create --repo` back at the upstream when working from a fork, and write the description in the template's and the repo's existing style with the issue number. Push and opening a PR are outward-facing, so it says so before doing them and each one asks for confirmation.
+
+The eval suite has a "pull request" task (the remote is a local bare repo) that checks: main untouched, branch name and commit message compliant, branch pushed, PR description with all three sections and the issue number.
 
 ### Subagents
 
@@ -196,6 +202,8 @@ On by default when `bubblewrap` is installed:
 **Writes are genuinely isolated** — the kernel's mount namespace, not string matching. Everything outside the workspace and `/tmp` is read-only, and `~/.ssh`, `~/.gnupg`, `~/.aws` plus feiyu's own `~/.config/feiyu` (your API keys) and `~/.local/state/feiyu` (transcripts, logs, memory) are replaced with empty directories.
 
 **Reads are only blanked in a few places — that is not isolation.** The rest of the filesystem is still readable. Real read isolation would mean mounting only what is allowed, which breaks most build tooling.
+
+Git remotes over ssh fail inside the sandbox because `~/.ssh` is emptied (no known_hosts, no ssh config), and `strict` also cuts the network; both failures are recognised in the output and explained instead of retried blindly. https remotes with `gh`'s credential helper keep working.
 
 `/sandbox` switches; `FEIYU_SANDBOX=off` overrides the config for one run. Without bubblewrap it degrades to off and the welcome box says so.
 
@@ -355,7 +363,7 @@ Standard-library `unittest`, no test framework:
 python -m unittest discover -s tests -t .
 ```
 
-440 cases, ten seconds, no real API calls, everything in temporary directories — your keys and rules under `~/.config/feiyu/` are never touched. Without bubblewrap the sandbox group skips itself.
+755 cases, twenty seconds, no real API calls, everything in temporary directories — your keys and rules under `~/.config/feiyu/` are never touched. Without bubblewrap the sandbox group skips itself.
 
 What they watch hardest is the **shape of the history**: one `tool_use` left without a matching result, or roles that stop alternating, and the next request is a 400 the conversation never recovers from. An interrupt landing mid-stream and one landing during tool execution are two different paths, and both have cases.
 

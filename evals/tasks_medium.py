@@ -843,6 +843,108 @@ def check_cfg(root, answer):
     return _ran(_run(root, "-m", "unittest", "-q", "test_tool"), "原有测试挂了")
 
 
+# ---- 22. 提 PR：远端是本目录下的 bare 仓库，流程要照 CONTRIBUTING 走 ----
+# 判据全是 git 里能查到的事实：main 没动、分支名、提交信息、远端有没有那条分支、
+# PR.md 的三节 没法在本地开真 PR，所以描述写进文件；gh pr create 那一步不在判题范围里
+
+PR_REPO = {
+    "money/__init__.py": "",
+    "money/fmt.py": """def money(cents):
+    \"\"\"分 -> '1,234.56' \"\"\"
+    if not cents:
+        return ""
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    whole, frac = divmod(cents, 100)
+    return "%s%s.%02d" % (sign, format(whole, ","), frac)
+""",
+    "test_money.py": """import unittest
+
+from money.fmt import money
+
+
+class T(unittest.TestCase):
+    def test_normal(self):
+        self.assertEqual(money(123456), "1,234.56")
+
+    def test_negative(self):
+        self.assertEqual(money(-5), "-0.05")
+
+    def test_zero(self):
+        self.assertEqual(money(0), "0.00")
+
+
+if __name__ == "__main__":
+    unittest.main()
+""",
+    "CONTRIBUTING.md": """# 参与贡献
+
+- 不要直接在 main 上提交 分支名用 `fix/<issue 号>-<简述>`，比如 `fix/7-empty-input`
+- 提交信息第一行用 `fix: 一句话 (#issue 号)`，其余类型用 `feat:` / `docs:`
+- 提交前跑 `python -m unittest test_money`，测试文件本身不要改
+- PR 描述照 `.github/PULL_REQUEST_TEMPLATE.md` 三节写，issue 号写在「为什么」那节里
+- push 到 origin 之后再开 PR
+""",
+    ".github/PULL_REQUEST_TEMPLATE.md": """## 改了什么
+
+## 为什么
+
+## 怎么验证
+""",
+}
+
+
+def _git(root: Path, *args) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=30)
+
+
+def setup_pr(root):
+    _lay(root, PR_REPO)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "dev@example.com")
+    _git(root, "config", "user.name", "dev")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "feat: 金额格式化 (#1)")
+    _git(root, "commit", "-q", "--allow-empty", "-m", "docs: 贡献指南 (#3)")
+    _git(root, "init", "-q", "--bare", "-b", "main", str(root / "upstream.git"))
+    _git(root, "remote", "add", "origin", str(root / "upstream.git"))
+    _git(root, "push", "-q", "origin", "main")
+    # 铺完再把 upstream.git 从工作树里排除掉，不然它会被当成未跟踪文件
+    (root / ".git" / "info" / "exclude").write_text("upstream.git/\nPR.md\n", encoding="utf-8")
+
+
+def check_pr(root, answer):
+    if _text(root, "test_money.py") != PR_REPO["test_money.py"]:
+        return False, "改了测试文件"
+    base = _git(root, "rev-parse", "main").stdout.strip()
+    remote_main = _git(root, "--git-dir=upstream.git", "rev-parse", "main").stdout.strip()
+    if _git(root, "log", "-1", "--format=%s", "main").stdout.strip() != "docs: 贡献指南 (#3)":
+        return False, "直接在 main 上提交了"
+    if remote_main != base:
+        return False, "把 main push 上去了"
+    branch = _git(root, "branch", "--show-current").stdout.strip()
+    if not branch.startswith("fix/12"):
+        return False, "分支名不合规：%r" % branch
+    subject = _git(root, "log", "-1", "--format=%s").stdout.strip()
+    if not (subject.startswith("fix:") and "#12" in subject):
+        return False, "提交信息不合规：%r" % subject
+    if _git(root, "status", "--porcelain", "-uno", "--", "money").stdout.strip():
+        return False, "money/ 下还有没提交的改动"
+    remote = _git(root, "--git-dir=upstream.git", "branch", "--list", branch).stdout.strip()
+    if not remote:
+        return False, "分支没 push 到 origin"
+    ok, why = _ran(_run(root, "-m", "unittest", "-q", "test_money"), "测试没过")
+    if not ok:
+        return False, why
+    body = _text(root, "PR.md")
+    for head in ("## 改了什么", "## 为什么", "## 怎么验证"):
+        if head not in body:
+            return False, "PR.md 缺「%s」" % head[3:]
+    if "#12" not in body.split("## 为什么", 1)[1].split("## 怎么验证", 1)[0]:
+        return False, "PR.md 的「为什么」里没带 issue 号"
+    return True, ""
+
+
 MEDIUM = [
     ("加 --json", setup_json_flag,
      "给 cli.py 加一个 --json 参数，输出 JSON 而不是文本 放在现有的输出层里，别在 cli 里直接 print dict",
@@ -869,4 +971,9 @@ MEDIUM = [
     ("三层配置", setup_cfg,
      "给 tool.main 加 --port 和 --host 参数 优先级：命令行 > 环境变量 > 默认值 原有的环境变量逻辑保留",
      check_cfg),
+    ("提 PR", setup_pr,
+     "issue #12：money(0) 返回空串，应该是 '0.00' 按 CONTRIBUTING.md 的流程修好并准备 PR："
+     "远端 origin 指向本目录下的 upstream.git（当 GitHub 用，没法真开 PR），"
+     "所以 PR 描述按模板写进 PR.md 就行，其余步骤照常",
+     check_pr),
 ]

@@ -431,6 +431,30 @@ def _keep_secrets() -> bool:
     return os.environ.get("FEIYU_KEEP_ENV_SECRETS", "").strip() not in ("", "0", "false", "no")
 
 
+# 沙箱里跑挂了的命令，报错原文里认得出是沙箱造成的那几种 认不出就不加话，
+# 加错了比不加更误导
+_SSH_FAILS = ("Host key verification failed", "Permission denied (publickey",
+              "Could not read from remote repository", "No such file or directory: .ssh")
+_NET_FAILS = ("Could not resolve host", "Network is unreachable",
+              "Temporary failure in name resolution", "Name or service not known")
+
+
+def _sandbox_note(out: str, level: str) -> str:
+    """返回该追加在输出末尾的说明，不是沙箱造成的就返回空串 只说原因和出路，
+    模型才不会闷头重试同一条命令 """
+    if "Read-only file system" in out:
+        return ("\n\n（bash 跑在沙箱里，工作区以外一律只读 "
+                "要动工作区外的东西，跟用户说一声让他自己做，或者让他 /sandbox off ）")
+    if level == "strict" and any(mark in out for mark in _NET_FAILS):
+        return ("\n\n（bash 跑在 strict 档沙箱里，不联网 push / 拉依赖这类要出网的操作"
+                "跟用户说一声，让他自己做或者 /sandbox workspace ）")
+    if any(mark in out for mark in _SSH_FAILS):
+        return ("\n\n（bash 跑在沙箱里，~/.ssh 被盖成空目录：known_hosts 和 ssh 配置都不在，"
+                "走 ssh 的 git 远端会这样失败 让用户自己跑这条，或者换 https 远端、"
+                "或者 /sandbox off ）")
+    return ""
+
+
 def _child_env() -> dict:
     """给 bash 工具用的环境 摘掉密钥类变量，免得 agent 一句 echo 就把它们
     读进对话历史、再发回给模型厂商 """
@@ -1058,9 +1082,8 @@ class Toolbox:
             except OSError:
                 pass
         out = (proc.stdout or "") + (proc.stderr or "")
-        if boxed and proc.returncode != 0 and "Read-only file system" in out:
-            out += ("\n\n（bash 跑在沙箱里，工作区以外一律只读 "
-                    "要动工作区外的东西，跟用户说一声让他自己做，或者让他 /sandbox off ）")
+        if boxed and proc.returncode != 0:
+            out += _sandbox_note(out, sandbox.effective()[0])
         out = _truncate(out)
         body = out if out.strip() else "（无输出）"
         native = _native_for(command)

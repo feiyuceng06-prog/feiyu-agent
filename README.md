@@ -109,7 +109,7 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑一个任务就退出
 | `read_file` `write_file` `edit_file` | 读 / 写 / 精确替换。路径始终相对工作区根目录，图片直接给模型看。`edit_file` 容忍行首行尾的空白差异，对不上时会指出最接近的位置，同一个文件多处改动可以一次交（有一处对不上就整个不写）；`write_file` 可以 `append`，长文件分几次写 |
 | `list_files` `search` | 按通配符列目录、按正则搜内容（可以带上下文行，也可以只列命中的文件名）|
 | `symbol` | 按语义找定义和引用，走语言服务器（pyright / clangd / rust-analyzer / typescript-language-server / gopls / lua-language-server，装了才能用，nvim 的 mason 目录也会找）。同名字符串和前缀不会混进来 |
-| `git` | 看状态 / diff / log、提交。前三个不用确认，commit 要；用户没让提交就不会提交，新文件要指名才会带上 |
+| `git` | 看状态 / diff / log、提交。前三个不用确认，commit 要；用户没让提交就不会提交，新文件要指名才会带上。push 和开 PR 走 bash，每次都要确认 |
 | `web_fetch` | 抓网页，HTML 转 Markdown |
 | `task` | 派子 agent 去查一件事，只带结论回来 |
 | `todo` | 维护任务清单 |
@@ -131,6 +131,12 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑一个任务就退出
 **改已有文件之前它必须先读过那个文件**，而且读过之后要是文件又被改动了（你在编辑器里改的、或者格式化工具改的），写操作会被拦下来让它重新读一遍。这道闸挡的是唯一会真的丢数据的情况：它拿着几分钟前的旧内容整份覆盖回去，把你中间的改动无声抹掉。
 
 `esc` 打断是安全的：已经说出口的话留在历史里，没跑完的调用补上一条「被用户打断」的结果，对话不会损坏。
+
+### 提 PR、给开源项目贡献
+
+没有专门的 PR 工具，靠 bash 里的 `git` 和 `gh`（装了并登录过就能用）。系统提示里写死了顺序：先读 CONTRIBUTING 和 `.github` 下的模板、**先开分支再改**、跑过测试再 commit、push 到自己有权限的远端、fork 的话用 `gh pr create --repo` 指回上游、描述照模板和仓库既有风格写并带上 issue 号。push 和开 PR 是对外的动作，动手前它会先说一声，每次都要你确认。
+
+题库里有一道「提 PR」题（远端是本地的 bare 仓库），判的是：main 没动、分支名和提交信息合规、分支 push 上去了、PR 描述三节齐全并带 issue 号。
 
 ### 子 agent
 
@@ -196,6 +202,8 @@ Read(*)               这个工具的所有调用
 **写是真隔离**——内核的 mount namespace，不是字符串匹配。工作区和 `/tmp` 之外全部只读，`~/.ssh`、`~/.gnupg`、`~/.aws` 以及 feiyu 自己的 `~/.config/feiyu`（你的 API key）、`~/.local/state/feiyu`（对话原文、日志、记忆）都被盖成空目录。
 
 **读只是挖空了几个目录，不是隔离**——整个文件系统仍然可读。真要做读隔离得改成只挂载允许的目录，那会让一大半构建工具跑不起来。
+
+走 ssh 的 git 远端在沙箱里会因为 `~/.ssh` 被挖空而失败（known_hosts 和 ssh 配置都不在），`strict` 档还断网；这两种失败它都会在输出里认出来并说明原因，而不是闷头重试。https 远端配 `gh` 的凭据助手照常能用。
 
 `/sandbox` 切换，`FEIYU_SANDBOX=off` 临时压过配置。没装 bubblewrap 就自动降级，欢迎框里会写明。
 
@@ -355,7 +363,7 @@ Windows **只在 WSL 里可用**：`install.sh` 是 bash 脚本，`bash` 工具�
 python -m unittest discover -s tests -t .
 ```
 
-440 个用例，十秒跑完，不打任何真实 API，全程临时目录，不碰 `~/.config/feiyu/` 里的密钥和规则。没装 bubblewrap 的机器上沙箱那组自动跳过。
+755 个用例，二十秒跑完，不打任何真实 API，全程临时目录，不碰 `~/.config/feiyu/` 里的密钥和规则。没装 bubblewrap 的机器上沙箱那组自动跳过。
 
 盯得最紧的是**历史形状**：`tool_use` 少一条配对结果、角色不交替，下一次请求就是 400，会话再也发不出去。中断落在流式输出里和落在工具执行里是两条不同的路径，各有用例。
 

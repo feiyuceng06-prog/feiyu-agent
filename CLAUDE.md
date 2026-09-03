@@ -82,7 +82,7 @@ python -m unittest discover -s tests -t .
 （打真实接口、要花钱、有随机性）。两者不要混。
 
 ```bash
-python -m evals.run                  # 二十一题各跑一遍
+python -m evals.run                  # 二十二题各跑一遍
 python -m evals.run -n 3             # 每题三遍，看稳定性
 python -m evals.run --only 改名 修bug  # 只跑几题
 python -m evals.run -m kimi-k2.6     # 换模型对比
@@ -1129,6 +1129,26 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
 - 进 `GUARDED` 和 `PARALLEL_SAFE`（跟 web_fetch 一样），规则名 `WebSearch`，`subject` 认 `query`；
   同一个词再搜一次旧结果折叠（跟 search / list_files 一路）。
 - 系统提示加「不认识的库、看不懂的报错先 web_search」——照旧：光有 schema 模型不会用。
+
+## 提 PR（0.47.0）
+
+用户问「它能不能做好 PR、做开源贡献」。查下来 push 和 `gh pr create` 在 workspace 沙箱里本来就通
+（`gh` 的凭据走 keyring，`GNOME_KEYRING_CONTROL` 在 `_SECRET_KEEP` 里；https 远端走 gh 的凭据助手），
+但那是「碰巧能」：系统提示对 PR 一个字没提，它不会读 CONTRIBUTING、会直接在 main 上提交、fork 流程全靠摸。
+
+- **没加 PR 工具**，加的是系统提示里一段流程（读模板 → 开分支 → 测试 → commit → push → `gh pr create --repo`
+  指回上游 → 描述带 issue 号）。跟 todo / remember 一个教训：行为指令放系统提示。
+  push 和开 PR 仍然走 bash、每次确认，那个摩擦是要的。
+- **`_sandbox_note()`**：沙箱里挂掉的命令按报错原文认三种（只读 / ssh 远端 / strict 断网）追加说明。
+  `~/.ssh` 被 tmpfs 盖空，known_hosts 和 ssh 配置都没了，ssh 远端在沙箱里必挂，原来只有只读那一种有说明，
+  模型拿到 `Host key verification failed` 只会换着法重试。**认不出就一个字不加**，加错了比不加更误导；
+  workspace 档的 DNS 失败不算沙箱的事。
+- **题库「提 PR」题**：`upstream.git` 铺在工作区里当远端（沙箱外只读，放外面 push 不进去），
+  `.git/info/exclude` 把它和 PR.md 排掉。判据全是 git 事实：main 本地和远端都没动、分支名 `fix/12*`、
+  提交信息 `fix: … (#12)`、远端有那条分支、PR.md 三节齐全且 issue 号在「为什么」里。
+  `gh pr create` 那一步本地没法判，不在范围内。查 `money/` 有没有没提交的改动要 `-uno`，
+  不然跑测试留下的 `__pycache__` 会被当成脏改动（参考答案验的时候撞到的）。
+  `--only` 匹配时题名里的空格会被去掉，所以 `--only PR` 而不是 `--only "提 PR"`。
 
 ## 0.45.0：真实仓库实测修掉的一处，加十道中等题
 
