@@ -38,7 +38,7 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 
 - **版本号每次改完就 bump**。单一真源是 `feiyu/__init__.py` 的 `__version__`，
   `pyproject.toml` 用 `[tool.setuptools.dynamic]` 读过来。小改动进 patch，加功能进 minor。
-- **README 有中英两份**（`README.md` / `README.en.md`），互相链接，改一份必须改另一份。
+- **README 有中英两份**（英文 `README.md` 是默认展示的那份，中文 `README.zh.md`），互相链接，改一份必须改另一份。
 - 不引新依赖来解决小问题。现有依赖只有 `anthropic`、`pillow`、`prompt_toolkit`，
   `openai` 是可选 extra。
 - 注释只写代码本身表达不了的约束，不要解释「这段在干什么」。
