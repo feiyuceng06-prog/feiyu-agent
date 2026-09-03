@@ -6,6 +6,8 @@ A coding agent that runs in your terminal. Give it a task and it reads the code,
 
 About 4,800 lines of Python, no framework, three dependencies: `anthropic`, `pillow`, `prompt_toolkit`.
 
+![demo](docs/demo.gif)
+
 ## Install
 
 ```

@@ -36,9 +36,25 @@ SCRIPT = [
      "> 注意：`mul` 没有做类型检查，传字符串进去会按 Python 的语义重复拼接。", []),
 ]
 
+SCRIPT_EN = [
+    ("Let me look at the project first.", [ToolCall(id="c1", name="list_files", input={"pattern": "*.py"}),
+                                           ToolCall(id="c2", name="read_file", input={"path": "calc.py"})]),
+    ("`calc.py` has **add** and **sub**; the tests only cover `add`. Plan:\n\n"
+     "- add `mul(a, b)` at the end of `calc.py`\n- run the tests\n\nAdding the function:",
+     [ToolCall(id="c3", name="edit_file", input={"path": "calc.py", "old_str": "    return a - b\n",
+               "new_str": "    return a - b\n\n\ndef mul(a, b):\n    return a * b\n"})]),
+    ("", [ToolCall(id="c4", name="bash", input={"command": "python -m unittest -q 2>&1 | tail -3"})]),
+    ("Done. Summary:\n\n| File | Change |\n|---|---|\n| `calc.py` | added `mul` |\n| `test_calc.py` | untouched, still green |\n\n"
+     "Usage:\n\n```python\nfrom calc import mul\nprint(mul(6, 7))  # 42\n```\n\n"
+     "> Note: `mul` does no type checking; strings follow Python's repeat semantics.", []),
+]
+if os.environ.get("FEIYU_UI_LANG") == "en":
+    SCRIPT = SCRIPT_EN
+
 class Fake(FakeBackend):
     def __init__(self, *a, **k):
         super().__init__(list(SCRIPT))
+        self.model = "deepseek-v4-flash"   # 状态栏显示的是 backend.model，别让它写 fake
     def run_turn(self, on_text, on_tool=None):
         import time
         text, calls = self.script[0] if self.script else ("说完了", [])

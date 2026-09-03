@@ -122,6 +122,10 @@ python -m evals.run -m kimi-k2.6     # 换模型对比
 python dev/ui_drive.py /tmp/shots --theme swiss --cols 80
 ```
 
+`dev/demo_gif.py docs/demo.gif` 用同一套夹具录 README 顶部的演示 GIF（假后端，不花钱）：按屏幕变化抓帧、
+每帧停留时间取到下一帧的间隔、magick 拼成 GIF。`FEIYU_UI_LANG=en` 让 ui_runner 走英文脚本。
+⏺ ⎿ ⏎ 这几个记号 JetBrains Mono 没有，要用 Adwaita Mono 画，否则是豆腐块。
+
 夹具的几条要点：
 
 1. `pty.openpty()` 把整个进程接上去（`isatty()` 才为真）；

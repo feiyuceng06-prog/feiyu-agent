@@ -6,6 +6,8 @@
 
 约 4800 行 Python，没有框架，依赖只有 `anthropic`、`pillow`、`prompt_toolkit` 三个。
 
+![demo](docs/demo.gif)
+
 ## 安装
 
 ```
