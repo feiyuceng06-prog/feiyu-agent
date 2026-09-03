@@ -137,6 +137,12 @@ class Billing:
         self.tokens_context = 0
         self.cost = 0.0
         self.priced = True
+        # 累计输入里有多少是按缓存价算的 这个比例决定"要不要更狠地折叠历史"：
+        # 命中率高的话重发的历史几乎不要钱，折叠反而会把后面的缓存前缀作废
+        self.tokens_in = 0
+        self.tokens_hit = 0
+        self.last_in = 0
+        self.last_hit = 0
 
     def _charge(self, hit: int, miss: int, out: int, *, write: int = 0,
                 context: bool = True) -> None:
@@ -146,7 +152,11 @@ class Billing:
         size = hit + miss + out + write
         if context:
             self.tokens_context = size
+            self.last_in = hit + miss + write
+            self.last_hit = hit
         self.tokens_total += size
+        self.tokens_in += hit + miss + write
+        self.tokens_hit += hit
         spent = pricing.cost(self.rates, hit, miss, out, write)
         if spent is None:
             self.priced = False

@@ -64,8 +64,10 @@ def one(name, setup, prompt, check, model, mode):
         rounds = sum(1 for m in agent.backend.messages if m.get("role") == "assistant")
         tools = sum(1 for m in agent.backend.messages if m.get("role") == "tool")
         agent.toolbox.jobs.kill_all()
+        # context 是收尾时那次请求的规模：历史瘦身管不管用，看这个数随轮数涨多快
         return {"ok": ok, "why": why, "s": spent, "rounds": rounds,
-                "tools": tools, "tokens": agent.tokens or 0, "cost": agent.cost or 0.0}
+                "tools": tools, "tokens": agent.tokens or 0, "cost": agent.cost or 0.0,
+                "context": agent.context or 0}
 
 
 def main() -> int:
@@ -97,7 +99,8 @@ def main() -> int:
     chosen = [t for t in TASKS if not args.only
               or any(k in t[0].replace(" ", "") for k in args.only)]
     print("模型 %s · %d 题 × %d 遍 · 模式 %s\n" % (model, len(chosen), args.repeat, args.mode))
-    print("%-14s %s" % ("题目", "结果"))
+    print("%-14s %-8s %6s %4s %5s %10s %8s" % (
+        "题目", "结果", "耗时", "轮", "工具", "累计token", "上下文"))
     print("─" * 78)
 
     rows, wins = [], 0
@@ -114,8 +117,10 @@ def main() -> int:
         bad = next((r["why"] for r in runs if not r["ok"]), "")
         passed = sum(bool(r["ok"]) for r in runs)
         tokens = statistics.median(r["tokens"] for r in runs)
+        context = statistics.median(r["context"] for r in runs)
         saved[name] = {"passed": passed, "runs": len(runs), "tokens": tokens,
-                       "rounds": statistics.median(r["rounds"] for r in runs)}
+                       "rounds": statistics.median(r["rounds"] for r in runs),
+                       "context": context}
         note = bad[:34]
         old = base.get(name)
         if old:
@@ -123,14 +128,16 @@ def main() -> int:
             was = old["passed"] / max(1, old["runs"])
             now = passed / max(1, len(runs))
             delta = tokens - old["tokens"]
+            ctx_delta = context - old.get("context", context)
             flag = "↓" if now < was else ("↑" if now > was else " ")
             if now < was:
                 worse.append(name)
-            note = "%s 基线 %d/%d %+5d tok  %s" % (flag, old["passed"], old["runs"], delta, note)
-        print("%-14s %-8s %5.1fs %2d轮 %2d工具 %6d tok  %s" % (
+            note = "%s 基线 %d/%d %+5d tok 上下文%+5d  %s" % (
+                flag, old["passed"], old["runs"], delta, ctx_delta, note)
+        print("%-14s %-8s %5.1fs %2d轮 %2d工具 %6d tok %6d ctx  %s" % (
             name, "".join(marks), statistics.median(r["s"] for r in runs),
             statistics.median(r["rounds"] for r in runs),
-            statistics.median(r["tools"] for r in runs), tokens, note))
+            statistics.median(r["tools"] for r in runs), tokens, context, note))
 
     total = len(rows)
     print("─" * 78)

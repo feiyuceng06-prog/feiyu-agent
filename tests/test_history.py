@@ -225,3 +225,67 @@ class TestFoldSearch(TestFoldInAgent):
             ("看完了", []),
         ])
         self.assertFalse(self.bodies(msgs)[0].startswith(history.MARK))
+
+
+class TestAge(unittest.TestCase):
+    """bash 输出按轮数老化：过了 AGE_ROUNDS 批只留开头，最近的不动 """
+
+    def test_留开头_标记_幂等(self):
+        msgs = openai_history("A" * 1000)
+        self.assertEqual(history.age(msgs, {"c0": "过期了"}, keep=100), 1)
+        body = msgs[2]["content"]
+        self.assertTrue(body.startswith(history.MARK))
+        self.assertIn("A" * 100, body)
+        self.assertNotIn("A" * 101, body)
+        self.assertIn("900", body)
+        self.assertEqual(history.age(msgs, {"c0": "过期了"}, keep=100), 0)
+
+    def test_不在名单里的不动(self):
+        msgs = anthropic_history("B" * 1000)
+        self.assertEqual(history.age(msgs, {"zz": "过期了"}, keep=100), 0)
+        self.assertEqual(msgs[1]["content"][0]["content"], "B" * 1000)
+
+
+class TestAgeInAgent(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.agent = Feiyu(Path(self.tmp.name))
+        self.agent.name = "fake"
+        self.agent.mode = "auto"
+        big = "L" * 900
+        self.agent.toolbox.run = lambda name, args: ToolResult(big, summary="ok")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_script(self, n):
+        from feiyu import agent as agent_mod
+        script = [("", [call("c%d" % i, "bash", command="ls -la %d" % i)]) for i in range(n)]
+        script.append(("完了", []))
+        self.agent.backend = FakeBackend(script)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.agent.send("干活")
+        return [m["content"] for m in self.agent.backend.messages if m.get("role") == "tool"]
+
+    def test_老的折_近的留(self):
+        from feiyu.agent import AGE_ROUNDS
+        bodies = self.run_script(AGE_ROUNDS + 2)
+        self.assertTrue(bodies[0].startswith(history.MARK))
+        self.assertIn("ls -la 0", bodies[0])
+        self.assertTrue(bodies[1].startswith(history.MARK))
+        for body in bodies[2:]:
+            self.assertFalse(body.startswith(history.MARK))
+        self.assertEqual(unpaired(self.agent.backend.messages), set())
+
+    def test_短输出不登记(self):
+        self.agent.toolbox.run = lambda name, args: ToolResult("短", summary="ok")
+        from feiyu.agent import AGE_ROUNDS
+        bodies = self.run_script(AGE_ROUNDS + 3)
+        self.assertTrue(all(b == "短" for b in bodies))
+
+    def test_清空历史后登记也清(self):
+        from feiyu.agent import AGE_ROUNDS
+        self.run_script(2)
+        self.assertTrue(self.agent._aging)
+        self.agent.reset()
+        self.assertFalse(self.agent._aging)

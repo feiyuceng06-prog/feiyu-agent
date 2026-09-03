@@ -406,3 +406,37 @@ class TestGutter(unittest.TestCase):
         rows = got.split("\n")
         self.assertEqual(rows[1], "  " + "─" * (ui.width() - 4))
         self.assertEqual(rows[2], "  下")
+
+
+class TestTheme(unittest.TestCase):
+    """主题只换调色板和记号，切回来要一模一样 """
+
+    def tearDown(self):
+        ui.set_theme("default")
+
+    def test_切换与还原(self):
+        before = dict(ui._RGB)
+        self.assertTrue(ui.set_theme("swiss"))
+        self.assertEqual(ui.THEME, "swiss")
+        self.assertEqual(ui.BULLET, "■")
+        self.assertEqual(ui.CORNERS, "┌┐└┘")
+        self.assertNotEqual(ui._RGB["brown"], before["brown"])
+        self.assertTrue(ui.set_theme("default"))
+        self.assertEqual(ui._RGB, before)
+        self.assertEqual(ui.BULLET, "⏺")
+
+    def test_不认识的名字不动现状(self):
+        self.assertFalse(ui.set_theme("bauhaus"))
+        self.assertEqual(ui.THEME, "default")
+
+    def test_框和列表记号跟着换(self):
+        ui.set_theme("swiss")
+        top = ui.box(["x"]).split("\n")[0]
+        self.assertIn("┌", top)
+        self.assertNotIn("╭", top)
+        runs = ui.MarkdownStream().feed("- 一条\n")
+        self.assertTrue(any(text.strip() == "–" for text, style in runs if style == "mark"))
+
+    def test_钩子行挂在工具结果那一级(self):
+        line = ui.hook_line(True, "钩子通过：x")
+        self.assertTrue(line.startswith("  " + ui.ELBOW))

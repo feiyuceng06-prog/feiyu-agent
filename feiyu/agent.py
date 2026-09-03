@@ -70,6 +70,13 @@ TRIM_RATIO = 0.55
 TRIM_KEEP_LAST = 8       # 最近这么多条消息不动，正在用的东西不能碰
 TRIM_LIMIT = 4000        # 单条超过这么多字符才值得压
 TRIM_KEEP = 1200         # 压完头尾各留这么多
+# bash / job 的输出按轮数老化：过了这么多批工具调用之后，只留开头一截
+# 它们是历史里最多的一种工具结果（实测 304 次调用里 150 次是 bash），
+# 又没有"同一个文件又读了一次"那种过期信号，不按轮数折的话要等到 TRIM_RATIO 才动
+AGE_TOOLS = ("bash", "job")
+AGE_ROUNDS = 6           # 过了这么多批就折
+AGE_LIMIT = 600          # 超过这么多字符才登记，短的留着不值当折
+AGE_KEEP = 240           # 折完留开头这么多
 
 # 连续调多少轮工具之后停下来问一句 纯保险：模型卡在某个循环里时不至于一直转下去
 # 撞上了不直接收手——大重构本来就要几十轮，问一声再接着跑（没人能回答时才停）
@@ -365,6 +372,10 @@ class Feiyu:
         # 路径 -> 这个文件在历史里还有效的那几条 read_file 结果的 id
         # 同一个文件再读一次、或者被改过，之前那几份就该从历史里折叠掉
         self._reads: dict[str, list[str]] = {}
+        # (第几批, 调用 id, 说明) 过了 AGE_ROUNDS 批就折叠 跟 _reads 一起清
+        self._aging: list[tuple[int, str, str]] = []
+        self._batches = 0
+        self._undone: list[str] = []      # /undo 退掉的改动，下一句话时告诉模型
         self._previewed: set[str] = set()   # 确认前已经画过 diff 的调用，结果里不再画一遍
         self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
         self.name = ""           # 当前用的是 /key 里的哪一条
@@ -459,9 +470,9 @@ class Feiyu:
             if hook.source == "verify:":
                 self.verified_ok = outcome.ok
             if outcome.ok:
-                print(ui.notice("钩子通过：%s" % ui.clip(hook.command, 60)))
+                print(ui.hook_line(True, "钩子通过：%s" % ui.clip(hook.command, 60)))
             else:
-                print(ui.warn("钩子拦下了（退出码 %d）：%s" % (
+                print(ui.hook_line(False, "钩子拦下了（退出码 %d）：%s" % (
                     outcome.code, ui.clip(hook.command, 60))))
             print()
             results.append(outcome)
@@ -497,6 +508,14 @@ class Feiyu:
         return getattr(self.backend, "tokens_total", 0) + self.subagent_tokens + side
 
     @property
+    def cache_rate(self) -> float | None:
+        """累计输入里按缓存价算的比例 一次请求都没发过就是 None """
+        total = getattr(self.backend, "tokens_in", 0)
+        if not total:
+            return None
+        return getattr(self.backend, "tokens_hit", 0) / total
+
+    @property
     def context(self) -> int:
         """当前对话占了多少上下文：最近一次请求的规模，加上之后追加进来还没发过的 """
         return getattr(self.backend, "tokens_context", 0) + self._pending
@@ -514,8 +533,20 @@ class Feiyu:
 
     def reset(self) -> None:
         self.backend.reset()
-        self._reads.clear()
+        self._forget_history()
         self._pending = 0
+
+    def undo(self) -> str | None:
+        """退掉最近一次写文件的改动 只退 write_file / edit_file 的，bash 改的看不见 """
+        said = self.toolbox.undo()
+        if said:
+            self._undone.append(said)
+        return said
+
+    def _forget_history(self) -> None:
+        """历史被整体换掉时调：登记过的那些 id 指向的消息已经不存在了 """
+        self._reads.clear()
+        self._aging.clear()
 
     @property
     def model(self) -> str:
@@ -542,8 +573,10 @@ class Feiyu:
                 fresh.tokens_context = old.tokens_context
             else:
                 # 两种后端的 messages 结构不通用，历史丢了，登记的 id 也就没意义
-                self._reads.clear()
+                self._forget_history()
             fresh.tokens_total = old.tokens_total
+            fresh.tokens_in = old.tokens_in
+            fresh.tokens_hit = old.tokens_hit
             fresh.cost = old.cost
             fresh.priced = old.priced
         self.backend = fresh
@@ -605,6 +638,11 @@ class Feiyu:
         blocked, note = self._before_prompt(user_message)
         if blocked:
             return note
+        if self._undone:
+            # 它上一轮以为改成了的东西已经被退掉，不说的话它接着按改完的状态往下推
+            note += ("\n\n（用户用 /undo 退掉了你的改动：%s 文件已经是改动之前的内容，"
+                     "要再动它先重新读一遍 ）" % "；".join(self._undone))
+            self._undone = []
         self.backend.add_user_message(user_message + note)
         rounds = 0
         nudged = False      # 清单没做完只提醒一次，提醒到底会转不出来
@@ -658,6 +696,8 @@ class Feiyu:
 
             self.trace.write("turn", round=rounds, tokens=self.context,
                              cost=self.cost, truncated=turn.truncated or None,
+                             input=getattr(self.backend, "last_in", 0),
+                             hit=getattr(self.backend, "last_hit", 0),
                              calls=[c.name for c in turn.tool_calls] or None)
             if turn.truncated:
                 # 撞上限不只是"话说了半截"：工具参数是流式拼的 JSON，断在中间
@@ -744,9 +784,11 @@ class Feiyu:
         b.messages = data["messages"]
         # 捞回来的历史里，那些 id 我们没登记过；Watcher 也是一张白纸，
         # 隔了一个会话的内容本来就该重读
-        self._reads.clear()
+        self._forget_history()
         b.tokens_total = int(data.get("tokens_total") or 0)
         b.tokens_context = int(data.get("tokens_context") or 0)
+        b.tokens_in = int(data.get("tokens_in") or 0)
+        b.tokens_hit = int(data.get("tokens_hit") or 0)
         b.cost = float(data.get("cost") or 0.0)
         b.priced = bool(data.get("priced", True))
         self._refresh_system()
@@ -767,7 +809,7 @@ class Feiyu:
         self.backend.tokens_context = 0
         self._pending = 0
         # 历史整个换成了摘要，之前登记的那些 id 在历史里已经不存在
-        self._reads.clear()
+        self._forget_history()
         return summary
 
     def changes(self) -> str:
@@ -1120,6 +1162,7 @@ class Feiyu:
         """
         if self.backend is None:
             return
+        self._age(calls, outputs)
         ok = {o.id for o in outputs if not o.is_error}
         for call in calls:
             if call.id not in ok or not isinstance(call.input, dict):
@@ -1140,6 +1183,27 @@ class Feiyu:
                 self._reads.setdefault(key, []).append(call.id)
             elif call.name in VERIFY_AFTER:
                 self._expire(key, self._stale_read(shown, "这个文件后来被改过"))
+
+    def _age(self, calls, outputs: list[ToolOutput]) -> None:
+        """bash / job 的长输出登记下来，过了 AGE_ROUNDS 批就只留开头 出错的也登记：
+        六轮之前的报错模型早就处理过了，留着全文只是每轮陪跑 """
+        self._batches += 1
+        sizes = {o.id: len(o.content) for o in outputs}
+        for call in calls:
+            if call.name not in AGE_TOOLS or sizes.get(call.id, 0) <= AGE_LIMIT:
+                continue
+            what = call.input.get("command") if isinstance(call.input, dict) else None
+            label = ("`%s`" % ui.clip(str(what), 60)) if what else call.name
+            self._aging.append((self._batches, call.id, (
+                "这里原本是 %s 的输出，已经过了 %d 轮，只留了开头 需要的话重新跑一次 "
+                % (label, AGE_ROUNDS))))
+        due = self._batches - AGE_ROUNDS
+        old = {cid: note for batch, cid, note in self._aging if batch <= due}
+        if old:
+            self._aging = [e for e in self._aging if e[0] > due]
+            done = history.age(self.backend.messages, old, keep=AGE_KEEP)
+            if done:
+                self.trace.write("age", count=done)
 
     def _key_of(self, shown) -> str | None:
         """按解析后的绝对路径认，模型写 ./x.py 和 x.py 指的是同一个文件 """

@@ -118,3 +118,25 @@ def shrink(messages, *, limit: int, keep: int) -> int:
             % (MARK, cut, slot.text[:keep], slot.text[-keep:]))
         done += 1
     return done
+
+
+def age(messages, notes: dict[str, str], *, keep: int) -> int:
+    """把这些调用的结果换成一句说明加开头几百字，返回换掉几条
+
+    用在 bash / job 这类"过了几轮就没人再看"的输出上：它们是历史里最多的一种
+    工具结果（实测占一半以上），却没有"同一个文件又读了一次"这种能判过期的信号，
+    只能按轮数老化 开头留一截：报错和命令回显通常在那儿，
+    模型想起"刚才那条命令说了什么"时够用；要全文就重新跑一次
+    """
+    if not notes:
+        return 0
+    done = 0
+    for slot in slots(messages):
+        note = notes.get(slot.id)
+        if note is None or slot.text.startswith(MARK):
+            continue
+        head = slot.text[:keep].rstrip()
+        slot.replace("%s %s\n\n%s\n…（其余 %d 字符已去掉）"
+                     % (MARK, note, head, len(slot.text) - len(head)))
+        done += 1
+    return done

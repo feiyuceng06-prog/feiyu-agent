@@ -754,9 +754,18 @@ class TestNativeHint(Base):
         second = self.box.run("bash", {"command": "cat a.txt"})
         self.assertNotIn("read_file 工具", second.content)
 
-    def test_带管道的不算(self):
+    def test_带管道和cd的复合查找也认(self):
+        """日志里模型写的几乎全是这种，只认裸命令的话提示从来没触发过 """
+        self.write("sub/a.txt", "hello\n")
+        out = self.box.run("bash", {"command": 'cd sub && grep -n "hello" a.txt | head -5'})
+        self.assertIn("search", out.content)
+        self.assertTrue(self.box.hinted)
+
+    def test_有一段在干别的就不算(self):
         self.write("a.txt", "hello\n")
-        out = self.box.run("bash", {"command": "cat a.txt | wc -l"})
+        out = self.box.run("bash", {"command": "cat a.txt > b.txt"})
+        self.assertNotIn("提示", out.content)
+        out = self.box.run("bash", {"command": "ls -la && cp a.txt c.txt"})
         self.assertNotIn("提示", out.content)
         self.assertFalse(self.box.hinted)
 
@@ -913,3 +922,55 @@ class TestBatchEdit(Base):
         joined = "\n".join(r[1] for r in rows)
         self.assertIn("a = 10", joined)
         self.assertIn("b = 20", joined)
+
+
+class TestUndo(Base):
+    """/undo 退掉 write_file / edit_file 最近一次改动 退回去的内容登记进 Watcher """
+
+    def test_覆盖后能退回(self):
+        self.write("a.py", "x = 1\n")
+        self.box.run("write_file", {"path": "a.py", "content": "x = 2\n"})
+        said = self.box.undo()
+        self.assertIn("a.py", said)
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "x = 1\n")
+        # 退回去之后它不用重读也能接着写：Watcher 记的是退回去的那版
+        out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 3"})
+        self.assertFalse(out.is_error)
+
+    def test_新建的退掉就是删掉(self):
+        self.box.run("write_file", {"path": "new.py", "content": "y = 1\n"})
+        self.assertTrue((self.root / "new.py").exists())
+        self.assertIn("删掉", self.box.undo())
+        self.assertFalse((self.root / "new.py").exists())
+
+    def test_连着退_按倒序(self):
+        self.write("a.py", "v1\n")
+        self.box.run("edit_file", {"path": "a.py", "old_str": "v1", "new_str": "v2"})
+        self.box.run("edit_file", {"path": "a.py", "old_str": "v2", "new_str": "v3"})
+        self.box.undo()
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "v2\n")
+        self.box.undo()
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "v1\n")
+        self.assertIsNone(self.box.undo())
+
+    def test_被拦下的写不进栈(self):
+        self.write("a.py", "重要", seen=False)
+        self.box.run("write_file", {"path": "a.py", "content": "新的"})
+        self.assertIsNone(self.box.undo())
+
+    def test_写完又被外部改过就不退(self):
+        self.write("a.py", "v1\n")
+        self.box.run("edit_file", {"path": "a.py", "old_str": "v1", "new_str": "v2"})
+        (self.root / "a.py").write_text("用户改的\n", encoding="utf-8")
+        import os
+        os.utime(self.root / "a.py", (1, 1))
+        said = self.box.undo()
+        self.assertIn("又被改过", said)
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "用户改的\n")
+        self.assertTrue(self.box.undo_stack)     # 没退，留在栈里
+
+    def test_追加也能退(self):
+        self.write("a.py", "one\n")
+        self.box.run("write_file", {"path": "a.py", "content": "two\n", "append": True})
+        self.box.undo()
+        self.assertEqual((self.root / "a.py").read_text(encoding="utf-8"), "one\n")

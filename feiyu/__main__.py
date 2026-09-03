@@ -57,6 +57,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # 主题要在画任何东西之前生效，欢迎框是打进 scrollback 的，之后换不了
+    ui.set_theme(keys.theme() or "default")
     workspace = Path(args.workspace).resolve()
     if not workspace.is_dir():
         print(f"错误：{workspace} 不是一个目录", file=sys.stderr)
@@ -220,6 +222,8 @@ def main() -> int:
                 print(_allow(arg))
             elif cmd == "/style":
                 print(_style(agent, arg))
+            elif cmd == "/theme":
+                print(_theme(arg))
             elif cmd == "/verify":
                 print(_verify(agent, arg))
             elif cmd == "/review":
@@ -236,6 +240,11 @@ def main() -> int:
                 print(_helper(agent, arg))
             elif cmd == "/jobs":
                 print(_jobs(agent, arg))
+            elif cmd == "/undo":
+                said = agent.undo()
+                print(ui.notice(said + "（下一句话时会告诉它）") if said
+                      else ui.warn("没有可退的改动 只能退 write_file / edit_file 写的，"
+                                   "它用 bash 改的文件要自己用 git 恢复"))
             else:
                 print(ui.error(f"未知命令 {cmd}，输入 /help 看可用命令"))
             print()
@@ -498,6 +507,23 @@ def _style(agent: Feiyu, arg: str) -> str:
     return "\n".join(rows)
 
 
+def _theme(arg: str) -> str:
+    if arg:
+        if not ui.set_theme(arg):
+            return ui.error("没有 %s 这个主题，可选：%s" % (arg, "、".join(ui.THEMES)))
+        keys.set_theme(arg)
+        return ui.notice("界面主题已切到 %s 上面已经画出来的不会重画，从下一条开始生效 "
+                         % ui.THEMES[arg]["label"])
+    rows = []
+    for key, spec in ui.THEMES.items():
+        tick = ui.paint("brown", " ●") if key == ui.THEME else "  "
+        name = ui.bold(key.ljust(12)) if key == ui.THEME else ui.paint("grey", key.ljust(12))
+        rows.append("   " + tick + " " + name + ui.paint("grey", spec["label"]))
+    rows.append("")
+    rows.append(ui.notice("/theme <名字> 切换 只换配色和记号，布局不动 "))
+    return "\n".join(rows)
+
+
 def _help() -> str:
     rows = [ui.notice("命令")]
     for cmd, desc in ui.SLASH.items():
@@ -713,23 +739,40 @@ def _cost(agent: Feiyu, workspace) -> str:
         return ui.notice("最近七天这个目录没有记录 日志在 " + trace.DIR)
     rows = [ui.notice("最近七天 · 这个目录 · 按任务")]
     total_tokens = total_cost = 0.0
+    total_in = total_hit = 0
     priced = False
     import time as _time
     for run in sorted(runs.values(), key=lambda r: r["start"])[-10:]:
         when = _time.strftime("%m-%d %H:%M", _time.localtime(run["start"]))
         money = pricing.yuan(run["cost"]) if run["priced"] else "—"
-        task = ui.clip(run["task"] or "（交互）", 34)
-        rows.append("   " + ui.paint("grey", "%s  %-36s %5s轮 %7s %9s" % (
-            when, task, run["turns"], ui.tokens(run["tokens"]), money)))
+        task = ui.clip(run["task"] or "（交互）", 30)
+        rows.append("   " + ui.paint("grey", "%s  %-32s %4s轮 %7s %5s %9s" % (
+            when, task, run["turns"], ui.tokens(run["tokens"]),
+            _hit_rate(run["hit"], run["input"]), money)))
         total_tokens += run["tokens"]
         total_cost += run["cost"]
+        total_in += run["input"]
+        total_hit += run["hit"]
         priced = priced or run["priced"]
-    rows += ["", "   " + ui.bold("合计  %s  %s" % (
-        ui.tokens(int(total_tokens)), pricing.yuan(total_cost) if priced else "未配价格"))]
+    rows += ["", "   " + ui.bold("合计  %s  %s  缓存命中 %s" % (
+        ui.tokens(int(total_tokens)), pricing.yuan(total_cost) if priced else "未配价格",
+        _hit_rate(total_hit, total_in)))]
     if agent.ready and agent.tokens:
-        rows.append("   " + ui.paint("grey", "本次会话 %s" % ui.tokens(agent.tokens)))
-    rows += ["", ui.notice("完整日志 %s · FEIYU_NO_LOG=1 可以关掉记录" % trace.DIR)]
+        b = agent.backend
+        seen, hit = getattr(b, "tokens_in", 0), getattr(b, "tokens_hit", 0)
+        rows.append("   " + ui.paint("grey", "本次会话 %s · 缓存命中 %s" % (
+            ui.tokens(agent.tokens), _hit_rate(hit, seen))))
+        if seen > 20000 and not hit:
+            rows.append("   " + ui.paint("grey",
+                "一次都没命中：这个接口不缓存，或者不回报命中数 "
+                "每轮重发的历史都按原价算，长任务的开销主要在这儿"))
+    rows += ["", ui.notice("缓存命中是重发的历史里按缓存价算的那部分，高就说明长任务不贵")]
+    rows += [ui.notice("完整日志 %s · FEIYU_NO_LOG=1 可以关掉记录" % trace.DIR)]
     return "\n".join(rows)
+
+
+def _hit_rate(hit: int, total: int) -> str:
+    return ("%d%%" % round(100 * hit / total)) if total else "—"
 
 
 def _piped(agent: Feiyu) -> int:

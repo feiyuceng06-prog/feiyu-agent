@@ -296,6 +296,80 @@ def check_missing(root, answer):
     return True, ""
 
 
+# ---- 11. 长任务：跨六个文件改名，还要动测试和文档 ----
+# 日志里出事的全是三四十轮的长任务，前十题几轮就完，测不到那种情况
+# 这题失败时一眼能看出漏了哪个文件；配合 run.py 记的上下文大小，能看出历史瘦身管不管用
+
+LONG_MODULES = {
+    "store.py": '''def fetch_record(key):
+    return {"key": key}
+''',
+    "api.py": '''from store import fetch_record
+
+
+def handle(key):
+    return fetch_record(key)["key"]
+''',
+    "cli.py": '''from store import fetch_record
+
+
+def main(key):
+    print(fetch_record(key))
+''',
+    "report.py": '''from store import fetch_record
+
+
+def summarize(keys):
+    return [fetch_record(k)["key"] for k in keys]
+''',
+    "cache.py": '''import store
+
+
+def cached(key):
+    return store.fetch_record(key)
+''',
+    "test_all.py": '''import unittest
+
+import api
+import cache
+import report
+from store import fetch_record
+
+
+class T(unittest.TestCase):
+    def test_fetch(self):
+        self.assertEqual(fetch_record("a")["key"], "a")
+
+    def test_api(self):
+        self.assertEqual(api.handle("b"), "b")
+
+    def test_report(self):
+        self.assertEqual(report.summarize(["c", "d"]), ["c", "d"])
+
+    def test_cache(self):
+        self.assertEqual(cache.cached("e")["key"], "e")
+''',
+    "README.md": '''# demo
+
+调 `fetch_record(key)` 拿一条记录 
+''',
+}
+
+
+def setup_long(root):
+    for name, body in LONG_MODULES.items():
+        (root / name).write_text(body, encoding="utf-8")
+
+
+def check_long(root, answer):
+    for name in LONG_MODULES:
+        if "fetch_record" in _text(root, name):
+            return False, "%s 里还有 fetch_record" % name
+    if "load_record" not in _text(root, "README.md"):
+        return False, "README 没改"
+    return _ran(_run(root, "-m", "unittest", "test_all"), "改完测试没过")
+
+
 TASKS = [
     ("改名", setup_rename, "把 calc.py 里的 sub 函数改名成 minus，别动别的函数", check_rename),
     ("修 bug", setup_bug, "test_lib.py 跑不过，修好 lib.py 让它全绿", check_bug),
@@ -315,4 +389,7 @@ TASKS = [
      "给 s.py 做三件事：给 greet 加 docstring、加一个 farewell(name) 函数、"
      "最后跑一下确认两个函数都能用", check_multi),
     ("文件不存在", setup_missing, "把 nowhere.py 里的 foo 改成 bar", check_missing),
+    ("长任务", setup_long,
+     "把 fetch_record 改名成 load_record：所有用到它的模块、测试、README 都要改 "
+     "每改完一个文件都跑一遍 python -m unittest test_all 确认没弄坏，最后再跑一次总结", check_long),
 ]

@@ -101,6 +101,7 @@ def summarize(rows: list[dict]) -> dict:
             "run": row.get("run", "?"), "start": row.get("ts", 0), "end": row.get("ts", 0),
             "model": "", "tokens": 0, "cost": 0.0, "priced": False,
             "turns": 0, "tools": 0, "denied": 0, "task": "",
+            "input": 0, "hit": 0,
         })
         run["end"] = max(run["end"], row.get("ts", 0))
         kind = row.get("kind")
@@ -110,6 +111,8 @@ def summarize(rows: list[dict]) -> dict:
         elif kind == "turn":
             run["turns"] += 1
             run["tokens"] += row.get("tokens", 0) or 0
+            run["input"] += row.get("input", 0) or 0
+            run["hit"] += row.get("hit", 0) or 0
             if row.get("cost") is not None:
                 run["cost"] += row["cost"]
                 run["priced"] = True

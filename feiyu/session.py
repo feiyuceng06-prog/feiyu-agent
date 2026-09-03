@@ -48,6 +48,8 @@ def save(workspace, agent) -> None:
         "todos": agent.toolbox.todos.items,
         "tokens_total": b.tokens_total,
         "tokens_context": b.tokens_context,
+        "tokens_in": getattr(b, "tokens_in", 0),
+        "tokens_hit": getattr(b, "tokens_hit", 0),
         "cost": b.cost,
         "priced": b.priced,
         "saved_at": time.time(),

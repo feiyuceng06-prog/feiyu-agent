@@ -29,6 +29,41 @@ BULLET = "⏺"
 ELBOW = "⎿"
 SPARK = "✻"
 FRAMES = "✳✻✽✶"
+CORNERS = "╭╮╰╯"
+DOT = "•"          # 列表记号
+LOGO = True        # 欢迎框里画不画 logo
+
+# 主题只换调色板和几个记号，布局一律不动 —— 布局是为可读性定的，不该随审美变
+# swiss：国际现代主义（瑞士风格）：黑白打底、一个红色强调、直角、方块记号、不画图
+THEMES = {
+    "default": {
+        "label": "默认",
+        "rgb": dict(_RGB),
+        "glyphs": {"BULLET": "⏺", "ELBOW": "⎿", "SPARK": "✻", "FRAMES": "✳✻✽✶",
+                   "CORNERS": "╭╮╰╯", "DOT": "•", "LOGO": True},
+    },
+    "swiss": {
+        "label": "国际现代主义",
+        "rgb": {"grey": "122;122;122", "blue": "24;24;24", "red": "213;0;0",
+                "amber": "213;0;0", "brown": "213;0;0"},
+        "glyphs": {"BULLET": "■", "ELBOW": "└", "SPARK": "■", "FRAMES": "▘▝▗▖",
+                   "CORNERS": "┌┐└┘", "DOT": "–", "LOGO": False},
+    },
+}
+THEME = "default"
+
+
+def set_theme(name: str) -> bool:
+    """切主题：改的是模块级常量，所有画东西的函数都是调用时才读它们 """
+    spec = THEMES.get(name)
+    if spec is None:
+        return False
+    global THEME
+    THEME = name
+    _RGB.clear()
+    _RGB.update(spec["rgb"])
+    globals().update(spec["glyphs"])
+    return True
 MAX_WIDTH = 100
 # 选项最多摆这么多个 再多就该拆成两个问题，也超出单键能舒服选的范围
 MAX_OPTIONS = 4
@@ -95,8 +130,8 @@ def _pad(text: str, inner: int) -> str:
 def box(lines: list[str]) -> str:
     """圆角框 传进来的行可以带颜色码 """
     inner = width() - 4
-    top = paint("grey", "╭" + "─" * (inner + 2) + "╮")
-    bottom = paint("grey", "╰" + "─" * (inner + 2) + "╯")
+    top = paint("grey", CORNERS[0] + "─" * (inner + 2) + CORNERS[1])
+    bottom = paint("grey", CORNERS[2] + "─" * (inner + 2) + CORNERS[3])
     bar = paint("grey", "│")
     body = [f"{bar} {_pad(clip(line, inner), inner)} {bar}" for line in lines]
     return "\n".join([top, *body, bottom])
@@ -180,7 +215,7 @@ def welcome(workspace, version: str, project: str) -> str:
         "",
         paint("grey", "⏎ 发送   \\⏎ 换行   esc 中断   /help 更多"),
     ]
-    art = logo_rows() if width() >= LOGO_MIN_WIDTH else []
+    art = logo_rows() if LOGO and width() >= LOGO_MIN_WIDTH else []
     if not art:
         return box(info)
 
@@ -302,6 +337,11 @@ def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool) 
                  "done": "grey", "doing": "brown", "pending": "grey"}.get(kind, "grey")
         lines.append("     " + paint(color, clip(text, width() - 5)))
     return "\n".join(lines)
+
+
+def hook_line(ok: bool, text: str) -> str:
+    """钩子的结果挂在工具结果那一级（⎿），不然它在两块输出之间悬着没有归属 """
+    return "  " + paint("grey" if ok else "red", f"{ELBOW}  {clip(text, width() - 6)}")
 
 
 def plan(text: str) -> str:
@@ -567,7 +607,7 @@ class MarkdownStream:
             if len(stripped) < 2 and not final and nl < 0:
                 return None
             if stripped[1:2] == " ":
-                push(" " * indent + "• ", "mark")
+                push(" " * indent + DOT + " ", "mark")
                 self._buf = buf[indent + 2:]
                 self._sol = False
                 return True
@@ -722,10 +762,11 @@ class Stream:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
-    # markdown 样式怎么上色 code 用主色，代码块整体压暗
+    # markdown 样式怎么上色 code 用主色；代码块正文不压暗——那是用户最要逐字看的东西，
+    # 左边那条灰竖线已经把它跟正文分开了（0.42.1 之前是灰的，浅底上对比度不够）
     _PAINT = {"bold": lambda t: bold(t),
               "code": lambda t: paint("brown", t),
-              "block": lambda t: paint("grey", t),
+              "block": lambda t: t,
               "quote": lambda t: paint("grey", t),
               "rule": lambda t: paint("grey", t)}
 
@@ -1126,6 +1167,7 @@ SLASH = {
     "/model": "查看或切换模型",
     "/key": "添加 / 查看 / 删除模型配置",
     "/style": "查看或切换回答风格",
+    "/theme": "界面主题：default / swiss（国际现代主义）",
     "/mode": "切换权限模式：默认 / 自动 / 计划 / 只读",
     "/allow": "查看或添加权限规则",
     "/verify": "查看或设置改完自动跑的校验命令",
@@ -1135,6 +1177,7 @@ SLASH = {
     "/hooks": "看在哪些时机会跑哪些外部命令",
     "/sandbox": "bash 沙箱：off / workspace / strict",
     "/jobs": "看 / 停掉挂在后台跑的命令",
+    "/undo": "退掉它最近一次写文件的改动，可以连着退",
     "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
@@ -1190,8 +1233,9 @@ class InputBox:
                     for name, desc in SLASH.items():
                         if name.startswith(text):
                             yield Completion(name, start_position=-len(text), display_meta=desc)
-                elif cmd in ("/style", "/mode") and " " not in arg:
-                    pool = STYLE_NAMES if cmd == "/style" else MODE_NAMES
+                elif cmd in ("/style", "/mode", "/theme") and " " not in arg:
+                    pool = {"/style": STYLE_NAMES, "/mode": MODE_NAMES,
+                            "/theme": list(THEMES)}[cmd]
                     for name in pool:
                         if name.startswith(arg):
                             yield Completion(name, start_position=-len(arg))
@@ -1309,11 +1353,11 @@ class InputBox:
         # 必须用 visible()：status 里可能带颜色码，get_cwidth 会把转义序列算成可见宽度
         fill = w - 5 - visible(note)
         if not note or fill < 8:
-            return paint("grey", "╭" + "─" * (w - 2) + "╮")
-        return paint("grey", "╭" + "─" * fill + " " + note + " ─╮")
+            return paint("grey", CORNERS[0] + "─" * (w - 2) + CORNERS[1])
+        return paint("grey", CORNERS[0] + "─" * fill + " " + note + " ─" + CORNERS[1])
 
     def bottom_border(self) -> str:
-        return paint("grey", "╰" + "─" * (width() - 2) + "╯")
+        return paint("grey", CORNERS[2] + "─" * (width() - 2) + CORNERS[3])
 
     def ask(self) -> str:
         self.buffer.reset()

@@ -975,3 +975,24 @@ class TestPreviewOnce(Base):
         self.assertEqual(out.getvalue().count("- x = 1"), 1)
         self.assertEqual(out.getvalue().count("+ x = 2"), 1)
         self.assertIn("已修改 1 处", out.getvalue())
+
+
+class TestUndoNote(Base):
+    """/undo 之后下一句话要告诉模型，不然它接着按改完的状态往下推 """
+
+    def test_下一句带说明_只带一次(self):
+        (Path(self.tmp.name) / "a.py").write_text("x = 1\n", encoding="utf-8")
+        self.agent.toolbox.files.record(Path(self.tmp.name) / "a.py")
+        self.agent.toolbox.run("write_file", {"path": "a.py", "content": "x = 2\n"})
+        self.assertIn("a.py", self.agent.undo())
+        b = self.use([("好", [])])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.agent.send("继续")
+        self.assertIn("/undo", b.messages[1]["content"])
+        b = self.use([("好", [])])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.agent.send("再来")
+        self.assertNotIn("/undo", b.messages[1]["content"])
+
+    def test_没得退(self):
+        self.assertIsNone(self.agent.undo())

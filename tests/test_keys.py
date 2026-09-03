@@ -43,3 +43,18 @@ class TestHelper(unittest.TestCase):
         keys.set_helper("small")
         keys.remove("small")
         self.assertEqual(keys.helper(), "")
+
+
+class TestTheme(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        keys.STORE = os.path.join(self.tmp.name, "models.json")
+        keys.STATE = os.path.join(self.tmp.name, "state.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_记住主题(self):
+        self.assertEqual(keys.theme(), "")
+        keys.set_theme("swiss")
+        self.assertEqual(keys.theme(), "swiss")

@@ -113,6 +113,15 @@ def set_helper(name: str) -> None:
     _set_state(helper=name)
 
 
+def theme() -> str:
+    """界面主题 空串就是默认 """
+    return _state().get("theme") or ""
+
+
+def set_theme(name: str) -> None:
+    _set_state(theme=name)
+
+
 def learned_limit(name: str) -> int:
     """撞过墙之后记下来的上下文上限 0 表示没学过 """
     limits = _state().get("limits") or {}

@@ -84,6 +84,7 @@ Type `/` for completion:
 | `/allow` | Show or add permission rules |
 | `/sandbox` | bash sandbox: `off` / `workspace` / `strict` |
 | `/jobs` | Look at / stop background commands |
+| `/undo` | Revert its most recent file write; repeatable, and it is told on your next message |
 | `/hooks` | Show which external commands run, and when |
 | `/verify` | Show or set the command run automatically after edits |
 | `/review` | Have a model that never saw the process score the changes |
@@ -93,6 +94,7 @@ Type `/` for completion:
 | `/compact` | Squash the history into one summary to save context |
 | `/helper <name>` | Use a cheaper entry for side work (summaries, subagents, page digests); `/helper off` goes back to the main model |
 | `/style` | Answer style: `default` / `concise` / `explanatory` / `teaching` |
+| `/theme` | Interface theme: `default` / `swiss` (International Typographic Style: black and white, one red accent, square corners, block markers, no logo); remembered across launches |
 | `/clear` | Wipe the conversation and its saved session |
 | `/exit` | Quit |
 
@@ -243,7 +245,7 @@ On by default when `bubblewrap` is installed:
 
 **Shrinking the history**: every request resends the whole history, so one copy of a file sitting in there is paid for again on every later turn. Two mechanisms keep it down automatically: when a file is read again, or edited, the older copies in the history are replaced by a one-line note (the model wants the latest version anyway); and past the halfway mark, long tool outputs from earlier in the conversation keep only their head and tail. Measured on a "read three files, make two edits, re-read each to verify" task, the history went from 55k to 33k tokens. `read_file` without an explicit `limit` reads 1500 lines and tells the model how to continue. Re-running `search` / `list_files` with the same arguments folds the older result too.
 
-**Caching**: on anthropic, the system prompt, the tool table and the history carry cache breakpoints, so the resent part is billed at the cache rate (usually a tenth of the normal one). OpenAI-compatible endpoints cache server-side and need no declaration. A proxy that does not accept the field is detected and the request is retried without it rather than failing. That is where the hit count in the status bar comes from.
+**Caching**: on anthropic, the system prompt, the tool table and the history carry cache breakpoints, so the resent part is billed at the cache rate (usually a tenth of the normal one). OpenAI-compatible endpoints cache server-side and need no declaration. A proxy that does not accept the field is detected and the request is retried without it rather than failing. That is where the hit rate in `/cost` comes from.
 
 **Compaction**: tool results appended since the last request are estimated into the context up front (three characters per token), otherwise a big file read is only noticed by the 400 it causes. Only if it is still past 75% after that does it summarise the earlier conversation into a handover note and carry on, mid-task included. The limit defaults to 128k; `/key add` asks for the model's window (`"limit"` in `models.json`). Left blank, **one "input too long" error is enough for it to learn** the real limit of that model (the number in the error if there is one, otherwise the size of the last successful request), compact earlier next time, and show it in `/key`. An unrecognised 400 past 60% of the window is treated as overflow too. `/compact` does it on demand. A summary is lossy — the model has to restate everything — so shrinking is preferred as long as it holds.
 
@@ -261,14 +263,18 @@ feiyu --json-schema review.schema.json "check calc.py for bugs" > out.json
 
 **Logs**: one JSONL line per event in `~/.local/state/feiyu/logs/<date>.jsonl` (mode 600) — every tool call and its arguments, the permission verdict, timings, per-turn token usage, verification and review results. To work out why it did that odd thing an hour ago, filter by the `run` field. `FEIYU_NO_LOG=1` disables it.
 
-`/cost` totals the last seven days by task:
+`/cost` totals the last seven days by task; the second-to-last column is the cache hit rate:
 
 ```
-   08-27 00:14  fix error handling in parser.py     5 turns    8.2k     ¥0.031
-   08-27 09:02  add a --json flag to the CLI       12 turns   31.5k     ¥0.118
+   08-27 00:14  fix error handling in parser.py   5 turns    8.2k   71%    ¥0.031
+   08-27 09:02  add a --json flag to the CLI     12 turns   31.5k   84%    ¥0.118
 
-   total  39.7k  ¥0.149
+   total  39.7k  ¥0.149  cache hits 81%
 ```
+
+The hit rate is the share of resent history billed at the cache price. Every turn resends the whole history, so this number is what decides whether a long task is expensive: high means resending is nearly free; a flat 0 means the endpoint does not cache (or does not report it) and the cost of a long task is almost entirely resends.
+
+**The history slims itself down** rather than waiting for the compaction threshold: a file read again or edited has its older copy replaced by a one-line note; bash / job output older than six rounds keeps only its head; only above that come head-and-tail truncation and full summarisation. All of these swap the content of a tool result, never delete a message.
 
 ## Models
 

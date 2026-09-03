@@ -18,12 +18,13 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import files, images, jobs as jobs_mod, lsp, memory, sandbox, todo
+from . import files, images, jobs as jobs_mod, lsp, memory, permissions, sandbox, todo
 
 
 # read_file 不给 limit 时最多读这么多行 原来是"整份读进来"，
 # 而整份会一直留在历史里被每一轮重发：本仓库 tools.py 一次就是 16180 token
 READ_CAP = 1500
+UNDO_MAX = 30             # /undo 最多退这么多步 存的是整份文件，再多就该用 git 了
 
 # search 一次最多带多少行上下文 不封顶的话一句 context=200 就把整个文件拉进历史，
 # 而那正是 search 想省掉的事
@@ -933,7 +934,45 @@ class Toolbox:
         self.jobs = jobs_mod.Jobs()    # bash 挂到后台的命令
         self.vision = False            # 当前模型认不认图片，由 agent 按模型配置写进来
         self.hinted = False            # "这个用专用工具"只提醒一次，次次说会把它带跑偏
+        # (路径, 写之前的内容，新建的是 None) 只记 write_file / edit_file 的改动：
+        # bash 改的文件（sed -i、脚本）看不见，退不了，README 里说明了
+        self.undo_stack: list[tuple[Path, bytes | None]] = []
         self.lsp = lsp.Pool(self.root)  # 语言服务器，按需起、退出时杀
+
+    def _snapshot(self, target: Path) -> None:
+        """写之前把原样留一份，/undo 用 """
+        before = target.read_bytes() if target.is_file() else None
+        self.undo_stack.append((target, before))
+        del self.undo_stack[:-UNDO_MAX]
+
+    def undo(self) -> str | None:
+        """退掉最近一次 write_file / edit_file 的改动，返回一句说明；没得退返回 None
+        退回去的内容也登记进 Watcher：模型下一次写之前得先重读
+        """
+        if not self.undo_stack:
+            return None
+        target, before = self.undo_stack[-1]
+        try:
+            shown = str(target.relative_to(self.root))
+        except ValueError:
+            shown = str(target)
+        # 写完之后文件又被别人改过（用户、格式化工具、bash）就不退：退等于把那些改动盖掉，
+        # 跟 _check_fresh 拦的是同一种事故 符号链接也不碰，写进去的会落到链接指向的地方
+        if target.is_symlink() or (target.is_file() and self.files.stale(target)):
+            return "%s 在那次写入之后又被改过，不退了 要退就自己用 git 恢复" % shown
+        self.undo_stack.pop()
+        try:
+            if before is None:
+                if target.is_file():
+                    target.unlink()
+                self.files.forget(target)
+                return "删掉了新建的 %s" % shown
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(before)
+        except OSError as exc:
+            return "%s 退不回去：%s" % (shown, exc)
+        self.files.record(target, before)
+        return "%s 退回到改动之前的内容（%d 行）" % (shown, before.count(b"\n") + 1)
 
     def _resolve(self, path: str) -> Path:
         target = (self.root / path).resolve()
@@ -1204,6 +1243,7 @@ class Toolbox:
             blocked = self._check_fresh(target, args["path"])
             if blocked is not None:
                 return blocked
+        self._snapshot(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         content = args["content"]
         if args.get("append") and existed:
@@ -1251,6 +1291,7 @@ class Toolbox:
             total += count
             if note:
                 notes.append(where + note)
+        self._snapshot(target)
         target.write_text(updated, encoding="utf-8")
         self.files.record(target, updated.encode("utf-8"))
         head = (f"已编辑 {args['path']}，{len(edits)} 处改动、替换 {total} 处" if len(edits) > 1
@@ -1673,20 +1714,42 @@ def _ripgrep(regex: str, glob: str, root: Path, context: int = 0,
 _NATIVE = {"grep": "search", "rg": "search", "egrep": "search",
            "cat": "read_file", "head": "read_file", "tail": "read_file",
            "find": "list_files", "ls": "list_files", "tree": "list_files"}
-_SHELL_META = re.compile(r"[|&;<>`$]")
+# 接在查找命令后面只是筛一筛的，不改变"这条命令在找东西"的性质
+_FILTERS = {"head", "tail", "sort", "uniq", "wc", "cut", "tr", "echo", "pwd"}
 
 
 def _native_for(command: str) -> str:
-    """这条 bash 命令有没有对应的专用工具 有就返回工具名，没有返回空串 """
-    if _SHELL_META.search(command):
+    """这条 bash 命令有没有对应的专用工具 有就返回工具名，没有返回空串
+
+    按段看：日志里模型写的几乎全是 `cd x && grep -n foo *.py | head`、
+    `ls -la; cat a.py` 这种复合命令，只认单个裸命令的话提示一次都没触发过
+    每一段都是查找命令、筛选命令或 cd 才算；有一段在干别的（cp、写文件、跑脚本）
+    就不算——那些活 bash 是对的
+    """
+    if permissions._SUBSTITUTION.search(command) or "<<" in command:
         return ""
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return ""
-    if len(words) > 1 and words[0] == "git" and words[1] in ("status", "diff", "log", "commit"):
-        return "git"
-    return _NATIVE.get(words[0], "") if words else ""
+    found = ""
+    for segment in permissions.segments(command):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            return ""
+        if not words:
+            continue
+        head = words[0]
+        if head == "cd":
+            continue
+        if head == "git":
+            if len(words) > 1 and words[1] in ("status", "diff", "log", "commit"):
+                found = found or "git"
+                continue
+            return ""
+        native = _NATIVE.get(head)
+        if native:
+            found = found or native
+        elif head not in _FILTERS:
+            return ""
+    return found
 
 
 def _prune_web_cache() -> None:

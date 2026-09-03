@@ -2,7 +2,7 @@
 
 跑在终端里的编程 agent。约 4800 行 Python，无框架。
 
-verify: python -m unittest discover -s tests -t .
+verify: .venv/bin/python -m unittest discover -s tests -t .
 
 ## 结构
 
@@ -82,14 +82,15 @@ python -m unittest discover -s tests -t .
 （打真实接口、要花钱、有随机性）。两者不要混。
 
 ```bash
-python -m evals.run                  # 十题各跑一遍
+python -m evals.run                  # 十一题各跑一遍
 python -m evals.run -n 3             # 每题三遍，看稳定性
 python -m evals.run --only 改名 修bug  # 只跑几题
 python -m evals.run -m kimi-k2.6     # 换模型对比
 ```
 
-十道题覆盖：改名 / 修 bug（有测试盯着）/ 写测试 / 读懂后回答 / 跨文件改名 /
-别动不该动的 / 改完自己验证 / 在一堆文件里找定义 / 三件事一起 / 文件不存在时别硬编。
+十一道题覆盖：改名 / 修 bug（有测试盯着）/ 写测试 / 读懂后回答 / 跨文件改名 /
+别动不该动的 / 改完自己验证 / 在一堆文件里找定义 / 三件事一起 / 文件不存在时别硬编 /
+长任务（跨六个文件改名 + 测试 + README，每改一个跑一遍测试，十几轮起）。
 
 几条定下来的规矩：
 
@@ -106,7 +107,15 @@ python -m evals.run -m kimi-k2.6     # 换模型对比
 
 ## 验证方式
 
-改了 TUI **不要只跑单元断言**，必须看真实渲染：
+改了 TUI **不要只跑单元断言**，必须看真实渲染。夹具在 `dev/`（0.43.0 起入库，
+之前每次都要重写）：`dev/ui_runner.py` 挂假后端跑真主程序，`dev/ui_drive.py` 接 pty、
+喂键、回 CPR、用 pyte 回放、渲染成 PNG。跑法（pyte 不是项目依赖，装在 venv 里）：
+
+```bash
+python dev/ui_drive.py /tmp/shots --theme swiss --cols 80
+```
+
+夹具的几条要点：
 
 1. `pty.openpty()` 把整个进程接上去（`isatty()` 才为真）；
 2. **夹具要回应 CPR**：边读边喂 pyte，见到 `\x1b[6n` 就按 `screen.cursor` 回写
@@ -1096,6 +1105,47 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
 现在 `price` 里多一个可选的 `write`，`_as_rates` 有它就返回四元组，`pricing.cost` 没第四项
 就按输入价——**不内置 1.25 这个倍率**，跟不内置价格表同一个理由。`_charge` 多一个
 `write=` 关键字参数，只有 anthropic 的 `run_turn` 传它；`tokens_context` 照旧把它算进规模。
+
+## 0.43.0：主题、`/undo` 加固、界面两处
+
+- **主题只换调色板和记号，布局不动**（`ui.THEMES` / `set_theme()`）。`_RGB` 和
+  `BULLET` / `ELBOW` / `SPARK` / `FRAMES` / `CORNERS` / `DOT` / `LOGO` 都是模块级常量，
+  画东西的函数调用时才读，所以 `set_theme` 就地改 `_RGB` 加 `globals().update()` 即可。
+  `THEMES["default"]["rgb"]` 是 import 时拷的一份，切回来才一模一样。
+  存 `state.json` 的 `theme`，**`main()` 里在画任何东西之前 `set_theme`**——欢迎框是
+  scrollback，之后换不了。`swiss`（国际现代主义）：黑白打底、红色一个强调色（warn 和 error
+  同色，只靠文字区分）、直角、`■` / `└` / `–`、不画 logo。
+- **代码块正文不再压灰**（`_PAINT["block"]`）：浅底上对比度不够，而代码是最要逐字看的。
+  左边灰竖线已经够区分。引用仍是灰的。
+- **钩子结果挂到 `⎿` 那一级**（`ui.hook_line`），原来 `ui.notice` 打出来悬在两块输出之间。
+- **`/undo` 写完之后文件又被改过就不退**（`files.stale()`），退等于盖掉那些改动，跟
+  `_check_fresh` 拦的是同一种事故；符号链接也不碰。不退的那条留在栈里。
+
+## 0.42.0：拿四天日志定的五处
+
+看了 47 次运行、304 次工具调用的 trace，按证据改：
+
+- **bash / job 输出按轮数老化**（`history.age` + `Feiyu._age`）。bash 占 304 次里的 150 次，
+  是历史里最多的一种工具结果，但 `expire()` 只认「同一个文件又读了一次」，bash 没有这种
+  信号，一直躺到 `TRIM_RATIO` 才动——最大那次任务 40 轮、上下文 72k，trim 只触发过一次。
+  现在超过 `AGE_LIMIT` 字符的登记下来，过了 `AGE_ROUNDS` 批只留开头 `AGE_KEEP`。
+  出错的也登记：六轮之前的报错早处理过了。登记表跟 `_reads` 一起在 `_forget_history()` 清。
+- **`/cost` 显示缓存命中率**（`Billing.tokens_in / tokens_hit`，trace 的 turn 行带 `input` / `hit`）。
+  每轮重发整段历史，长任务贵不贵全看这个数，而且它跟折叠是对冲的：命中率高的话
+  折叠中段消息反而作废后面的缓存前缀。先把数亮出来，再决定折叠要不要更狠。
+  旁路请求（`context=False`）也计入累计，`last_*` 只记主对话那次。
+- **`/undo`**（`Toolbox.undo_stack` + `Feiyu.undo`）。只记 `write_file` / `edit_file`，
+  bash 改的看不见——报错里要说明。写前快照放在 `_check_fresh` 之后，被拦下的不进栈。
+  退回去的内容要 `files.record`，不然它下一次写又被「没读过」拦下。
+  **下一句话时必须告诉模型**（`_undone` 并进 user 消息）：不说的话它接着按改完的状态往下推。
+- **bash 提示按段识别**（`_native_for` 走 `permissions.segments()`）。0.32.0 那版只认单个裸命令，
+  日志里模型写的几乎全是 `cd x && grep … | head` 这种复合命令，四天里提示一次都没触发过，
+  search 只用了 3 次。现在每段都是查找 / 筛选 / cd 才算，有一段在干别的就不算。
+- **题库加「长任务」题**，`run.py` 记收尾时的上下文大小并进 `--compare`。
+  日志里出事的全是三四十轮的任务，前十题几轮就完，测不到。
+
+顺带：`verify:` 改成 `.venv/bin/python`——系统 python 没装 prompt_toolkit，
+裸 `python` 跑出来是 23 个 ImportError，不是代码问题。
 
 ## 子 agent 有 `symbol` 了（0.41.0）
 
