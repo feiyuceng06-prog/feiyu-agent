@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from . import hooks as hooks_mod
+from . import mcp as mcp_mod
 from . import keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
@@ -98,7 +99,14 @@ def main() -> int:
         "%s 里有 %d 条项目钩子，它们会在这台机器上执行 要启用吗？" % (hooks_mod.PROJECT, count))
     if args.mode:
         agent.set_mode(args.mode)      # 一律走 set_mode：它要重拼系统提示
+    # 项目 MCP 配置同理：仓库里带下来的命令，第一次见到必须让用户点头
+    agent.approve_mcp = lambda path, names: ui.ask_yes_no(
+        "%s 里配置了 MCP 服务器 %s，它们会在这台机器上启动 要启用吗？" % (
+            mcp_mod.PROJECT, "、".join(names)))
     note = agent.load_hooks()
+    mcp_note = agent.load_mcp()
+    if mcp_note:
+        print(ui.notice(mcp_note), file=sys.stderr)
     # 带了上次的半截进度就说一声 不说的话下次开工它突然提起一件旧事，
     # 用户不知道这话是哪来的
     if progress.as_prompt(agent.resumed):
@@ -240,6 +248,8 @@ def main() -> int:
                 print(_helper(agent, arg))
             elif cmd == "/jobs":
                 print(_jobs(agent, arg))
+            elif cmd == "/mcp":
+                print(_mcp(agent))
             elif cmd == "/undo":
                 said = agent.undo()
                 print(ui.notice(said + "（下一句话时会告诉它）") if said
@@ -507,6 +517,28 @@ def _style(agent: Feiyu, arg: str) -> str:
     return "\n".join(rows)
 
 
+def _mcp(agent: Feiyu) -> str:
+    reg = agent.toolbox.mcp
+    if not reg.servers and not reg.errors:
+        return ui.notice("没有配置 MCP 服务器 写在 %s 或项目的 %s 里，格式跟 Claude Code 一样："
+                         '{"mcpServers": {"名字": {"command": "…", "args": […]}}}'
+                         % (mcp_mod.GLOBAL, mcp_mod.PROJECT))
+    rows = [ui.notice("MCP 服务器")]
+    for name, server in reg.servers.items():
+        alive = server.proc.poll() is None
+        rows.append("   " + (ui.bold(name) if alive else ui.paint("red", name + "（已退出）"))
+                    + ui.paint("grey", "  " + " ".join(server.argv)))
+        for tool in server.tools:
+            tag = " 只读" if mcp_mod.safe_name(name, tool["name"]) in reg.readonly else ""
+            desc = ui.clip(" ".join(str(tool.get("description") or "").split()), ui.width() - 40)
+            rows.append("      " + ui.paint("brown", tool["name"]) + ui.paint("grey", tag + "  " + desc))
+    for name, why in reg.errors.items():
+        rows.append("   " + ui.paint("red", name) + ui.paint("grey", "  没起来：" + why))
+    rows.append("")
+    rows.append(ui.notice("规则写 Mcp(服务器:*) 放行整个服务器；改了配置要重启 feiyu"))
+    return "\n".join(rows)
+
+
 def _theme(arg: str) -> str:
     if arg:
         if not ui.set_theme(arg):
@@ -542,6 +574,7 @@ def _finish(agent: Feiyu, tracer, code: int) -> int:
     # 后台命令跟着 feiyu 一起收摊 留着的话用户关掉窗口之后那些进程还在跑，
     # 而他已经没有任何句柄能找到它们了
     agent.toolbox.lsp.close()
+    agent.toolbox.mcp.close()
     left = agent.toolbox.jobs.running()
     if left:
         agent.toolbox.jobs.kill_all()

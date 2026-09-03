@@ -37,6 +37,15 @@ RULE_NAME = {
     "git": "Git",
     "symbol": "Symbol",
 }
+# MCP 工具的名字是 mcp_<服务器>_<工具>，规则一律写 Mcp(...)
+# 匹配文本是"服务器 工具"，由 Registry 在载入时填进来（服务器名里可能带下划线，从工具名上切不准）
+MCP_SUBJECTS: dict[str, str] = {}
+
+
+def rule_name(tool: str) -> str:
+    if tool.startswith("mcp_"):
+        return "Mcp"
+    return RULE_NAME.get(tool, tool)
 
 # 出厂放行的：只暴露路径和版本库状态，读不到任意文件内容
 # 刻意不含 cat/head/tail/grep —— 那几个能读工作区外的任何文件，
@@ -152,6 +161,8 @@ def subject(tool: str, args: dict) -> str:
     if tool == "git":
         # 规则按 action 写：Git(diff:*) 放行所有 diff，Git(commit:*) 放行提交
         return " ".join([str(args.get("action") or "")] + [str(p) for p in args.get("paths") or []])
+    if tool.startswith("mcp_"):
+        return MCP_SUBJECTS.get(tool, tool[4:])
     for key in ("path", "pattern", "regex", "url"):
         if args.get(key):
             return str(args[key])
@@ -163,7 +174,7 @@ def matches(rule: str, tool: str, text: str) -> bool:
     if not hit:
         return False
     who, pattern = hit.group(1), hit.group(2).strip()
-    if who.lower() != RULE_NAME.get(tool, tool).lower():
+    if who.lower() != rule_name(tool).lower():
         return False
     if pattern in ("*", ""):
         return True
@@ -199,9 +210,11 @@ def verdict(tool: str, args: dict) -> str:
 
 def suggest(tool: str, args: dict) -> str:
     """按下"永久允许"时该写哪条规则 bash 取命令的头一两个词 """
-    name = RULE_NAME.get(tool, tool)
+    name = rule_name(tool)
     if tool == "git":
         return "%s(%s:*)" % (name, args.get("action") or "*")
+    if tool.startswith("mcp_"):
+        return "%s(%s:*)" % (name, subject(tool, args).split(" ")[0] or "*")
     if tool != "bash":
         return "%s(*)" % name
     parts = segments(args.get("command") or "")

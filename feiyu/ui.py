@@ -192,6 +192,8 @@ def mode_tag(mode: str, label: str) -> str:
 
 
 def tool_label(name: str) -> str:
+    if name.startswith("mcp_"):
+        return "MCP " + name[4:]
     return _LABEL.get(name, name)
 
 
@@ -279,9 +281,17 @@ _HEADLINE_ARG = {
 }
 
 
+def _headline_key(name: str, args: dict) -> str | None:
+    key = _HEADLINE_ARG.get(name)
+    if key is None and name.startswith("mcp_"):
+        # 外部工具的参数名事先不知道，拿第一个字符串参数当作用对象
+        key = next((k for k, v in args.items() if isinstance(v, str) and v), None)
+    return key
+
+
 def tool_target(name: str, args: dict) -> str:
     """这次调用作用在什么上 并行时几条结果一起出来，光看 summary 分不清谁是谁 """
-    key = _HEADLINE_ARG.get(name)
+    key = _headline_key(name, args)
     return str(args.get(key, "")).replace("\n", " ") if key else ""
 
 
@@ -311,8 +321,8 @@ def tool_progress(name: str, partial: str) -> str:
 
 
 def tool_call(name: str, args: dict) -> str:
-    label = _LABEL.get(name, name)
-    key = _HEADLINE_ARG.get(name)
+    label = tool_label(name)
+    key = _headline_key(name, args)
     head = args.get(key, "") if key else ""
     head = clip(str(head).replace("\n", " "), max(8, width() - visible(label) - 6))
     tail = paint("grey", "(%s)" % head) if head else ""    # 没有参数就别留一对空括号
@@ -963,10 +973,12 @@ def ask_yes_no(question: str) -> bool:
 
 def ask_text(name: str, args: dict) -> str:
     """确认时问什么 —— 要认得出对象 光问「要执行 Update 吗」等于让人盲签 """
-    what = str(args.get(_HEADLINE_ARG.get(name, ""), "")).replace("\n", " ")
+    what = str(args.get(_headline_key(name, args) or "", "")).replace("\n", " ")
     verb = {"write_file": "写", "edit_file": "改", "read_file": "读",
             "web_fetch": "抓", "remember": "记住", "bash": "执行",
             "git": "git"}.get(name, "执行")
+    if name.startswith("mcp_"):
+        verb = "调 " + tool_label(name) + " "
     return "要%s吗？" % verb if not what else "要%s %s 吗？" % (verb, what)
 
 
@@ -1177,6 +1189,7 @@ SLASH = {
     "/hooks": "看在哪些时机会跑哪些外部命令",
     "/sandbox": "bash 沙箱：off / workspace / strict",
     "/jobs": "看 / 停掉挂在后台跑的命令",
+    "/mcp": "看接入了哪些 MCP 服务器和它们的工具",
     "/undo": "退掉它最近一次写文件的改动，可以连着退",
     "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",

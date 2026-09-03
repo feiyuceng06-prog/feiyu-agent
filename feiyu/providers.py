@@ -196,6 +196,9 @@ class AnthropicBackend(Billing):
     def set_system(self, text: str) -> None:
         self.system = text
 
+    def set_tools(self, schemas: list[dict]) -> None:
+        self.tools = list(schemas)
+
     def transcript(self) -> str:
         rows = []
         for msg in self.messages:
@@ -403,6 +406,9 @@ class OpenAICompatBackend(Billing):
             self.messages[0] = {"role": "system", "content": text}
         else:
             self.messages.insert(0, {"role": "system", "content": text})
+
+    def set_tools(self, schemas: list[dict]) -> None:
+        self.tools = _to_openai_tools(schemas)
 
     def transcript(self) -> str:
         rows = []

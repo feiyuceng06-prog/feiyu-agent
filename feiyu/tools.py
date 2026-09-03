@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import files, images, jobs as jobs_mod, lsp, memory, permissions, sandbox, todo
+from . import files, images, jobs as jobs_mod, lsp, mcp, memory, permissions, sandbox, todo
 
 
 # read_file 不给 limit 时最多读这么多行 原来是"整份读进来"，
@@ -938,6 +938,7 @@ class Toolbox:
         # bash 改的文件（sed -i、脚本）看不见，退不了，README 里说明了
         self.undo_stack: list[tuple[Path, bytes | None]] = []
         self.lsp = lsp.Pool(self.root)  # 语言服务器，按需起、退出时杀
+        self.mcp = mcp.Registry(self.root)  # 外部 MCP 服务器的工具，启动时载入
 
     def _snapshot(self, target: Path) -> None:
         """写之前把原样留一份，/undo 用 """
@@ -981,6 +982,10 @@ class Toolbox:
         return target
 
     def run(self, name: str, args: dict) -> ToolResult:
+        if name in self.mcp.tools:
+            text, failed = self.mcp.call(name, args)
+            first = next((l.strip() for l in text.splitlines()[2:] if l.strip()), "") if not failed else text
+            return ToolResult(text, is_error=failed, summary=_peek_line(first))
         try:
             handler = getattr(self, f"_tool_{name}")
         except AttributeError:
@@ -1750,6 +1755,11 @@ def _native_for(command: str) -> str:
         elif head not in _FILTERS:
             return ""
     return found
+
+
+def _peek_line(text: str, limit: int = 80) -> str:
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else "（没有内容）"
+    return line if len(line) <= limit else line[:limit - 1] + "…"
 
 
 def _prune_web_cache() -> None:

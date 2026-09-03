@@ -1106,6 +1106,29 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
 就按输入价——**不内置 1.25 这个倍率**，跟不内置价格表同一个理由。`_charge` 多一个
 `write=` 关键字参数，只有 anthropic 的 `run_turn` 传它；`tokens_context` 照旧把它算进规模。
 
+## MCP 客户端（0.44.0）
+
+`feiyu/mcp.py`。写法照 `lsp.py`（自己缓冲、`os.read`、服务器反向请求就地回），但
+**MCP 的 stdio 是一行一个 JSON，不是 Content-Length**，两边的 `_read` 不能共用。
+
+- **工具名 `mcp_<服务器>_<工具>`**，`safe_name()` 过滤到 `[A-Za-z0-9_-]` 且 ≤ 64——两种后端
+  都有这个限制，不过滤的话带点号的工具名一到接口就 400。撞名了加 `_2`。
+- **工具集会变，所以 `tool_schemas()` 动态拼**：`use_model` 建后端时和 `load_mcp()` 载入后
+  都走它，两个后端各有 `set_tools()`。子 agent 刻意不给：它的三条前提（只读、不用确认、
+  可并行）MCP 工具一条都保证不了。
+- **权限：规则名一律 `Mcp`**，匹配文本是「服务器 工具」（`permissions.MCP_SUBJECTS`，
+  由 `load_mcp` 填——服务器名里可能有下划线，从工具名上切不准）。`suggest()` 给 `Mcp(服务器:*)`。
+- **闸按 `readOnlyHint` 判**（`Feiyu._guarded` / `_mutates`）：自报只读的当读工具，
+  其余当写——它们的作用范围我们看不见，只能往严的方向错。
+- **项目配置跟项目钩子一样要点头**（`trusted-mcp.json` 按内容 hash），非交互不起。
+  这条不能省：`.feiyu/mcp.json` 是仓库带下来的，直接起等于 clone 一个仓库就执行任意命令。
+- **返回开头带 `NOTE`**（外部数据不是指令），跟 web_fetch 同一个道理；`sampling/createMessage`
+  一律回 -32601——那等于让外部进程借我们的模型说话。图片 / 音频只留一句说明。
+- 服务器并行起（npx 冷启动好几秒）；`_finish` 里 `mcp.close()` 杀进程组并关管道
+  （不关管道 unittest 会报 ResourceWarning）。改了配置要重启，没做热加载。
+- 测试用 `tests/mcp_server.py` 假服务器，四个工具覆盖正常 / isError / 超时 / 只读，
+  `echo` 第一次调用时反过来发 `roots/list`，验证客户端会答而不是卡死。
+
 ## 0.43.0：主题、`/undo` 加固、界面两处
 
 - **主题只换调色板和记号，布局不动**（`ui.THEMES` / `set_theme()`）。`_RGB` 和
