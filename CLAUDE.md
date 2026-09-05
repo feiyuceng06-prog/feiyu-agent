@@ -1432,6 +1432,28 @@ Python 走的是 stdin EOF 那条干净路径，看不到 traceback。非交互 
 盒子，小于 24px 就报错：**零尺寸的元素在截图里就是「不存在」，眼睛扫过去不会发现
 少了东西**，这类 bug 只能靠量。
 
+### 命令补全（0.50.3 修的三处）
+
+用户说「输入方面自动补全有问题」。拿 `web/dev/input.mjs` 敲**真按键**回放一遍
+（`Input.dispatchKeyEvent`，不是直接改 `input.value` —— 毛病全在 keydown 那一层，
+绕过按键等于没测），19 条里挂了 3 条：
+
+- **打完 `/mode auto` 一回车，参数被吃掉了。** `showPalette` 原来按
+  `typed.split(" ")[0]` 筛，于是 `/mode auto` 的 head 是 `/mode`，而
+  `"/model".startsWith("/mode")` 为真 —— 菜单开着且高亮在 `/model` 上，
+  回车走了「补全」那条路：输入框变成 `/model `，`auto` 无声丢掉，什么也没发出去。
+  改成按**整串**筛，外加打了空格就收起。
+- **回车的含义要看用户有没有自己挑过**（`palMoved`）。没挑过 = 发送我打的这句，
+  用 ↑↓ 挑过 = 用我选的那条。不分这两种的话，`/undo` 打全了还得按两次回车。
+  Tab 永远是补全，这条不变。输入一改 `palMoved` 就作废。
+- **esc 关菜单顺手把这一轮打断了。** 输入框那个 handler 只 `preventDefault()`，
+  事件照样冒到 document 上，那边看到菜单已经关了就发 `{"op":"interrupt"}`。
+  要 `stopPropagation()`。
+- 顺带：**完全相同的那条排最前**。打全 `/mode` 再按 Tab，原来会补成 `/model`。
+
+**这三条 `shoot.mjs` 一条都测不出来** —— 它灌的是事件流，碰不到键盘。
+按键这一层要单独的夹具，改输入区之前先跑 `node web/dev/input.mjs <地址>`。
+
 ### 权限和密钥在 serve 这条路上
 
 - **`/key` 刻意不在 `serve.run_command` 的分支里**，落到「未知命令」。密钥的增删只在终端做。

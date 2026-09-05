@@ -474,12 +474,24 @@ function submit() {
 
 let palIndex = 0;
 let palItems = [];
+/* 用户有没有自己用 ↑↓ 挑过。**回车的含义全看这个**：
+   没挑过 = 回车是「发送我打的这句」，挑过 = 回车是「用我选的那条」。
+   不分这两种的话，打完 `/mode auto` 一回车会被补全吃掉，
+   变成 `/model `，参数无声丢掉、也没发出去 —— 这是最烦人的那个 bug。 */
+let palMoved = false;
 
 function showPalette() {
   const typed = inputEl.value;
   if (!typed.startsWith("/") || typed.includes("\n")) return hidePalette();
-  const head = typed.split(" ")[0];
-  palItems = commands.filter((c) => c.name.startsWith(head));
+  // **打了空格就是在写参数了**，这时候不该再插手（终端那边的补全也是这个口径）。
+  // 下面按整串筛本来也会筛空，这一行是把意图写明白。
+  if (typed.includes(" ")) return hidePalette();
+  // 按**整串**筛，不是按第一个词。原来是 `typed.split(" ")[0]`，于是打完
+  // `/mode auto` 菜单还开着，一回车被补全吃掉，变成 `/model `——参数没了，
+  // 也没发出去。这是这块最烦人的那个 bug。
+  palItems = commands.filter((c) => c.name.startsWith(typed));
+  // 完全相同的排最前：打全了 `/mode` 再按 Tab，不该给你补成 `/model`
+  palItems.sort((a, b) => (b.name === typed) - (a.name === typed));
   if (!palItems.length) return hidePalette();
   palIndex = Math.min(palIndex, palItems.length - 1);
   paletteEl.replaceChildren(...palItems.map((c, n) => {
@@ -498,6 +510,7 @@ function hidePalette() {
   paletteEl.hidden = true;
   palItems = [];
   palIndex = 0;
+  palMoved = false;
 }
 
 function pick(n) {
@@ -509,21 +522,39 @@ function pick(n) {
   grow();
 }
 
-inputEl.addEventListener("input", () => { grow(); showPalette(); });
+inputEl.addEventListener("input", () => {
+  // 每次改动都重新算一遍，之前挑的那条不算数了
+  palMoved = false;
+  grow();
+  showPalette();
+});
 
 inputEl.addEventListener("keydown", (e) => {
   if (!paletteEl.hidden && palItems.length) {
-    if (e.key === "ArrowDown") { e.preventDefault(); palIndex = (palIndex + 1) % palItems.length; return showPalette(); }
-    if (e.key === "ArrowUp") { e.preventDefault(); palIndex = (palIndex - 1 + palItems.length) % palItems.length; return showPalette(); }
-    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); return pick(palIndex); }
-    if (e.key === "Escape") { e.preventDefault(); return hidePalette(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const step = e.key === "ArrowDown" ? 1 : palItems.length - 1;
+      palIndex = (palIndex + step) % palItems.length;
+      palMoved = true;
+      return showPalette();
+    }
+    // Tab 永远是补全；回车只在「你自己挑过」时才是补全，否则是发送
+    if (e.key === "Tab") { e.preventDefault(); return pick(palIndex); }
+    if (e.key === "Enter" && !e.shiftKey && palMoved) { e.preventDefault(); return pick(palIndex); }
+    if (e.key === "Escape") {
+      // **要 stopPropagation。** 只 preventDefault 的话事件照样冒到 document 上，
+      // 那边看到菜单已经关了，就把这一轮给中断了 —— 用户只是想收起菜单。
+      e.preventDefault();
+      e.stopPropagation();
+      return hidePalette();
+    }
   }
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
 });
 
-// esc 中断，跟终端一个键。焦点在输入框里时上面那段已经拦掉了补全的情况。
+// esc 中断，跟终端一个键。菜单开着时上面那段会把事件截住。
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && busy && paletteEl.hidden) send({ op: "interrupt" });
+  if (e.key === "Escape" && busy) send({ op: "interrupt" });
 });
 
 $("send").onclick = submit;
