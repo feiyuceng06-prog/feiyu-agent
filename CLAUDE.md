@@ -1401,6 +1401,37 @@ Origin 缺失或为 `null` 一律拒（浏览器发 WS 时**一定**带 Origin�
 三道门的判定抽成了自由函数 `token_ok` / `origin_ok`，`cargo test` 里五条用例盯着 ——
 **安全检查没有测试等于没有检查**。
 
+### ctrl-c 和那只狗（0.50.2）
+
+**ctrl-c 会甩一页 traceback。** SIGINT 是发给整个前台进程组的，`feiyu --serve`
+这个子进程也吃到一份，那一下正落在 `run()` 的 `inbox.get()` 上 —— 0.50.1 只把
+循环**体**包在 try 里，没包取消息那一行。而且它直接冲出 `serve()`，
+`_finish` 里那些清理（杀后台命令、关语言服务器和 MCP 进程）全跳过了。
+
+两边都改了，因为这是个竞态、只改一边不保险：
+- Python：`inbox.get()` 也接住 KeyboardInterrupt，静静返回 0 走正常收尾。
+- Rust：`with_graceful_shutdown` 接 ctrl-c，先按协议发 `{"op":"stop"}`，
+  等它自己退（最多 5 秒）再动手杀。**这条是确定性的，不靠信号落在哪一行。**
+
+**pty 夹具复现不了这个**（`scratchpad/ctrlc_drive.py` 那种）：Rust 要是先死，
+Python 走的是 stdin EOF 那条干净路径，看不到 traceback。非交互 shell 起的后台任务
+更是把 SIGINT 继承成忽略，根本测不出来。所以这里靠的是「两边都堵上」，不是「测过了」。
+
+### 那只狗
+
+`feiyu/logo.png` 是纯剪影（白狗黑底、无 alpha），`potrace` 描成 911 字节的 SVG，
+`fill="currentColor"`，走 `<img>` 加载时解析成黑色，CSS 压 `opacity: .8` 正好是
+`--text` 那档墨色。生成方式：`ui._trim()` 裁黑边 → 二值化取反 → `potrace -O 1.0`。
+
+**位置是这版设计里最要紧的一处对齐**：刊头用跟 `.block` 一模一样的两列网格，
+狗落在 meta-rail 那一列，刊名和元信息落在正文列。于是从最上面的狗到最下面每一块的
+大写标签，整页只有一条纵线。
+
+**窄屏下 `--rail` 是 0，`.mark { width: 100% }` 就是宽 0，记号会整个消失** ——
+真这么坏过一次。媒体查询里让它自己站一行。`shoot.mjs` 现在两档宽度各量一次记号的
+盒子，小于 24px 就报错：**零尺寸的元素在截图里就是「不存在」，眼睛扫过去不会发现
+少了东西**，这类 bug 只能靠量。
+
 ### 权限和密钥在 serve 这条路上
 
 - **`/key` 刻意不在 `serve.run_command` 的分支里**，落到「未知命令」。密钥的增删只在终端做。

@@ -105,9 +105,31 @@ body {
   padding: var(--space-5) var(--space-5) var(--space-3);
 }
 
+/* 刊头用跟 .block 一模一样的两列网格：记号落在 meta-rail 那一列，
+   刊名和元信息落在正文列。这样从最上面的狗到最下面每一块的大写标签，
+   整页只有一条纵线 —— 这是这版设计里最要紧的一处对齐。 */
 .masthead__inner {
   max-width: var(--content);
   margin: 0 auto;
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: 0 var(--space-4);
+  align-items: start;
+}
+
+.masthead__text,
+.masthead .rail { grid-column: 2; }
+
+/* 终端里那只狗。纯剪影，描成矢量之后 fill 是 currentColor，
+   走 <img> 加载时解析成黑色，压 0.8 正好是 --text 那档墨色。 */
+.mark {
+  grid-row: 1 / span 2;
+  width: 100%;
+  max-width: 4.5rem;
+  height: auto;
+  opacity: 0.8;
+  /* 视觉上跟刊名的字冠对齐：剪影上沿比字冠略高一点看着才稳 */
+  margin-top: 0.15rem;
 }
 
 .nameplate {
@@ -527,4 +549,15 @@ kbd {
   .block { grid-template-columns: minmax(0, 1fr); gap: var(--space-1) 0; }
   .block__label { line-height: 1.4; }
   .palette__item { grid-template-columns: minmax(0, 1fr); gap: 0; }
+
+  /* rail 收成 0 之后，`.mark { width: 100% }` 就是宽 0 —— 记号会整个消失。
+     窄屏下让它自己站一行，摆在刊名上面。 */
+  .masthead__inner { grid-template-columns: minmax(0, 1fr); }
+  .masthead__text, .masthead .rail { grid-column: 1; }
+  .mark {
+    grid-row: auto;
+    width: 2.75rem;
+    max-width: none;
+    margin: 0 0 var(--space-2);
+  }
 }

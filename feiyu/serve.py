@@ -290,7 +290,14 @@ class Server:
         threading.Thread(target=self.reader, daemon=True).start()
         self.proto.send("hello", **self.status())
         while True:
-            op, text = self.inbox.get()
+            try:
+                op, text = self.inbox.get()
+            except KeyboardInterrupt:
+                # 用户在起 feiyu-web 的那个终端上按了 ctrl-c：SIGINT 发给整个前台
+                # 进程组，我们这个子进程也吃到一份，而这一下正落在 inbox.get() 上。
+                # **不接住的话会甩一整页 traceback**，而且直接冲出 serve()，
+                # `_finish` 里那些清理（杀后台命令、关语言服务器和 MCP 进程）全跳过了。
+                return 0
             if op == "stop":
                 return 0
             if not text.strip():

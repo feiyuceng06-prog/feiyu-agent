@@ -101,7 +101,7 @@ class Cdp {
 
 /* 编一份事件流，覆盖每一种 kind。真跑一次未必碰得上报错和 diff。 */
 const FLOW = [
-  { kind: "status", ready: true, mode: "default", busy: false, workspace: "/home/Feiyu/Myproject",
+  { kind: "status", ready: true, mode: "default", busy: false, workspace: "/home/you/blog",
     model: "deepseek-v4-pro", name: "deepseek-v4-pro", tokens: 18240, cost: 0.0412,
     context: 21400, context_limit: 128000 },
   { kind: "turn_start", text: "把 build.mjs 里读 frontmatter 那段抽成一个函数，然后跑一遍构建" },
@@ -132,7 +132,7 @@ const FLOW = [
   { kind: "text", delta: "| 文件 | 改了什么 |\n|---|---|\n| `scripts/build.mjs` | 抽出 `readFrontmatter`，两处调用点换掉 |\n\n" },
   { kind: "text", delta: "```js\nfunction readFrontmatter(raw) {\n  const m = /^---\\n([\\s\\S]*?)\\n---\\n?/.exec(raw);\n  return m ? { meta: parse(m[1]), body: raw.slice(m[0].length) } : { meta: {}, body: raw };\n}\n```\n" },
   { kind: "turn_end" },
-  { kind: "status", ready: true, mode: "default", busy: false, workspace: "/home/Feiyu/Myproject",
+  { kind: "status", ready: true, mode: "default", busy: false, workspace: "/home/you/blog",
     model: "deepseek-v4-pro", name: "deepseek-v4-pro", tokens: 31480, cost: 0.0684,
     context: 29100, context_limit: 128000 },
 ];
@@ -206,6 +206,28 @@ if (drift !== "[]") {
   process.exitCode = 1;
 } else {
   console.log("meta-rail 每一块都对齐");
+}
+
+/* 宽窄两档下那只狗都得真的看得见。
+   **零尺寸的元素在截图里就是「不存在」，眼睛扫过去不会发现少了东西** ——
+   窄屏那版真的这么坏过一次：--rail 收成 0，而 .mark 是 width:100%，于是宽 0。 */
+for (const width of [1280, 390]) {
+  await cdp.call("Emulation.setDeviceMetricsOverride",
+    { width, height: 900, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+  const box = await cdp.eval(`JSON.stringify((() => {
+    const m = document.querySelector(".mark");
+    if (!m) return { w: 0, h: 0, missing: true };
+    const r = m.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height) };
+  })())`);
+  const { w, h } = JSON.parse(box);
+  if (w < 24 || h < 24) {
+    console.error(`${width}px 下那只狗没了或太小：`, box);
+    process.exitCode = 1;
+  } else {
+    console.log(`${width}px 下记号 ${w}×${h}`);
+  }
 }
 
 const pageErrors = await cdp.eval("JSON.stringify(window.__errs || [])");

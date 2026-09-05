@@ -53,6 +53,7 @@ use tokio::sync::{broadcast, mpsc};
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_CSS: &str = include_str!("../assets/app.css");
 const APP_JS: &str = include_str!("../assets/app.js");
+const LOGO_SVG: &str = include_str!("../assets/logo.svg");
 
 /// 新标签页连上时回放多少条事件。够看清「刚才发生了什么」，又不至于把一场长任务
 /// 的几千条工具事件全堆给它。
@@ -448,6 +449,7 @@ async fn main() {
         .route("/", get(serve_index))
         .route("/app.css", get(|s, q| serve_asset(s, q, APP_CSS, "text/css; charset=utf-8")))
         .route("/app.js", get(|s, q| serve_asset(s, q, APP_JS, "text/javascript; charset=utf-8")))
+        .route("/logo.svg", get(|s, q| serve_asset(s, q, LOGO_SVG, "image/svg+xml")))
         .route("/ws", get(ws_handler))
         .with_state(app.clone());
 
@@ -471,10 +473,25 @@ async fn main() {
         let _ = Command::new("xdg-open").arg(&url).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
 
-    if let Err(err) = axum::serve(listener, router).await {
+    // ctrl-c 要有一条**确定的**收尾路径，不能靠「信号正好落在哪一行」。
+    // SIGINT 是发给整个前台进程组的，子进程也吃到一份，那一下可能落在它某个
+    // 阻塞调用上，甩出一页 traceback，还会跳过它自己的清理（杀后台命令、
+    // 关语言服务器和 MCP 进程）。所以这边先按协议请它停，给它一点时间，再动手。
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\n收工，正在收尾…");
+    };
+    let served = axum::serve(listener, router).with_graceful_shutdown(shutdown);
+    if let Err(err) = served.await {
         eprintln!("服务停了：{err}");
     }
-    let _ = child.kill().await;
+    let _ = app.to_agent.send(r#"{"op":"stop"}"#.to_string());
+    // 等它自己退。它要关语言服务器和 MCP 的子进程，急不得，但也不能无限等。
+    let deadline = std::time::Duration::from_secs(5);
+    if tokio::time::timeout(deadline, child.wait()).await.is_err() {
+        eprintln!("agent 没在 {} 秒内退干净，直接杀掉。", deadline.as_secs());
+        let _ = child.kill().await;
+    }
 }
 
 
