@@ -140,15 +140,25 @@ def main() -> int:
 
     if note:
         print(ui.notice(note), file=sys.stderr)
+
+    # **会话装配要放在早退之前**，跟 0.12.0 那条 `main()` 三条路径的规矩一样。
+    # 之前只有 TUI 那段做，于是一次性任务既不 --resume 也不存盘 ——
+    # 而撞轮数上限时代码自己印的提示正是「feiyu --resume 接着做」，指向一个不存在的东西。
+    saved = session.load(workspace)
+    resumed = bool(args.resume and saved and agent.restore(saved))
+    agent.session_id = session.latest_id(workspace) if resumed else session.new_id()
+
     if args.prompt:
         task = " ".join(args.prompt)
         if spec is None:
             _run_turn(agent, task)
+            session.save(workspace, agent, agent.session_id)
             _print_review(agent, task, args.review)
             return _finish(agent, tracer, 0)
         # schema 模式下 stdout 只能有 JSON，人看的东西整体挪到 stderr
         with contextlib.redirect_stdout(sys.stderr):
             _run_turn(agent, task)
+            session.save(workspace, agent, agent.session_id)
             _print_review(agent, task, args.review)
             value, problems = agent.finish_json(spec)
         if problems:
@@ -158,14 +168,12 @@ def main() -> int:
         sys.stdout.write("\n")
         return _finish(agent, tracer, 0)
     if not sys.stdin.isatty():
-        return _finish(agent, tracer, _piped(agent))
+        return _finish(agent, tracer, _piped(agent, workspace))
 
     ui.STYLE_NAMES[:] = list(STYLES)
     ui.MODE_NAMES[:] = list(MODES)
     ui.MODEL_NAMES = lambda: list(keys.load())
     ui.enter_screen()
-    saved = session.load(workspace)
-    resumed = bool(args.resume and saved and agent.restore(saved))
 
     project = f"{agent.context_file}（{len(agent.context_text)} 字）" if agent.context_text else "无"
     print(ui.welcome(workspace, __version__, project))
@@ -247,7 +255,8 @@ def main() -> int:
                 print(_help())
             elif cmd == "/clear":
                 agent.reset()
-                session.drop(workspace)
+                session.drop(workspace, agent.session_id)
+                agent.session_id = session.new_id()
                 # 清空就是清空 留着半截进度的话下一轮它又从旧清单接着说
                 progress.clear(workspace)
                 agent.resumed = {}
@@ -303,7 +312,7 @@ def main() -> int:
             continue
         print()
         _run_turn(agent, text)
-        session.save(workspace, agent)
+        session.save(workspace, agent, agent.session_id)
         print()
 
 
@@ -880,12 +889,13 @@ def _hit_rate(hit: int, total: int) -> str:
     return ("%d%%" % round(100 * hit / total)) if total else "—"
 
 
-def _piped(agent: Feiyu) -> int:
+def _piped(agent: Feiyu, workspace) -> int:
     """stdin 不是终端时（管道、脚本）：一行一个任务，不画框 """
     for line in sys.stdin:
         task = line.strip()
         if task and task != "/exit":
             _run_turn(agent, task)
+            session.save(workspace, agent, agent.session_id)
     return 0
 
 

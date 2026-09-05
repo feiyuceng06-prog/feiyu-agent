@@ -39,10 +39,11 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{RawQuery, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, RawQuery, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 // axum 的 WebSocket 是 futures 的 Sink/Stream，split / next / send 都在这两个 trait 上
 use futures_util::{SinkExt, StreamExt};
@@ -62,6 +63,11 @@ const REPLAY: usize = 400;
 /// 一条 WebSocket 消息封顶多大。Python 那边另有一道 `MAX_TEXT`，两道都要。
 const MAX_MESSAGE: usize = 1 << 20; // 1 MiB
 
+/// 上传封顶多大。模型能吃下的东西本来就不大，几十 MB 的文件上传上去也只是占地方。
+const MAX_UPLOAD: usize = 32 << 20; // 32 MiB
+/// 上传的东西落在工作区里的哪儿。**必须在工作区内**，不然 agent 的文件工具够不着。
+const UPLOAD_DIR: &str = ".feiyu/uploads";
+
 struct App {
     /// 发给所有浏览器的事件。
     events: broadcast::Sender<String>,
@@ -73,6 +79,8 @@ struct App {
     token: String,
     /// 监听的端口，用来核 Origin / Host。
     port: u16,
+    /// agent 的工作目录。上传的东西必须落在它下面，否则 agent 够不着。
+    workspace: std::path::PathBuf,
 }
 
 impl App {
@@ -385,6 +393,115 @@ async fn client(socket: WebSocket, app: Arc<App>) {
     }
 }
 
+/// 把用户给的文件名收拾成一个**只是文件名**的东西。
+///
+/// 这一步不能省：名字是浏览器给的，`../../.ssh/authorized_keys` 这种必须变成
+/// `authorized_keys`。只留最后一段，再把路径分隔符和一切控制字符换掉；
+/// 空的、只有点的、隐藏文件一律另起一个名字。
+fn safe_name(raw: &str) -> String {
+    let tail = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = tail
+        .chars()
+        .map(|c| {
+            // Windows 上不许出现的那些也一起换掉，免得同一份工作区换个系统就打不开
+            let nope = matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|');
+            if c.is_control() || nope { '_' } else { c }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() || cleaned.len() > 120 {
+        format!("upload-{}", std::process::id())
+    } else {
+        cleaned
+    }
+}
+
+/// 名字撞了就加个后缀，别默默盖掉别人的文件。
+fn free_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((a, b)) if !a.is_empty() => (a.to_string(), format!(".{b}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 2..1000 {
+        let next = dir.join(format!("{stem}-{n}{ext}"));
+        if !next.exists() {
+            return next;
+        }
+    }
+    dir.join(format!("{stem}-{}{ext}", std::process::id()))
+}
+
+async fn upload(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !app.token_ok(query.as_deref()) {
+        return no_token();
+    }
+    // 上传是**写这台机器的磁盘**，Origin 这道门比读资源那边更要紧
+    if !app.origin_ok(&headers) {
+        return denied("origin not allowed");
+    }
+    let raw = headers
+        .get("x-feiyu-filename")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // 文件名走 header 传，因为它可能是中文；浏览器那边 encodeURIComponent 过
+    let decoded = percent_decode(raw);
+    let name = safe_name(&decoded);
+    let dir = app.workspace.join(UPLOAD_DIR);
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("建不了上传目录：{err}\n"))
+            .into_response();
+    }
+    let path = free_path(&dir, &name);
+    if let Err(err) = std::fs::write(&path, &body) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("写不进去：{err}\n")).into_response();
+    }
+    // 回相对工作区的路径 —— agent 的文件工具只认这种
+    let shown = path
+        .strip_prefix(&app.workspace)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    eprintln!("收下 {} （{} 字节）", shown, body.len());
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        format!(
+            r#"{{"path":{},"size":{}}}"#,
+            serde_json::to_string(&shown).unwrap_or_else(|_| "\"\"".into()),
+            body.len()
+        ),
+    )
+        .into_response()
+}
+
+/// `%E4%B8%AD` 这种还原成字符。只为一个文件名，不值得引个 urlencoding。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn asset(body: &'static str, mime: &'static str) -> Response {
     (
         StatusCode::OK,
@@ -422,6 +539,7 @@ async fn main() {
         replay: Mutex::new(VecDeque::with_capacity(REPLAY)),
         token: make_token(),
         port: args.port,
+        workspace: workspace.clone(),
     });
 
     tokio::spawn(pump_stdin(stdin, from_web));
@@ -451,6 +569,7 @@ async fn main() {
         .route("/app.js", get(|s, q| serve_asset(s, q, APP_JS, "text/javascript; charset=utf-8")))
         .route("/logo.svg", get(|s, q| serve_asset(s, q, LOGO_SVG, "image/svg+xml")))
         .route("/ws", get(ws_handler))
+        .route("/upload", post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD)))
         .with_state(app.clone());
 
     // 只听回环地址。理由见文件头，别改成可配置的。
@@ -538,6 +657,29 @@ mod tests {
             assert!(origin_ok(7777, Some(&format!("http://{name}:7777")),
                               Some(&format!("{name}:7777"))), "{name}");
         }
+    }
+
+    #[test]
+    fn 上传的文件名只能是文件名() {
+        // 名字是浏览器给的，路径穿越必须在这里断掉
+        assert_eq!(safe_name("../../.ssh/authorized_keys"), "authorized_keys");
+        assert_eq!(safe_name("/etc/passwd"), "passwd");
+        assert_eq!(safe_name("..\\..\\win.ini"), "win.ini");
+        assert_eq!(safe_name("a/b/c.png"), "c.png");
+        // 隐藏文件、空名字、只有点的，一律另起一个
+        assert!(!safe_name(".bashrc").starts_with('.'));
+        assert!(!safe_name("").is_empty());
+        assert!(!safe_name("...").contains(".."));
+        // 正常的名字原样留着，中文也是
+        assert_eq!(safe_name("报表 2026.xlsx"), "报表 2026.xlsx");
+        assert_eq!(safe_name("a:b*c?.txt"), "a_b_c_.txt");
+    }
+
+    #[test]
+    fn 文件名里的百分号编码要还原() {
+        assert_eq!(percent_decode("%E4%B8%AD%E6%96%87.txt"), "中文.txt");
+        assert_eq!(percent_decode("plain.txt"), "plain.txt");
+        assert_eq!(percent_decode("%ZZ"), "%ZZ");        // 坏的编码原样留着，不该崩
     }
 
     #[test]

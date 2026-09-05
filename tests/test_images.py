@@ -182,7 +182,7 @@ class TestStripped(unittest.TestCase):
         agent.name, agent.style, agent.mode = "fake", "default", "default"
         agent.toolbox = type("T", (), {"todos": type("D", (), {"items": []})()})()
         session.save(Path(tmp.name), agent)
-        with open(session._path(Path(tmp.name)), encoding="utf-8") as f:
+        with open(session._legacy_path(Path(tmp.name)), encoding="utf-8") as f:
             saved = f.read()
         self.assertNotIn("SHOULDNOTAPPEAR", saved)
         self.assertIn(providers.IMAGE_NOTE, saved)

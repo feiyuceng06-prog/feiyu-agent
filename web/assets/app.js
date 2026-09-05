@@ -27,6 +27,8 @@ let seenAsk = new Set();
 /* 这次的 help 事件要不要画出来。连上时我们自己发一次去取补全清单，
    那次只填数据、不画；用户敲 /help 那次才画。 */
 let wantHelp = false;
+/* 已经上传好、等着随下一条消息一起交出去的文件（工作区相对路径） */
+let clips = [];
 
 /* ── 小工具 ─────────────────────────────────────────────────── */
 
@@ -322,6 +324,17 @@ function handle(ev) {
       pendingPreview = null;
       break;
 
+    case "sessions":
+      drawTalks(ev.rows || [], ev.current);
+      break;
+
+    case "opened":
+      (ev.history || []).forEach((row) => {
+        if (row.role === "user") block("你", "block--you").textContent = row.text;
+        else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
+      });
+      break;
+
     case "cleared":
       // 只清对话。刊头那条启动信息说的是环境，跟聊了什么无关，留着
       streamEl.replaceChildren();
@@ -448,10 +461,112 @@ function askCard(ev) {
   sheetEl.scrollTop = sheetEl.scrollHeight;
 }
 
+/* ── 侧边栏 ────────────────────────────────────────────────── */
+
+function drawTalks(rows, current) {
+  const list = $("talks");
+  if (!rows.length) {
+    list.innerHTML = `<li class="side__empty">还没有历史对话</li>`;
+    return;
+  }
+  list.replaceChildren(...rows.map((row) => {
+    const li = document.createElement("li");
+    li.className = "talk";
+    li.setAttribute("aria-current", row.id === current ? "true" : "false");
+    li.innerHTML = `<span class="talk__title">${esc(row.title)}</span>` +
+                   `<span class="talk__meta">${esc(row.when)} · ${row.count} 条</span>`;
+    li.onclick = () => send({ op: "open", id: row.id });
+    return li;
+  }));
+}
+
+/* 收放状态记在浏览器里：**这是「这台机器上这个人的偏好」**，
+   不是会话状态，所以不进协议，也不该每次开页面都要重收一次。 */
+const SIDE_KEY = "feiyu.side";
+
+function setSide(on) {
+  document.body.dataset.side = on ? "on" : "off";
+  $("side-toggle").setAttribute("aria-expanded", on ? "true" : "false");
+  try { localStorage.setItem(SIDE_KEY, on ? "on" : "off"); } catch { /* 无痕窗口 */ }
+}
+
+let sideOn = "off";
+try { sideOn = localStorage.getItem(SIDE_KEY) || "on"; } catch { sideOn = "on"; }
+setSide(sideOn !== "off");
+
+$("side-toggle").onclick = () => setSide(document.body.dataset.side === "off");
+$("new-talk").onclick = () => send({ op: "new" });
+
+/* ── 上传 ──────────────────────────────────────────────────── */
+
+function drawClips() {
+  const list = $("clips");
+  list.hidden = !clips.length;
+  list.replaceChildren(...clips.map((clip, n) => {
+    const li = document.createElement("li");
+    li.className = "clip";
+    li.dataset.state = clip.state;
+    li.append(document.createTextNode(clip.name +
+      (clip.state === "uploading" ? " 上传中…" : clip.state === "failed" ? " 失败" : "")));
+    if (clip.state !== "uploading") {
+      const x = document.createElement("button");
+      x.type = "button";
+      x.textContent = "×";
+      x.title = "去掉";
+      x.onclick = () => { clips.splice(n, 1); drawClips(); };
+      li.append(x);
+    }
+    return li;
+  }));
+}
+
+async function upload(file) {
+  const clip = { name: file.name, state: "uploading", path: "" };
+  clips.push(clip);
+  drawClips();
+  try {
+    const reply = await fetch(`/upload?t=${encodeURIComponent(TOKEN)}`, {
+      method: "POST",
+      // 文件名走 header：它可能是中文，也可能带路径分隔符（服务端会收拾）
+      headers: { "x-feiyu-filename": encodeURIComponent(file.name) },
+      body: file,
+    });
+    if (!reply.ok) throw new Error(await reply.text());
+    const got = await reply.json();
+    clip.state = "ready";
+    clip.path = got.path;
+    clip.name = got.path;
+  } catch (err) {
+    clip.state = "failed";
+    clip.error = String(err).slice(0, 120);
+  }
+  drawClips();
+}
+
+$("file").onchange = (e) => {
+  [...e.target.files].forEach(upload);
+  e.target.value = "";          // 同一个文件想再传一次也得能触发 change
+};
+
+// 拖进来也算
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  [...(e.dataTransfer?.files || [])].forEach(upload);
+});
+
 /* ── 连接 ──────────────────────────────────────────────────── */
 
 function send(msg) {
-  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(msg));
+    return true;
+  }
+  // **断线时不能默默吞掉。** 用户点了发送、字也从输入框里没了，却什么都没发生 ——
+  // 那比报个错糟得多。
+  stateEl.textContent = "没连上，这条没发出去 · 正在重连";
+  stateEl.dataset.alert = "1";
+  return false;
 }
 
 /* 令牌在页面地址里（服务端只认带令牌的连接）。
@@ -466,6 +581,7 @@ function connect() {
     stateEl.dataset.alert = "0";
     send({ op: "command", text: "/help" });
     send({ op: "status" });
+    send({ op: "sessions" });
   };
   socket.onmessage = (e) => {
     let ev;
@@ -487,10 +603,22 @@ function grow() {
 }
 
 function submit() {
-  const text = inputEl.value.trim();
+  let text = inputEl.value.trim();
+  const ready = clips.filter((c) => c.state === "ready");
+  // 附件不是单独发的，是**跟这句话一起**交出去：agent 拿到的就是一句带路径的话，
+  // 它用本来就有的 read_file 去看（图片、docx、pdf 那些它都认）
+  if (ready.length && !text.startsWith("/")) {
+    const lines = ready.map((c) => "- " + c.path).join("\n");
+    text = (text ? text + "\n\n" : "") + "我上传了这些文件（相对工作区）：\n" + lines;
+  }
   if (!text) return;
   if (text === "/help") wantHelp = true;
-  send(text.startsWith("/") ? { op: "command", text } : { op: "prompt", text });
+  // 没发出去就把话留在输入框里，别让用户重打一遍
+  if (!send(text.startsWith("/") ? { op: "command", text } : { op: "prompt", text })) return;
+  if (ready.length && !text.startsWith("/")) {
+    clips = clips.filter((c) => c.state !== "ready");
+    drawClips();
+  }
   inputEl.value = "";
   grow();
   hidePalette();

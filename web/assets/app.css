@@ -70,6 +70,8 @@
   --content: 54rem;
   /* meta-rail 那一列的宽度。够放四个中文大写标签。 */
   --rail: 5.5rem;
+  /* 侧边栏宽度。收起时被 body[data-side="off"] 改成 0 */
+  --side: 15rem;
 
   --rise-dist: 8px;
   --rise-dur: 500ms;
@@ -85,11 +87,118 @@ body {
   background: var(--bg);
   color: var(--text);
   font: var(--w-regular) var(--text-base) / var(--leading-body) var(--font-sans);
-  /* 头和尾都是固定的，中间那块自己滚 */
+  /* 左边侧栏一列，右边头 / 正文 / 输入区三行。侧栏收起时第一列宽度归零，
+     其余什么都不用改 —— 收放只动一个变量。 */
   display: grid;
+  grid-template-columns: var(--side) minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100dvh;
 }
+
+body > .masthead { grid-column: 2; grid-row: 1; }
+body > .sheet    { grid-column: 2; grid-row: 2; }
+body > .composer { grid-column: 2; grid-row: 3; }
+
+/* ── 侧边栏 ──────────────────────────────────────────────────
+   一列历史对话。**收起是把宽度变成 0，不是 display:none** ——
+   那样过渡是连续的，而且里面的东西不用重新建。 */
+.side {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  overflow: hidden;
+  border-right: 1px solid var(--line-strong);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.side__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.side__title {
+  font-size: var(--text-3xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.side__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1;
+}
+
+.talk {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.talk:hover { background: var(--panel); }
+
+/* 正在看的那条：左边一条蓝线。蓝在这套系统里只做线，这儿也是。 */
+.talk[aria-current="true"] {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--panel);
+}
+
+.talk__title {
+  display: block;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  color: var(--text);
+  /* 标题只给两行，再长就截 —— 侧栏是索引不是正文 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.talk__meta {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--text-2xs);
+  font-family: var(--font-mono);
+  color: var(--faint);
+}
+
+.side__empty {
+  padding: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--faint);
+}
+
+/* 收放那个按钮：钉在刊头左上角，不占刊头自己的网格 */
+.side-toggle {
+  position: absolute;
+  left: var(--space-3);
+  top: var(--space-4);
+  z-index: 2;
+  font: var(--w-regular) var(--text-sm) / 1 var(--font-sans);
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+
+.side-toggle:hover { color: var(--text); border-color: var(--line-strong); }
+
+/* 收起：宽度归零。侧栏里的东西还在，只是看不见了 */
+body[data-side="off"] { --side: 0px; }
+body[data-side="off"] .side { border-right: 0; }
 
 ::selection { background: var(--selection); }
 
@@ -101,6 +210,7 @@ body {
 /* ── 刊头 ──────────────────────────────────────────────────── */
 
 .masthead {
+  position: relative;      /* 收放按钮钉在这上面 */
   border-bottom: 1px solid var(--line-strong);
   padding: var(--space-5) var(--space-5) var(--space-3);
 }
@@ -547,6 +657,46 @@ body {
 
 .composer__state[data-alert="1"] { color: var(--alert); }
 
+/* 待发送的附件。上传完先在这儿列着，随下一条消息一起交给 agent。 */
+.clips {
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.clip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--line-strong);
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--soft);
+}
+
+.clip button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--faint);
+  cursor: pointer;
+  font: inherit;
+}
+
+.clip button:hover { color: var(--alert); }
+
+.clip[data-state="uploading"] { color: var(--faint); border-style: dashed; }
+.clip[data-state="failed"] { color: var(--alert); border-color: var(--alert); }
+
+.btn--small { padding: var(--space-1) var(--space-2); }
+
+/* 上传是个 <label> 包着隐藏的 file input，样式要跟按钮一致 */
+.btn--attach { cursor: pointer; display: inline-flex; align-items: center; }
+
 /* 命令补全 */
 .palette {
   border: 1px solid var(--line-strong);
@@ -571,7 +721,20 @@ body {
 .palette__about { color: var(--muted); }
 
 @media (max-width: 40rem) {
-  :root { --rail: 0rem; }
+  :root { --rail: 0rem; --side: 0px; }
+
+  /* 窄屏放不下两列，侧栏改成盖在上面的一层；收起时还是宽度归零 */
+  body { grid-template-columns: minmax(0, 1fr); }
+  body > .masthead, body > .sheet, body > .composer { grid-column: 1; }
+  .side {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 15rem;
+    background: var(--bg);
+    z-index: 3;
+  }
+  body[data-side="off"] .side { width: 0; border-right: 0; }
+  .masthead { padding-left: var(--space-8); }
   .masthead, .sheet, .composer { padding-left: var(--space-4); padding-right: var(--space-4); }
   .block { grid-template-columns: minmax(0, 1fr); gap: var(--space-1) 0; }
   .block__label { line-height: 1.4; }

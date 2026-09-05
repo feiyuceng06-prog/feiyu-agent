@@ -1,6 +1,6 @@
 [package]
 name = "feiyu-web"
-version = "0.50.6"
+version = "0.51.0"
 edition = "2024"
 description = "feiyu 的网页端：HTTP + WebSocket 服务，监管一个 feiyu --serve 子进程"
 license = "MIT"

@@ -391,6 +391,9 @@ class Feiyu:
         self.approve_mcp = None      # 交互层塞进来：(路径, 服务器名列表) -> bool
         self.approve_skills = None   # 交互层塞进来：(目录, 技能名列表) -> bool
         self.skills_note = ""
+        # 这一轮存到哪一份会话里 由入口层（__main__ / serve）定：接着上次就沿用
+        # 那一份的 id，从头开始就新起一个。存盘和「新对话」都看它
+        self.session_id: str | None = None
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"

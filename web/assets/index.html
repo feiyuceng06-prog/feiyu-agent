@@ -10,7 +10,17 @@
 </head>
 <body>
 
+<aside class="side" id="side">
+  <div class="side__head">
+    <span class="side__title">对话</span>
+    <button id="new-talk" class="btn btn--small" type="button">新对话</button>
+  </div>
+  <ul class="side__list" id="talks"></ul>
+</aside>
+
 <header class="masthead">
+  <button id="side-toggle" class="side-toggle" type="button"
+          aria-expanded="true" aria-controls="side" title="收起 / 展开侧边栏">☰</button>
   <div class="masthead__inner">
     <img class="mark" src="/logo.svg?t=__TOKEN__" alt="" width="72" height="72">
     <div class="masthead__text">
@@ -35,10 +45,14 @@
 <footer class="composer" id="composer">
   <div class="composer__inner">
     <div class="palette" id="palette" hidden></div>
+    <ul class="clips" id="clips" hidden></ul>
     <div class="composer__row">
       <span class="composer__caret" aria-hidden="true">›</span>
       <textarea id="input" rows="1" spellcheck="false" autocomplete="off"
                 placeholder="说一件要做的事，或者 / 开头的命令"></textarea>
+      <label class="btn btn--attach" title="上传文件到工作区">
+        附件<input id="file" type="file" multiple hidden>
+      </label>
       <button id="send" class="btn btn--go" type="button">发送</button>
       <button id="stop" class="btn btn--stop" type="button" hidden>中断</button>
     </div>

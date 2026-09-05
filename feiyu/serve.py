@@ -162,6 +162,44 @@ class Server:
     def push_status(self) -> None:
         self.proto.send("status", **self.status())
 
+    # ---- 会话 ----
+
+    def push_sessions(self) -> None:
+        """侧边栏那份列表 只出摘要，正文点开才读 """
+        self.proto.send("sessions", rows=session_mod.listing(self.workspace),
+                        current=self.agent.session_id)
+
+    def new_session(self) -> None:
+        """开一段新对话 **旧的那份留在盘上**，这是它跟 /clear 的全部区别 """
+        session_mod.save(self.workspace, self.agent, self.agent.session_id)
+        self.agent.reset()
+        self.agent.session_id = session_mod.new_id()
+        self.proto.send("cleared")
+        self.push_sessions()
+        self.push_status()
+
+    def open_session(self, sid: str) -> None:
+        if sid == self.agent.session_id:
+            return
+        # 先把手上这份存住，不然切过去就丢了
+        session_mod.save(self.workspace, self.agent, self.agent.session_id)
+        saved = session_mod.load(self.workspace, sid)
+        if not saved:
+            self.proto.send("note", level="error", text="这段对话读不出来了（文件没了或者坏了）")
+            self.push_sessions()
+            return
+        self.agent.reset()
+        if not self.agent.restore(saved):
+            self.proto.send("note", level="error", text="这段对话恢复不了")
+            self.push_sessions()
+            return
+        self.agent.session_id = sid
+        self.proto.send("cleared")
+        self.proto.send("opened", id=sid, about=session_mod.describe(saved),
+                        history=history_view(self.agent))
+        self.push_sessions()
+        self.push_status()
+
     # ---- 命令 ----
 
     def run_command(self, text: str) -> None:
@@ -186,8 +224,10 @@ class Server:
         agent = self.agent
         if head == "/clear":
             agent.reset()
-            session_mod.drop(self.workspace)
+            session_mod.drop(self.workspace, agent.session_id)
+            agent.session_id = session_mod.new_id()
             self.proto.send("cleared")
+            self.push_sessions()
             self.proto.send("note", level="notice", text="对话历史已清空，存盘也删了")
         elif head == "/mode":
             self.proto.send("note", level="notice", text=_plain(cli._mode(agent, rest)))
@@ -258,9 +298,11 @@ class Server:
             self.proto.send("note", level="error", text="%s: %s" % (type(exc).__name__, exc))
         finally:
             self.busy = False
-            session_mod.save(self.workspace, self.agent)
+            session_mod.save(self.workspace, self.agent, self.agent.session_id)
             self.proto.send("turn_end")
             self.push_status()
+            # 新对话的第一轮跑完才有标题，侧边栏得跟着变
+            self.push_sessions()
 
     # ---- 读 stdin 的线程 ----
 
@@ -306,6 +348,12 @@ class Server:
             self.inbox.put((op, text))
         elif op == "status":
             self.push_status()
+        elif op == "sessions":
+            self.push_sessions()
+        elif op == "new":
+            self.inbox.put(("new", ""))
+        elif op == "open":
+            self.inbox.put(("open", str(msg.get("id") or "")))
         return True
 
     def run(self) -> int:
@@ -322,10 +370,15 @@ class Server:
                 return 0
             if op == "stop":
                 return 0
-            if not text.strip():
+            if not text.strip() and op != "new":
                 continue
             try:
-                if op == "command" or text.startswith("/"):
+                # 换会话要在主线程做：它动 agent 的历史，跟跑一轮是同一份状态
+                if op == "new":
+                    self.new_session()
+                elif op == "open":
+                    self.open_session(text)
+                elif op == "command" or text.startswith("/"):
                     self.run_command(text if text.startswith("/") else "/" + text)
                 else:
                     self.handle_prompt(text)
@@ -369,11 +422,14 @@ def serve(agent, workspace, tracer, resume: bool = False) -> int:
                 bad = any(w in text for w in ("未启用", "失败", "没起来", "出错"))
                 proto.send("boot", what=kind, level="warn" if bad else "notice",
                            text=text)
-        if resume:
-            saved = session_mod.load(workspace)
-            if saved and agent.restore(saved):
-                proto.send("resumed", about=session_mod.describe(saved),
-                           history=history_view(agent))
+        saved = session_mod.load(workspace) if resume else None
+        if saved and agent.restore(saved):
+            agent.session_id = session_mod.latest_id(workspace)
+            proto.send("resumed", about=session_mod.describe(saved),
+                       history=history_view(agent))
+        else:
+            agent.session_id = session_mod.new_id()
+        server.push_sessions()
         try:
             return server.run()
         finally:

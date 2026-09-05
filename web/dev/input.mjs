@@ -266,6 +266,86 @@ await type("把 a.py 改一下");
 s = await state();
 check("普通输入不弹菜单", !s.palette, s);
 
+// ── 侧边栏 ──────────────────────────────────────────────────
+async function side() {
+  return JSON.parse(await ev(`JSON.stringify({
+    open: document.body.dataset.side !== "off",
+    width: Math.round(document.getElementById("side").getBoundingClientRect().width),
+    talks: [...document.querySelectorAll(".talk__title")].map(e => e.textContent),
+    current: [...document.querySelectorAll('.talk[aria-current="true"] .talk__title')]
+               .map(e => e.textContent)[0] || null,
+  })`));
+}
+
+await ev(`document.body.dataset.side = "on"; true`);
+let sd = await side();
+check("侧边栏展开时有宽度", sd.width > 100, sd);
+await ev(`document.getElementById("side-toggle").click(); true`);
+await sleep(200);
+sd = await side();
+check("点一下收起来，宽度归零", !sd.open && sd.width === 0, sd);
+check("收起状态记进了 localStorage",
+      (await ev(`localStorage.getItem("feiyu.side")`)) === "off", null);
+await ev(`document.getElementById("side-toggle").click(); true`);
+await sleep(200);
+sd = await side();
+check("再点一下展开", sd.open && sd.width > 100, sd);
+
+// 历史列表：灌两条进去看画得对不对
+await ev(`handle({kind:"sessions", current:"B", rows:[
+  {id:"B", title:"把 parser 拆一下", model:"m", count:12, saved_at:2, when:"09-04 20:10"},
+  {id:"A", title:"改一下构建脚本", model:"m", count:4,  saved_at:1, when:"09-03 11:02"}]}); true`);
+await sleep(200);
+sd = await side();
+check("历史列表画出两条", sd.talks.length === 2 && sd.talks[0].includes("parser"), sd);
+check("当前那条标出来了", sd.current && sd.current.includes("parser"), sd);
+
+await ev(`handle({kind:"sessions", current:null, rows:[]}); true`);
+await sleep(150);
+const emptyText = await ev(`document.getElementById("talks").textContent`);
+check("没有历史时说一声", emptyText.includes("还没有"), emptyText);
+
+// 「新对话」按钮发的是 {op:"new"}
+await reset();
+await ev(`document.getElementById("new-talk").click(); true`);
+await sleep(200);
+const newSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("新对话按钮发 op:new", newSent.some(m => m.op === "new"), newSent);
+
+// 点历史里的一条发 {op:"open", id}
+await reset();
+await ev(`handle({kind:"sessions", current:"B", rows:[
+  {id:"A", title:"旧的那段", model:"m", count:4, saved_at:1, when:"09-03 11:02"}]});
+  document.querySelector(".talk").click(); true`);
+await sleep(200);
+const openSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("点历史发 op:open 带 id",
+      openSent.some(m => m.op === "open" && m.id === "A"), openSent);
+
+// ── 附件 ────────────────────────────────────────────────────
+await reset();
+await ev(`clips = [{name:".feiyu/uploads/a.png", state:"ready", path:".feiyu/uploads/a.png"}];
+  drawClips(); input.value = "看看这张图"; true`);
+await ev(`document.getElementById("send").click(); true`);
+await sleep(200);
+const clipSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+const prompt = clipSent.find(m => m.op === "prompt");
+check("附件路径跟着这句话一起发出去",
+      prompt && prompt.text.includes("看看这张图") && prompt.text.includes(".feiyu/uploads/a.png"),
+      prompt);
+check("发完附件条清空", (await ev(`clips.length`)) === 0, null);
+
+// 断线时点发送：话要留在框里，状态行要说一声
+await reset();
+await ev(`input.value = "这句发不出去"; socket.close(); true`);
+await sleep(400);
+await ev(`document.getElementById("send").click(); true`);
+await sleep(200);
+const offline = JSON.parse(await ev(`JSON.stringify({
+  kept: input.value, note: document.getElementById("state").textContent })`));
+check("断线时话留在输入框里", offline.kept === "这句发不出去", offline);
+check("断线时状态行说一声", offline.note.includes("没发出去"), offline);
+
 const errs = await ev(`JSON.stringify(window.__errs || [])`);
 console.log("\n页面 JS 报错:", errs);
 const bad = cases.filter((c) => !c.ok).length;

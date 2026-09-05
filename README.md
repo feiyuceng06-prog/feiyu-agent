@@ -262,6 +262,10 @@ feiyu-web -r                      # continue the last conversation in this direc
 feiyu-web --no-open               # don't open a browser
 ```
 
+The sidebar on the left lists past conversations; click one to switch to it (the agent's context follows, not just the view), "新对话" starts a fresh one without deleting the old, and `☰` collapses the panel. The collapsed state is remembered in the browser.
+
+The 附件 button next to the composer uploads files — dragging them onto the page works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message; it reads them with the `read_file` it already has, images, docx and pdf included.
+
 Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown in the page as a diff or the literal command, and nothing runs until you approve; "allow for this session" and a permanent rule are both there. Slash commands, skills, custom commands and `esc` to interrupt all work.
 
 **Three gates.** Anyone who reaches that port can have it write files and run commands on your machine, so: it listens on `127.0.0.1` only; each start mints a random token that appears only in the URL it prints for you (**don't pass that link around**); and the server checks `Origin` and `Host`, because **WebSocket is not covered by the same-origin policy** — without that gate, any web page you happen to open could connect to the local port and drive the agent.

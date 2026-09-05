@@ -67,7 +67,7 @@ class TestRoundTrip(Base):
 
     def test_权限是_600(self):
         session.save(self.ws, Agentish(self.make()))
-        mode = stat.S_IMODE(os.stat(session._path(self.ws)).st_mode)
+        mode = stat.S_IMODE(os.stat(session._legacy_path(self.ws)).st_mode)
         self.assertEqual(mode, 0o600)
 
     def test_不同工作区互不干扰(self):
@@ -93,9 +93,68 @@ class TestRoundTrip(Base):
     def test_删不存在的不崩(self):
         session.drop(self.ws)
 
+    def test_给了_id_就写进那一份(self):
+        session.save(self.ws, Agentish(self.make()), "20260101-000000")
+        rows = session.listing(self.ws)
+        self.assertEqual([r["id"] for r in rows], ["20260101-000000"])
+
+    def test_一个目录能存好几份_新的在前(self):
+        for sid in ("20260101-000000", "20260102-000000", "20260103-000000"):
+            session.save(self.ws, Agentish(self.make()), sid)
+        rows = session.listing(self.ws)
+        self.assertEqual([r["id"] for r in rows],
+                         ["20260103-000000", "20260102-000000", "20260101-000000"])
+        # 不给 sid 时读到的是最近那一份
+        self.assertEqual(session.latest_id(self.ws), "20260103-000000")
+
+    def test_标题取人说的第一句(self):
+        b = FakeBackend([])
+        b.messages = [{"role": "system", "content": "系统"},
+                      {"role": "user", "content": "把 parser 拆一下"},
+                      {"role": "assistant", "content": "好"}]
+        session.save(self.ws, Agentish(b), "20260101-000000")
+        self.assertEqual(session.listing(self.ws)[0]["title"], "把 parser 拆一下")
+
+    def test_标题不要把工具结果当成人说的话(self):
+        """anthropic 那边 tool_result 是挂在 user 消息里的 """
+        b = FakeBackend([])
+        b.messages = [{"role": "system", "content": "系统"},
+                      {"role": "user", "content": [{"type": "tool_result", "content": "读取 3 行"}]},
+                      {"role": "user", "content": [{"type": "text", "text": "这才是我说的"}]}]
+        session.save(self.ws, Agentish(b), "20260101-000000")
+        self.assertEqual(session.listing(self.ws)[0]["title"], "这才是我说的")
+
+    def test_老位置那份照样读得到(self):
+        """升级之后 feiyu --resume 不能突然说没有上次的对话 """
+        session.save(self.ws, Agentish(self.make()))          # 不给 sid = 写老位置
+        rows = session.listing(self.ws)
+        self.assertEqual([r["id"] for r in rows], [session.LEGACY])
+        self.assertIsNotNone(session.load(self.ws, session.LEGACY))
+        self.assertIsNotNone(session.load(self.ws))
+
+    def test_超过上限从最早的删(self):
+        for n in range(session.MAX_KEPT + 5):
+            session.save(self.ws, Agentish(self.make()), "2026%04d-000000" % n)
+        rows = session.listing(self.ws)
+        self.assertEqual(len(rows), session.MAX_KEPT)
+        self.assertNotIn("20260000-000000", [r["id"] for r in rows])
+
+    def test_删指定的那一份(self):
+        session.save(self.ws, Agentish(self.make()), "20260101-000000")
+        session.save(self.ws, Agentish(self.make()), "20260102-000000")
+        session.drop(self.ws, "20260101-000000")
+        self.assertEqual([r["id"] for r in session.listing(self.ws)], ["20260102-000000"])
+
+    def test_id_不合法一律不认(self):
+        """id 会拼进路径，`../` 这种要挡住 """
+        for bad in ("../../etc/passwd", "a/b", "", "x" * 50, "有中文"):
+            session.save(self.ws, Agentish(self.make()), bad)
+            self.assertIsNone(session.load(self.ws, bad), bad)
+        self.assertEqual(session.listing(self.ws), [])
+
     def test_坏文件当作没有(self):
         os.makedirs(session.DIR, exist_ok=True)
-        with open(session._path(self.ws), "w", encoding="utf-8") as f:
+        with open(session._legacy_path(self.ws), "w", encoding="utf-8") as f:
             f.write("{ 坏了")
         self.assertIsNone(session.load(self.ws))
 
