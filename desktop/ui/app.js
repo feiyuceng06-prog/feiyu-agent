@@ -238,6 +238,50 @@ function setDot(state, text) {
   $("s-state").textContent = text;
 }
 
+/* ── 等了多久 ───────────────────────────────────────────────
+   **一轮跑十分钟是真会发生的**（中转站 + 思考型模型，实测 622 秒），
+   而屏幕上只写「干活中」的话，慢和死长得一模一样 —— 用户拿这个来问过
+   「为什么卡死了」。终端那边的 spinner 本来就带计时，桌面端补上。
+
+   过了 SLOW_AFTER 还没动静就把这句话说出来：它多半没坏，就是慢，
+   而"要不要再等"只有用户自己判断得了。 */
+const SLOW_AFTER = 90;
+let waitFrom = 0;
+let waitTick = 0;
+let thoughtSize = 0;
+
+function clock(secs) {
+  const m = Math.floor(secs / 60);
+  return m ? `${m}:${String(secs % 60).padStart(2, "0")}` : `${secs}s`;
+}
+
+function drawWait() {
+  if (!waitFrom) return;
+  const secs = Math.round((Date.now() - waitFrom) / 1000);
+  const slow = secs >= SLOW_AFTER;
+  // 在想的时候说"在想"，别笼统地写"干活中"——那是这一版要治的病
+  const what = thoughtSize ? `在想 ${clock(secs)}（已想 ${thoughtSize} 字）`
+                           : `干活中 ${clock(secs)}`;
+  setDot(slow && !thoughtSize ? "slow" : "busy",
+         slow && !thoughtSize ? `${what} · 比平时慢，还在等 · esc 中断`
+                              : `${what} · esc 中断`);
+}
+
+function startWait() {
+  if (waitFrom) return;                 // 已经在计了，别把秒数清零
+  waitFrom = Date.now();
+  thoughtSize = 0;
+  drawWait();
+  waitTick = setInterval(drawWait, 1000);
+}
+
+function stopWait() {
+  clearInterval(waitTick);
+  waitFrom = 0;
+  waitTick = 0;
+  thoughtSize = 0;
+}
+
 function shortPath(raw, cap = 46) {
   const short = (raw || "—").replace(/^\/home\/[^/]+/, "~");
   // 从左边裁、保住尾巴 —— 裁右边的话看到的是 /tmp/xxx/yyy/…，
@@ -267,7 +311,12 @@ function setStatus(s) {
   if (s.version) $("s-ver").textContent = "v" + s.version;
   $("send").hidden = busy;
   $("stop").hidden = !busy;
-  setDot(busy ? "busy" : "ready", busy ? "干活中 · esc 中断" : "就绪");
+  if (busy) {
+    startWait();
+  } else {
+    stopWait();
+    setDot("ready", "就绪");
+  }
 }
 
 /* 一块正文写完了：重渲染一次去掉光标。
@@ -333,6 +382,13 @@ function handle(ev) {
       lastTool = ev;
       toolSeen.set(ev.id || "", ev);
       toolBlocks.set(ev.id || "", toolLine(ev));
+      break;
+
+    case "thinking":
+      /* 思考型模型可以想上十分钟一个字都不说。**这条事件是唯一的活体证明** ——
+         数据一直在流，所以连超时都不会响，界面上却什么都没有。 */
+      thoughtSize = ev.size || 0;
+      drawWait();
       break;
 
     case "tool_progress": {
@@ -417,6 +473,7 @@ function handle(ev) {
     }
 
     case "text":
+      thoughtSize = 0;          // 开口了就不再是"在想"
       if (!saying) {
         saying = block("它说");
         sayingText = "";

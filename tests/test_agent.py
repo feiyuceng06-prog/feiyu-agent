@@ -103,7 +103,7 @@ class TestInterruptKeepsHistoryValid(Base):
 
     def test_模型正说话时被打断(self):
         b = self.use([])
-        def boom(on_text, on_tool=None):
+        def boom(on_text, on_tool=None, on_think=None):
             on_text("我正在读 build.mjs")
             raise KeyboardInterrupt()
         b.run_turn = boom
@@ -115,7 +115,7 @@ class TestInterruptKeepsHistoryValid(Base):
 
     def test_一个字都没说就被打断(self):
         b = self.use([])
-        def boom(on_text, on_tool=None):
+        def boom(on_text, on_tool=None, on_think=None):
             raise KeyboardInterrupt()
         b.run_turn = boom
         with self.assertRaises(KeyboardInterrupt):
@@ -150,7 +150,7 @@ class TestToolArgProgress(Base):
         seen = []
         b = self.use([("", [call("c1", "write_file", path="a.py", content="x")]), ("好", [])])
         real = b.run_turn
-        def run_turn(on_text, on_tool=None):
+        def run_turn(on_text, on_tool=None, on_think=None):
             seen.append(on_tool)
             return real(on_text, on_tool)
         b.run_turn = run_turn
@@ -636,7 +636,7 @@ class TestStreamRetry(Base):
         state = {"n": 0}
         b = self.use([("答完了", [])])
         real = b.run_turn
-        def run_turn(on_text, on_tool=None):
+        def run_turn(on_text, on_tool=None, on_think=None):
             if state["n"] < times:
                 state["n"] += 1
                 if text:
@@ -710,7 +710,7 @@ class Overflowing(FakeBackend):
         self.message = message
         self.compacted = 0
 
-    def run_turn(self, on_text, on_tool=None):
+    def run_turn(self, on_text, on_tool=None, on_think=None):
         if self.fail:
             self.fail -= 1
             exc = Exception("Error code: 400 - " + self.message)
@@ -1080,3 +1080,18 @@ class TestToggles(Base):
         enabled.set_on("skills", "甲", False)
         out = self.agent.toolbox.run("skill", {"name": "甲"})
         self.assertTrue(out.is_error)
+
+
+class TestThinkingWired(Base):
+    """`on_think` 得真的从后端接到 Stream 上 —— 中间断一处就白做 """
+
+    def test_后端报的想字数传到了_stream(self):
+        b = self.use([("好", [])])
+        b.thinks = [120, 900, 4000]
+        seen = []
+        import feiyu.ui as ui_mod
+        real = ui_mod.Stream.thinking
+        ui_mod.Stream.thinking = lambda self, n: seen.append(n)
+        self.addCleanup(setattr, ui_mod.Stream, "thinking", real)
+        quiet(self.agent.send, "想想")
+        self.assertEqual(seen, [120, 900, 4000])

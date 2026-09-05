@@ -9,6 +9,30 @@ from . import pricing
 # 只管请求发出之前；流中途断掉由 agent.send() 那边接
 RETRIES = 4
 
+# 一次流式请求里，**两个 chunk 之间最多能静多久**（秒）。不是一整轮的上限：
+# 只要它一直在吐字，一轮想跑多久跑多久。
+#
+# 传一个裸浮点数下去，两个 SDK 都转成 `httpx.Timeout(它)`，connect / read / write / pool
+# 全是这个数，而 read 在流式请求里量的正是相邻两次收到数据的间隔。
+#
+# **默认就是两个 SDK 原本的 600 秒，这里只是把它写明白、并且让人能改。**
+# 别想当然地往小了调：实测过一轮 622 秒的请求（中转站 + 本地代理，
+# 思考型模型 19k 输入），它一直在断断续续地吐字，只是慢 —— 调到三分钟
+# 会把这种本来会成功的请求掐死。要它快点失败就把这个数调小，
+# 撞上"明明还在跑却被掐了"就调大。
+#
+# 超时抛出来之后走 agent.send() 那条「还没吐字就重发、吐了字就不重发」（0.20.0），
+# `APITimeoutError` / `ReadTimeout` 已经在 RETRY_NAMES 里。
+def _stream_timeout() -> float:
+    try:
+        said = float(os.environ.get("FEIYU_STREAM_TIMEOUT") or 0)
+    except ValueError:
+        said = 0
+    return said if said > 0 else 600.0
+
+
+STREAM_TIMEOUT = _stream_timeout()
+
 SUMMARY_PROMPT = (
     "下面是一段人和编程 agent 的对话记录 把它压缩成一段交接说明，"
     "让接手的人只看这段就能继续干活 必须保留：用户的目标和明确要求、"
@@ -146,6 +170,8 @@ class Billing:
         self.last_in = 0
         self.last_hit = 0
 
+    last_out = 0
+
     def _charge(self, hit: int, miss: int, out: int, *, write: int = 0,
                 context: bool = True) -> None:
         """context=False 是旁路请求（摘要、网页提炼）：要算钱，但不是"对话现在多大"
@@ -156,6 +182,9 @@ class Billing:
             self.tokens_context = size
             self.last_in = hit + miss + write
             self.last_hit = hit
+            # **出了多少字要记下来。** 只记输入的话，一轮跑了十分钟事后没法归因：
+            # 分不清是"想/说了很多"还是"接口就是慢"（真为这个查了半天）
+            self.last_out = out
         self.tokens_total += size
         self.tokens_in += hit + miss + write
         self.tokens_hit += hit
@@ -177,7 +206,7 @@ class AnthropicBackend(Billing):
 
         # SDK 默认重试 2 次；agent 一跑就是几十轮请求，多给两次更划算
         self.client = anthropic.Anthropic(
-            max_retries=RETRIES,
+            max_retries=RETRIES, timeout=STREAM_TIMEOUT,
             **{k: v for k, v in (("base_url", base_url), ("api_key", api_key)) if v}
         )
         self.system = system
@@ -310,7 +339,7 @@ class AnthropicBackend(Billing):
         for block in spots[-CACHE_KEEP:]:
             block["cache_control"] = CACHE_MARK
 
-    def run_turn(self, on_text, on_tool=None) -> TurnResult:
+    def run_turn(self, on_text, on_tool=None, on_think=None) -> TurnResult:
         said = []
 
         def watch(text):
@@ -318,15 +347,15 @@ class AnthropicBackend(Billing):
             on_text(text)
 
         try:
-            return self._turn(watch, on_tool)
+            return self._turn(watch, on_tool, on_think)
         except Exception as exc:
             # 断点是请求参数，不认的话错在发出的那一刻，一个字都还没吐出来，重发是安全的
             if self.cache and not said and _cache_rejected(exc):
                 self.cache = False
-                return self._turn(on_text, on_tool)
+                return self._turn(on_text, on_tool, on_think)
             raise
 
-    def _turn(self, on_text, on_tool=None) -> TurnResult:
+    def _turn(self, on_text, on_tool=None, on_think=None) -> TurnResult:
         self._mark_messages()
         with self.client.messages.stream(
             model=self.model,
@@ -337,7 +366,7 @@ class AnthropicBackend(Billing):
             tools=self._cached_tools(),
             messages=self.messages,
         ) as stream:
-            name, partial = "", ""
+            name, partial, thought = "", "", 0
             for event in stream:
                 if event.type == "content_block_start":
                     block = getattr(event, "content_block", None)
@@ -345,6 +374,10 @@ class AnthropicBackend(Billing):
                     partial = ""
                 elif event.type == "content_block_delta" and event.delta.type == "text_delta":
                     on_text(event.delta.text)
+                elif (event.type == "content_block_delta"
+                      and event.delta.type == "thinking_delta" and on_think):
+                    thought += len(event.delta.thinking or "")
+                    on_think(thought)
                 elif (event.type == "content_block_delta"
                       and event.delta.type == "input_json_delta" and on_tool and name):
                     partial += event.delta.partial_json or ""
@@ -387,7 +420,8 @@ class OpenAICompatBackend(Billing):
                 "请先安装：pip install openai"
             ) from exc
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=RETRIES)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=RETRIES,
+                             timeout=STREAM_TIMEOUT)
         self.model = model
         self.max_tokens = int(max_tokens or self.MAX_TOKENS)
         self.system = system
@@ -488,7 +522,7 @@ class OpenAICompatBackend(Billing):
         for m in seen:
             m.setdefault("reasoning_content", "")
 
-    def run_turn(self, on_text, on_tool=None) -> TurnResult:
+    def run_turn(self, on_text, on_tool=None, on_think=None) -> TurnResult:
         self._mind_thinking()
         stream = self.client.chat.completions.create(
             model=self.model,
@@ -522,6 +556,11 @@ class OpenAICompatBackend(Billing):
             # 只有它自己吐过才会带上，所以不会往不认这个字段的接口上乱塞
             if getattr(delta, "reasoning_content", None):
                 reasoning += delta.reasoning_content
+                # **想的过程也要让人看见。** 不报的话思考型模型在那儿想十分钟，
+                # 屏幕上一个字都没有 —— 跟死了长得一模一样（实测过一轮 622 秒，
+                # 全在这儿；数据一直在流，所以连超时都不会响）
+                if on_think:
+                    on_think(len(reasoning))
             for tc in getattr(delta, "tool_calls", None) or []:
                 slot = pending.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                 if tc.id:

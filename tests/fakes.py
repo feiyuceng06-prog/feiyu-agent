@@ -21,6 +21,7 @@ class FakeBackend(OpenAICompatBackend):
         self.truncated = truncated
         self.asked = []
         self.progress = []      # 喂出去的 (工具名, 半截参数)，用来验参数流接没接上
+        self.thinks: list[int] = []   # 每轮开口前先报几次"想了多少字"
         self._reset_usage()
 
     def set_system(self, text):
@@ -33,8 +34,12 @@ class FakeBackend(OpenAICompatBackend):
         self.asked.append(prompt)
         return "这是摘要"
 
-    def run_turn(self, on_text, on_tool=None):
+    def run_turn(self, on_text, on_tool=None, on_think=None):
         text, calls = self.script.pop(0) if self.script else ("说完了", [])
+        if self.thinks and on_think:
+            # 思考型模型：先"想"一阵才开口，界面靠这个才知道它没死
+            for n in self.thinks:
+                on_think(n)
         if text:
             on_text(text)
         for c in calls:

@@ -434,6 +434,8 @@ body[data-side="off"] .side { border-right: 0; }
 .dot { width: 6px; height: 6px; background: var(--faint); flex: none; }
 .dot[data-state="ready"] { background: var(--accent); }
 .dot[data-state="busy"]  { background: var(--alert); animation: pulse 1.2s ease-in-out infinite; }
+/* 慢也是 alert 色，但**脉冲放慢**——快闪看着像出事了，而它只是在等 */
+.dot[data-state="slow"]  { background: var(--alert); animation: pulse 3s ease-in-out infinite; }
 .dot[data-state="off"]   { background: var(--line-strong); }
 
 @keyframes pulse { 50% { opacity: 0.25; } }

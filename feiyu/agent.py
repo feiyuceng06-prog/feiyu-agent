@@ -773,10 +773,12 @@ class Feiyu:
         while True:
             stream = ui.Stream()
             stream.start()
+            asked = time.monotonic()
             try:
                 # 中断/报错时也必须停掉 spinner 线程，否则它会继续往屏幕上糊帧
                 turn = self.backend.run_turn(on_text=stream.write,
-                                             on_tool=stream.progress)
+                                             on_tool=stream.progress,
+                                             on_think=stream.thinking)
                 self._pending = 0       # 接口刚报过准确的数，估算作废
             except KeyboardInterrupt:
                 # 流到一半被打断，run_turn 没来得及把 assistant 写进历史
@@ -820,6 +822,10 @@ class Feiyu:
                              cost=self.cost, truncated=turn.truncated or None,
                              input=getattr(self.backend, "last_in", 0),
                              hit=getattr(self.backend, "last_hit", 0),
+                             # 这一轮花了多久、出了多少字 —— 少这两项的话
+                             # "为什么这轮跑了十分钟"事后查不出来
+                             ms=round((time.monotonic() - asked) * 1000),
+                             out=getattr(self.backend, "last_out", 0) or None,
                              calls=[c.name for c in turn.tool_calls] or None)
             if turn.truncated:
                 # 撞上限不只是"话说了半截"：工具参数是流式拼的 JSON，断在中间
@@ -998,7 +1004,8 @@ class Feiyu:
             stream = ui.Stream()
             stream.start()
             try:
-                turn = self.backend.run_turn(on_text=stream.write)
+                turn = self.backend.run_turn(on_text=stream.write,
+                                             on_think=stream.thinking)
             finally:
                 stream.finish()
             value, bad = schema_mod.extract(turn.text)

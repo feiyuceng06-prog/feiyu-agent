@@ -103,7 +103,7 @@ def summarize(rows: list[dict]) -> dict:
             "run": row.get("run", "?"), "start": row.get("ts", 0), "end": row.get("ts", 0),
             "model": "", "tokens": 0, "cost": 0.0, "priced": False,
             "turns": 0, "tools": 0, "denied": 0, "task": "",
-            "input": 0, "hit": 0,
+            "input": 0, "hit": 0, "out": 0, "ms": 0, "slowest": 0,
         })
         run["end"] = max(run["end"], row.get("ts", 0))
         kind = row.get("kind")
@@ -115,6 +115,11 @@ def summarize(rows: list[dict]) -> dict:
             run["tokens"] += row.get("tokens", 0) or 0
             run["input"] += row.get("input", 0) or 0
             run["hit"] += row.get("hit", 0) or 0
+            run["out"] += row.get("out", 0) or 0
+            run["ms"] += row.get("ms", 0) or 0
+            # 最慢那一轮单独记：一个任务里九轮五秒、一轮十分钟，
+            # 只看平均的话那十分钟就被摊没了 —— 而要查的正是它
+            run["slowest"] = max(run["slowest"], row.get("ms", 0) or 0)
             if row.get("cost") is not None:
                 run["cost"] += row["cost"]
                 run["priced"] = True

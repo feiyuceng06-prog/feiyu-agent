@@ -446,6 +446,33 @@ const shell = JSON.parse(await ev(`JSON.stringify({
 })`));
 check("标题栏在", shell.bar, shell);
 
+/* 等的时候要看得见等了多久。一轮跑十分钟是真会发生的（实测 622 秒），
+   只写「干活中」的话，慢和死长得一模一样 —— 用户拿这个来问过「为什么卡死了」。 */
+await ev(`handle({kind:"status", ready:true, mode:"default", busy:true,
+  workspace:"/tmp", model:"m", name:"m", tokens:1, cost:0,
+  context:1, context_limit:100}); waitFrom = Date.now() - 125000; drawWait(); true`);
+await sleep(150);
+const waited = JSON.parse(await ev(`JSON.stringify({
+  said: document.getElementById("s-state").textContent,
+  dot: document.getElementById("dot").dataset.state })`));
+check("等久了要显示等了多久", waited.said.includes("2:05"), waited);
+check("等太久了要说一声「比平时慢」", waited.said.includes("比平时慢") && waited.dot === "slow",
+      waited);
+
+// 在想的时候要说"在想"，还要报想了多少字 —— 那 622 秒全在这儿
+await ev(`handle({kind:"thinking", size:3200}); true`);
+await sleep(150);
+const thought = await ev(`document.getElementById("s-state").textContent`);
+check("在想的时候说在想、带字数",
+      thought.includes("在想") && thought.includes("3200 字"), thought);
+
+/* **不能靠喂一条 busy:false 来验收尾**：夹具连的是一个真 agent，
+   前面那条附件用例起的活还在跑，它推的 status(busy:true) 会把计时重新点起来
+   （真被这个绊过一次）。直接调 stopWait 验它自己。 */
+await ev(`stopWait(); true`);
+const stopped = await ev(`JSON.stringify([waitFrom, waitTick, thoughtSize])`);
+check("收尾把计时和想的字数都清掉", stopped === "[0,0,0]", stopped);
+
 /* 命令补全那块。三条都是用户拿截图来问的：
    ↑↓ 走到看不见的地方（菜单最高 16rem，命令十几条）；
    `/命令 空格` 之后没有子选项；shift+tab 在桌面端没反应。 */

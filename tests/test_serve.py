@@ -509,3 +509,41 @@ class TestApproveWords(unittest.TestCase):
     def test_没回话按拒绝(self):
         for bad in (None, "", "什么", 1, ["yes"]):
             self.assertEqual(self.Box(bad).approve("bash", {"command": "ls"}), "no")
+
+
+class TestThinking(Base):
+    """想的过程要报出去
+
+    思考型模型可以想十分钟一个字都不说。**数据一直在流，所以超时不会响**，
+    界面上却什么都没有 —— 跟死了长得一模一样。实测过一轮 622 秒全花在这儿，
+    用户拿这个来问「为什么卡死了」。
+    """
+
+    def test_按步长报_不是每个_delta_都报(self):
+        stream = ui.Stream()
+        for n in range(0, ui.PROGRESS_STEP * 3, 50):
+            stream.thinking(n)
+        got = self.sink.find("thinking")
+        self.assertLessEqual(len(got), 4, got)
+        self.assertGreaterEqual(len(got), 2, got)
+        # 报的是"到这一档为止"，不是最后那个数 —— 只在跨档时才报
+        self.assertLessEqual(got[-1]["size"], ui.PROGRESS_STEP * 3 - 50)
+        self.assertGreater(got[-1]["size"], ui.PROGRESS_STEP * 2 - 50 - ui.PROGRESS_STEP)
+
+    def test_想的字数会到状态行上(self):
+        ui._COLOR = False
+        stream = ui.Stream()
+        stream._tty = True
+        stream.thinking(3200)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            stream._draw_status(0, None)
+        self.assertIn("已经想了 3200 字", out.getvalue())
+
+    def test_还没想的时候不占地方(self):
+        ui._COLOR = False
+        stream = ui.Stream()
+        stream._tty = True
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            stream._draw_status(0, None)
+        self.assertIn("思考中", out.getvalue())
+        self.assertNotIn("已经想了", out.getvalue())

@@ -765,6 +765,8 @@ class Stream:
         self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
         self._status_drawn = False
         self._reported = -1     # 参数进度报到第几档了，见 progress()
+        self._thought = 0       # 已经想了多少字，见 thinking()
+        self._thought_step = -1
         self._status_at = 0.0
         self._lead = True       # 正文第一行还没开始：开头带一个 ⏺，跟工具行区分开
         self.wrote_text = False
@@ -788,6 +790,23 @@ class Stream:
             return
         with self._lock:
             self._buf.append(text)
+
+    def thinking(self, size: int) -> None:
+        """模型正在"想"（reasoning_content / thinking_delta），报个字数出去
+
+        **不报的话思考型模型在那儿想十分钟，屏幕上一个字都没有**，跟死了长得一样：
+        数据一直在流，所以连超时都不会响。实测过一轮 622 秒全花在这儿。
+        跟 progress() 一样按步长报，一个 delta 一条事件会把前端灌死 。
+        """
+        if events.active():
+            step = size // PROGRESS_STEP
+            if step != self._thought_step:
+                self._thought_step = step
+                events.emit("thinking", size=size)
+        if not self._tty:
+            return
+        with self._lock:
+            self._thought = size
 
     def progress(self, name: str, partial: str) -> None:
         """工具参数还在流式生成 存下就走：上游每个 delta 都会调一次，
@@ -972,7 +991,13 @@ class Stream:
             self._fresh_line, self._col = True, 0
         elapsed = int(time.monotonic() - self._begin)
         tail = " (%ds · esc 中断)" % elapsed
-        text = tool_progress(*status) if status else "思考中…"
+        # 工具参数在生成 > 正在想 > 什么都不知道 —— 越具体的越优先
+        if status:
+            text = tool_progress(*status)
+        elif self._thought:
+            text = "在想… 已经想了 %d 字" % self._thought
+        else:
+            text = "思考中…"
         body = clip(text, max(8, self._limit - visible(tail) - 4))
         sys.stdout.write("\r\033[K" + paint("brown", FRAMES[frame]) + paint("grey", " " + body + tail))
         sys.stdout.flush()

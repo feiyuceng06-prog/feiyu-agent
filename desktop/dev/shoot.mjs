@@ -315,7 +315,10 @@ await cdp.call("Page.navigate", { url });
 /* 看状态灯，**不要看 `online`** —— 那是个顶层 `let`，在 classic script 里
    落在 script scope 上，CDP 的 eval 按裸名字取不到（会抛 ReferenceError）。 */
 for (let n = 0; n < 60; n++) {
-  const lit = await cdp.eval(`document.getElementById("dot").dataset.state`);
+  // **要挡住 null**：navigate 刚发出去时文档还是上一页/空页，取不到那个元素就抛
+  const lit = await cdp.eval(
+    `(document.getElementById("dot") || {}).dataset ` +
+    `? document.getElementById("dot").dataset.state : ""`);
   if (lit === "ready") break;
   await sleep(250);
 }

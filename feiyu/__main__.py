@@ -907,9 +907,11 @@ def _cost(agent: Feiyu, workspace) -> str:
         when = _time.strftime("%m-%d %H:%M", _time.localtime(run["start"]))
         money = pricing.yuan(run["cost"]) if run["priced"] else "—"
         task = ui.clip(run["task"] or "（交互）", 30)
-        rows.append("   " + ui.paint("grey", "%s  %-32s %4s轮 %7s %5s %9s" % (
+        # 最慢那一轮显在最后：整条 run 的时长里有多少是"等模型"，看这个数最直接
+        slow = "%.0fs" % (run["slowest"] / 1000) if run.get("slowest") else "—"
+        rows.append("   " + ui.paint("grey", "%s  %-30s %4s轮 %7s %5s %7s %8s" % (
             when, task, run["turns"], ui.tokens(run["tokens"]),
-            _hit_rate(run["hit"], run["input"]), money)))
+            _hit_rate(run["hit"], run["input"]), "最慢" + slow, money)))
         total_tokens += run["tokens"]
         total_cost += run["cost"]
         total_in += run["input"]

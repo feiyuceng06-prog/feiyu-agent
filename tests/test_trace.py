@@ -137,3 +137,29 @@ class TestSummarize(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSlowestTurn(unittest.TestCase):
+    """一个任务里九轮五秒、一轮十分钟，只看平均那十分钟就被摊没了 ——
+    而要查的正是它。所以 summarize 单独记最慢那一轮。"""
+
+    def rows(self, *ms):
+        out = [{"run": "r", "ts": 0, "kind": "run_start", "model": "m", "task": "干活"}]
+        for n, one in enumerate(ms):
+            out.append({"run": "r", "ts": n, "kind": "turn", "round": n, "ms": one,
+                        "tokens": 100, "input": 90, "hit": 80, "out": 10, "cost": 0.1})
+        return out
+
+    def test_记下最慢那一轮和总时长(self):
+        run = trace.summarize(self.rows(5000, 5000, 622000, 5000))["r"]
+        self.assertEqual(run["slowest"], 622000)
+        self.assertEqual(run["ms"], 637000)
+        self.assertEqual(run["out"], 40)
+
+    def test_没有_ms_的老记录不崩(self):
+        rows = self.rows(5000)
+        del rows[1]["ms"]
+        del rows[1]["out"]
+        run = trace.summarize(rows)["r"]
+        self.assertEqual(run["slowest"], 0)
+        self.assertEqual(run["out"], 0)

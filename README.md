@@ -101,7 +101,7 @@ Type `/` for command completion:
 | `/review` | Have another model grade this change |
 | `/memory` | Show, add, delete long-term memory for this directory |
 | `/context` | Reload the project convention file |
-| `/cost` | Recent spend by task |
+| `/cost` | Recent spend by task, with each task's slowest turn |
 | `/compact` | Compress the history into a summary |
 | `/helper <name>` | Use a cheaper model for summaries, subagents and page extraction; `/helper off` to revert |
 | `/style` | Reply style: `default` / `concise` / `explanatory` / `teaching` |
@@ -376,13 +376,20 @@ stdout carries only the JSON; the interface and logs go to stderr. Output that d
 **Spend.** `/cost` summarises the last seven days by task:
 
 ```
-   08-27 00:14  fix error handling in parser.py      5 rounds    8.2k   71%    ¥0.031
-   08-27 09:02  add --json flag to the CLI          12 rounds   31.5k   84%    ¥0.118
+   08-27 00:14  fix error handling in parser.py     5 rounds    8.2k   71%  slowest 12s   ¥0.031
+   08-27 09:02  add --json flag to the CLI         12 rounds   31.5k   84%  slowest 38s   ¥0.118
 
    total  39.7k  ¥0.149  cache hits 81%
 ```
 
-The second-to-last column is the cache hit rate. It decides what long tasks cost: a constant 0 means the API does not cache and every resent history is billed in full.
+The percentage is the cache hit rate. It decides what long tasks cost: a constant 0 means the
+API does not cache and every resent history is billed in full.
+
+"slowest" is the **slowest single turn** in that task, not the average — nine turns of five
+seconds and one of ten minutes averages the ten minutes away, and the ten minutes is the thing
+you came to look at. A wildly large number is usually the API having a bad moment; the log line
+for that turn also records how many tokens it produced, which separates "said a lot" from
+"the API was just slow".
 
 ## MCP
 
