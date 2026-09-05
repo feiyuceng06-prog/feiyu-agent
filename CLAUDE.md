@@ -1,6 +1,7 @@
 # Feiyu Agent — 给 Claude 的项目约定
 
-跑在终端里的编程 agent。约 9000 行 Python，无框架。
+跑在终端里的编程 agent。约 9300 行 Python，无框架。
+另有一个网页端（`web/`，Rust + 原生前端），入口是 `feiyu-web`。
 
 verify: .venv/bin/python -m unittest discover -s tests -t .
 
@@ -22,6 +23,10 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 | `feiyu/memory.py` | 跨会话长期记忆（agent 自己记的事实） |
 | `feiyu/hooks.py` | 钩子：四个时机跑外部命令，含项目钩子的信任机制 |
 | `feiyu/skills.py` | 技能（模型按需读）与自定义斜杠命令（用户敲），含项目技能的信任机制 |
+| `feiyu/events.py` | 结构化事件的 sink：ui 除了画终端，还能把同一件事报给别的前端 |
+| `feiyu/serve.py` | `--serve`：把 agent 挂在 stdio 上说行 JSON，给网页端用 |
+| `web/src/main.rs` | feiyu-web：HTTP + WebSocket，前端资源编进二进制，监管一个 `feiyu --serve` |
+| `web/assets/` | 网页端前端（index.html / app.css / app.js），无框架无依赖 |
 | `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
 | `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
@@ -1281,6 +1286,105 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
   技能正文可以写任何东西，给了就得重新论证。
 - **`ui.pad()`**：`ljust` 数的是字符数，CJK 一个字占两格，技能名可以是中文，
   `/skills` 和 `/help` 用 ljust 会对不齐。这是那个犯过三次的老坑的第四次。
+
+## 网页端（0.50.0）
+
+用户要一个网页端，样式照他的博客（feiyuz123.com）再往国际现代主义推一档，
+并且「用 Rust 优化性能」。
+
+### Rust 放在哪：**服务层，不是工具层**
+
+先把这件事说清楚，别有人回头照着「用 Rust 提性能」去重写 tools.py：
+实测本地工具加起来不到 20ms（启动 0.13 秒、read_file 0.6ms、search 5ms 走 rg、
+list_files 0.4ms），而一轮要等模型 3 到 10 秒 —— **重写工具层是把 20ms 优化成 5ms**，
+这话跟用户当面说过。
+
+Rust 在这儿的理由只有一条，但很硬：Python 侧的硬性约定是「不引新依赖」，
+而网页端要 HTTP、WebSocket、静态资源、并发连接。放 Rust 里，**Python 一个依赖都不加**，
+用户拿到的是一个 900K 的静态二进制。
+
+### 接缝在 ui.py，不在 agent.py
+
+`agent.py` 里有三十处 `print(ui.xxx(...))`。**一处都没动。**
+`feiyu/events.py` 是个 sink：装上之后 ui 的那几个函数照旧返回 ANSI（终端那条路一个字没变），
+同时把同一件事按结构报一份。这正是 CLAUDE.md 开头那条分层原则的兑现——
+「ui.py 是唯一给人看的输出层」，所以换前端就该在这儿换。
+
+- **报的是原始 markdown 和原始参数，不是画好的字符串**。把 ANSI 发给浏览器再解析回去
+  是最糟的做法；怎么画是前端的事。
+- **`Stream.progress` 要按 `PROGRESS_STEP` 攒着报**：上游一个 delta 一次回调，
+  一个长文件就是几千条事件，全推给浏览器会把它卡住。终端那条路不受影响（它按 12Hz 重画）。
+- **`events.paused()` 是必需的**：斜杠命令那些函数（`__main__._mode` 之类）内部就是拿
+  `ui.notice()` 拼的，不挡的话一条 `/mode` 会报两遍（内部一条、调用方把返回值发出去又一条）。
+  第一版就是这样，实测截图里看到的。
+- 事件 sink **绝不能因为前端出问题把 agent 弄崩**，`emit` 咽掉所有异常，理由同 `trace.write`。
+
+### 协议：stdout 只放 JSON
+
+`feiyu --serve` 一行一个 JSON 出去、一行一个进来。人看的那些 ANSI 整体
+`redirect_stdout(sys.stderr)` —— **跟 `--json-schema` 一模一样的做法**，
+不要逐处去改 print 的目标。
+
+- **确认走的是本来就有的回调**（`agent.approve` / `ask_user` / `approve_plan` /
+  `approve_hooks` / `approve_mcp` / `approve_skills`）。`__main__` 塞的是 `ui.confirm`，
+  serve 塞的是「发一条 ask 事件、在队列上等回话」。所以确认语义跟终端完全一致，
+  包括「本次会话都允许」和「永久允许」写规则。
+- **对面断了要 `fail_all()`**：不放掉那些等着的请求，agent 会卡到 `REPLY_TIMEOUT`（10 分钟），
+  而网页早关了。
+- **中断走 `_thread.interrupt_main()`**，跟 `EscInterrupt` 落在同一处，
+  0.12.0 那套「中断要让历史保持自洽」的不变量原样成立，不用另写一套。
+- `--serve` 的早退分支要放在 `__main__` 里那些 `ui.confirm` 版回调**之前**：
+  那些在没有终端的地方一律返回「拒绝」，而 `load_hooks` / `load_mcp` / `load_skills`
+  要用 serve 自己那套回调去问人。
+
+### 前端：博客的设计系统 + 国际现代主义
+
+继承自 feiyuz123.com（改之前先回去核对 `~/Myproject/src/styles.css`）：纯白纸、
+墨色全是 `rgba(0,0,0,α)`、IBM Blue **只做线和面永远不做字**、24px 基线网格
+（line-height 是长度不是比例）、8pt 间距阶、只有 400/700 两档字重、除图片外全是直角、
+没有暗色模式、浮现是 8px/500ms/ease-out。
+
+这一版加的：**meta-rail** —— 每块内容左边一列大写小标签加一条竖线，这是整页的骨架；
+规线承担全部分区职责（没有卡片、阴影、圆角、底色块）；功能性大写只给标签不给内容。
+
+**第二色 `--alert` 只给需要你动手的东西**：确认卡、报错、diff 删除行。
+取自终端 swiss 主题那个红。蓝管结构、红管「停下来看我」，别扩大用途。
+
+几个踩到的：
+
+- **`.note` 是 `<p>`，浏览器默认给它 1em 边距**，不清掉整条 meta-rail 就歪了。
+- **按钮上的权限规则是文件路径，不能吃 `text-transform: uppercase`**
+  （会变成 `UPDATE(FEIYU/TOOLS.PY)`）。功能性大写只给标签，这条整份设计里到处成立。
+- **确认卡插进来时要把当前那块工具行收掉**（`liveTool = null`），
+  结果回来时照 `lastTool` 另起一块。不这么做的话结果会画在授权它的那张卡**上面**，
+  读起来像是先改了再问的。
+- 工作目录**从左边裁**保住尾巴，跟终端的 `ui.clip_path` 同一个道理。
+
+### 验证：两个夹具，都要跑
+
+跟终端那半边的 `dev/ui_drive.py` 是同一个思路 —— **改完前端不要只看 CSS 觉得对**。
+
+```bash
+node web/dev/shoot.mjs http://127.0.0.1:7777/ /tmp/shots   # 灌编好的事件流，不花钱
+node web/dev/live.mjs  http://127.0.0.1:7777/ /tmp/live "任务"  # 打真接口，验整条链
+```
+
+`shoot.mjs` 除了截图还**量网格**：每块的大写标签必须跟正文第一行顶对齐，差 2px 就报。
+不引 puppeteer，Node 自带 WebSocket，CDP 本来就是 JSON over WS。
+
+**两个夹具自己的坑**（都真的骗过我一轮）：
+- 拍完 `3_narrow`（390px）之后**必须把视口还原**再去量对齐 —— 那个宽度下 meta-rail
+  是故意塌成上下两行的，不还原就会量到 17px 的「偏移」，然后去修一个不存在的问题。
+- **滚到某处再拍要 `captureBeyondViewport: false`**：页面本身不滚（头尾钉住，滚的是
+  `.sheet`），带 beyond 会重新从文档顶部铺开，把刚滚到的位置丢掉。
+
+### 只听 127.0.0.1，**不要改成可配置的**
+
+连上这个端口的人可以让 agent 在这台机器上写文件、跑命令。没有登录、没有令牌，
+唯一的边界就是「只有本机能连」。要远程用就开 ssh 隧道，那样认证是 ssh 的事。
+
+`install.sh` 里网页端是**可选**的：没有 cargo 就跳过并说明，不要让整个安装失败——
+网页端是加分项，终端版才是这个工具本身。
 
 ## 0.45.0：真实仓库实测修掉的一处，加十道中等题
 

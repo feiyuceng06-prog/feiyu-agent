@@ -1,0 +1,349 @@
+"""`feiyu --serve`：把 agent 挂在 stdio 上，说一行一个 JSON
+
+网页端（`feiyu-web`，Rust）起一个这样的子进程，两边一行一个 JSON 对象来回。
+**stdout 只放协议**，人看的那些 ANSI 整体重定向到 stderr —— 跟 `--json-schema`
+一模一样的做法（`contextlib.redirect_stdout(sys.stderr)` 整体包住，
+不要逐处去改 print 的目标）。
+
+## 为什么不是「加一个 HTTP 服务」
+
+Python 侧一个新依赖都不加（项目硬性约定）。HTTP、WebSocket、静态资源、并发连接
+全在 Rust 那半边，这边只管把 agent 跑起来、把结构化事件吐出去。
+
+## 事件从哪儿来
+
+不是在这儿把 agent 重写一遍，而是 `feiyu/events.py` 那个 sink：`ui.py` 是唯一
+给人看的输出层，装上 sink 之后它照旧返回 ANSI（终端那条路一个字没变），
+同时把同一件事按结构报一份。所以 agent.py 里那三十处 `print(ui.xxx(...))` 一处没动。
+
+## 要确认的时候
+
+`approve` / `ask_user` / `approve_plan` 这些本来就是交互层塞进来的回调
+（`__main__.py` 里塞的是 `ui.confirm`），这边塞的是「发一条 ask 事件出去，
+在队列上等回话」。所以确认流跟终端是同一套语义，包括按 `[s]` 记规则。
+
+## 中断
+
+走 `_thread.interrupt_main()` 往主线程扔 KeyboardInterrupt —— 跟 `EscInterrupt`
+落点相同，0.12.0 那套「中断要让历史保持自洽」的不变量原样成立，不用另写一套。
+"""
+
+import contextlib
+import json
+import queue
+import sys
+import threading
+import _thread
+
+from . import events, keys, permissions, session as session_mod, skills as skills_mod, ui
+from . import __version__
+
+# 等一个回话最多等这么久 网页关掉了、用户走开了，不能让 agent 永远挂在那儿
+REPLY_TIMEOUT = 600.0
+
+
+class Protocol:
+    """一行一个 JSON 出去，一行一个 JSON 进来 """
+
+    def __init__(self, out):
+        self._out = out
+        self._lock = threading.Lock()          # 事件从工作线程也会来（并行工具）
+        self._waiting: dict[int, queue.Queue] = {}
+        self._next_id = 0
+
+    def send(self, kind: str, **payload) -> None:
+        line = json.dumps({"kind": kind, **payload}, ensure_ascii=False)
+        with self._lock:
+            try:
+                self._out.write(line + "\n")
+                self._out.flush()
+            except (OSError, ValueError):
+                pass                            # 对面没了，agent 不该因此崩掉
+
+    def request(self, kind: str, **payload):
+        """发一条要回话的事件，阻塞等回复 超时或对面没了返回 None """
+        with self._lock:
+            self._next_id += 1
+            rid = self._next_id
+            box: queue.Queue = queue.Queue(maxsize=1)
+            self._waiting[rid] = box
+        self.send(kind, id=rid, **payload)
+        try:
+            return box.get(timeout=REPLY_TIMEOUT)
+        except queue.Empty:
+            return None
+        finally:
+            with self._lock:
+                self._waiting.pop(rid, None)
+
+    def reply(self, rid: int, value) -> None:
+        with self._lock:
+            box = self._waiting.get(rid)
+        if box is not None:
+            with contextlib.suppress(queue.Full):
+                box.put_nowait(value)
+
+    def fail_all(self) -> None:
+        """对面断了：把所有还在等的都放掉，不然 agent 卡到超时 """
+        with self._lock:
+            boxes = list(self._waiting.values())
+            self._waiting.clear()
+        for box in boxes:
+            with contextlib.suppress(queue.Full):
+                box.put_nowait(None)
+
+
+def _plain(text: str) -> str:
+    """斜杠命令的返回是画好的 ANSI，发给浏览器之前剥干净 —— 前端自己决定怎么画 """
+    return ui._ANSI.sub("", text or "").rstrip()
+
+
+class Server:
+    def __init__(self, agent, workspace, tracer, proto: Protocol):
+        self.agent = agent
+        self.workspace = workspace
+        self.trace = tracer
+        self.proto = proto
+        self.inbox: queue.Queue = queue.Queue()
+        self.busy = False
+        self.stopped = False
+        self.commands = {c.name: c for c in skills_mod.load_commands(workspace)}
+
+    # ---- agent 要问人的三条回调 ----
+
+    def approve(self, name: str, args: dict) -> str:
+        """返回 yes / no / all / save，语义跟 ui.confirm 一致 """
+        answer = self.proto.request(
+            "ask", type="approve", tool=name, label=ui.tool_label(name),
+            target=ui.tool_target(name, args), args=args,
+            rule=permissions.suggest(name, args))
+        if answer not in ("yes", "no", "all", "save"):
+            return "no"                         # 没人回话按拒绝，跟非交互场景一致
+        return answer
+
+    def approve_plan(self, plan: str) -> bool:
+        return self.proto.request("ask", type="plan", plan=plan or "") == "yes"
+
+    def ask_user(self, question: str, options: list[str]) -> str:
+        answer = self.proto.request("ask", type="choice", question=question,
+                                    options=list(options or []))
+        return answer if isinstance(answer, str) else ""
+
+    def approve_trust(self, kind: str, where: str, names) -> bool:
+        """项目钩子 / MCP / 技能的信任问句 三个的形状一样，走同一条 """
+        return self.proto.request("ask", type="trust", what=kind, where=str(where),
+                                  names=[str(n) for n in names]) == "yes"
+
+    # ---- 状态 ----
+
+    def status(self) -> dict:
+        agent = self.agent
+        out = {"ready": agent.ready, "mode": agent.mode, "style": agent.style,
+               "workspace": str(self.workspace), "version": __version__,
+               "busy": self.busy}
+        if agent.ready:
+            out.update(model=agent.model, name=agent.name,
+                       tokens=agent.tokens, cost=round(agent.cost, 6),
+                       context=agent.context, context_limit=agent.context_limit)
+        return out
+
+    def push_status(self) -> None:
+        self.proto.send("status", **self.status())
+
+    # ---- 命令 ----
+
+    def run_command(self, text: str) -> None:
+        """斜杠命令 内置的复用 __main__ 那些函数（返回 ANSI，剥掉再发）；
+        自定义命令展开成一句话，当普通输入走
+        """
+        from . import __main__ as cli
+
+        head, _, rest = text.partition(" ")
+        rest = rest.strip()
+        custom = self.commands.get(head[1:]) if head not in ui.SLASH else None
+        if custom is not None:
+            self.handle_prompt(skills_mod.expand(custom, rest))
+            return
+        agent = self.agent
+        # 下面这些 cli 函数内部就是拿 ui.notice() 拼的，不挡住会报两遍
+        with events.paused():
+            self._dispatch(cli, head, rest)
+        self.push_status()
+
+    def _dispatch(self, cli, head: str, rest: str) -> None:
+        agent = self.agent
+        if head == "/clear":
+            agent.reset()
+            session_mod.drop(self.workspace)
+            self.proto.send("cleared")
+            self.proto.send("note", level="notice", text="对话历史已清空，存盘也删了")
+        elif head == "/mode":
+            self.proto.send("note", level="notice", text=_plain(cli._mode(agent, rest)))
+        elif head == "/model":
+            self.proto.send("note", level="notice", text=_plain(cli._model(agent, rest)))
+        elif head == "/style":
+            self.proto.send("note", level="notice", text=_plain(cli._style(agent, rest)))
+        elif head == "/compact":
+            self.proto.send("note", level="notice", text=_plain(cli._compact(agent)))
+        elif head == "/undo":
+            said = agent.undo()
+            self.proto.send("note", level="notice" if said else "warn",
+                            text=said + "（下一句话时会告诉它）" if said else "没有可退的改动")
+        elif head == "/skills":
+            self.proto.send("note", level="notice",
+                            text=_plain(cli._skills(agent, self.commands)))
+        elif head == "/cost":
+            self.proto.send("note", level="notice",
+                            text=_plain(cli._cost(agent, self.workspace)))
+        elif head == "/context":
+            self.proto.send("note", level="notice", text=_plain(cli._context(agent)))
+        elif head == "/memory":
+            self.proto.send("note", level="notice", text=_plain(cli._memory(agent, rest)))
+        elif head == "/allow":
+            self.proto.send("note", level="notice", text=_plain(cli._allow(rest)))
+        elif head == "/jobs":
+            self.proto.send("note", level="notice", text=_plain(cli._jobs(agent, rest)))
+        elif head == "/hooks":
+            self.proto.send("note", level="notice", text=_plain(cli._hooks(agent)))
+        elif head == "/mcp":
+            self.proto.send("note", level="notice", text=_plain(cli._mcp(agent)))
+        elif head == "/sandbox":
+            self.proto.send("note", level="notice", text=_plain(cli._sandbox(rest)))
+        elif head == "/help":
+            self.proto.send("help", commands=[
+                {"name": n, "about": d} for n, d in
+                {**ui.SLASH, **{"/" + n: c.description for n, c in self.commands.items()}}.items()
+                if n != "/exit"])
+        else:
+            self.proto.send("note", level="error", text="未知命令 " + head)
+
+    def handle_prompt(self, text: str) -> None:
+        if not self.agent.ready:
+            self.proto.send("note", level="error",
+                            text="还没有模型，先在终端里 feiyu 起来用 /key add 添加一条")
+            return
+        self.busy = True
+        self.proto.send("turn_start", text=text)
+        self.push_status()
+        try:
+            self.agent.send(text)
+        except KeyboardInterrupt:
+            # 0.12.0 的不变量：历史已经在 send() 的 finally 里补齐了
+            self.proto.send("note", level="warn", text="已中断")
+        except Exception as exc:              # agent 挂了也不能把服务带走
+            self.proto.send("note", level="error", text="%s: %s" % (type(exc).__name__, exc))
+        finally:
+            self.busy = False
+            session_mod.save(self.workspace, self.agent)
+            self.proto.send("turn_end")
+            self.push_status()
+
+    # ---- 读 stdin 的线程 ----
+
+    def reader(self) -> None:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            op = msg.get("op")
+            if op == "reply":
+                self.proto.reply(int(msg.get("id") or 0), msg.get("value"))
+            elif op == "interrupt":
+                # 跟 esc 落在同一处，0.12.0 那套补历史的机制原样生效
+                if self.busy:
+                    _thread.interrupt_main()
+            elif op == "prompt":
+                self.inbox.put(("prompt", str(msg.get("text") or "")))
+            elif op == "command":
+                self.inbox.put(("command", str(msg.get("text") or "")))
+            elif op == "status":
+                self.push_status()
+            elif op == "stop":
+                break
+        self.stopped = True
+        self.proto.fail_all()
+        self.inbox.put(("stop", ""))
+
+    def run(self) -> int:
+        threading.Thread(target=self.reader, daemon=True).start()
+        self.proto.send("hello", **self.status())
+        while True:
+            op, text = self.inbox.get()
+            if op == "stop":
+                return 0
+            if not text.strip():
+                continue
+            if op == "command" or text.startswith("/"):
+                self.run_command(text if text.startswith("/") else "/" + text)
+            else:
+                self.handle_prompt(text)
+
+
+def serve(agent, workspace, tracer, resume: bool = False) -> int:
+    """把 agent 挂到 stdio 上 返回退出码 """
+    real_stdout = sys.stdout
+    proto = Protocol(real_stdout)
+    server = Server(agent, workspace, tracer, proto)
+
+    agent.approve = server.approve
+    agent.approve_plan = server.approve_plan
+    agent.ask_user = server.ask_user
+    agent.approve_hooks = lambda path, count: server.approve_trust(
+        "hooks", path, ["%d 条" % count])
+    agent.approve_mcp = lambda path, names: server.approve_trust("mcp", path, names)
+    agent.approve_skills = lambda folder, names: server.approve_trust("skills", folder, names)
+
+    events.install(lambda kind, payload: proto.send(kind, **payload))
+    # 人看的那些 ANSI 全挪到 stderr，stdout 只剩协议 —— 跟 --json-schema 同一个做法
+    with contextlib.redirect_stdout(sys.stderr):
+        note = agent.load_hooks()
+        if note:
+            proto.send("note", level="notice", text=note)
+        mcp_note = agent.load_mcp()
+        if mcp_note:
+            proto.send("note", level="notice", text=mcp_note)
+        skills_note = agent.load_skills()
+        if skills_note:
+            proto.send("note", level="notice", text=skills_note)
+        if resume:
+            saved = session_mod.load(workspace)
+            if saved and agent.restore(saved):
+                proto.send("resumed", about=session_mod.describe(saved),
+                           history=history_view(agent))
+        try:
+            return server.run()
+        finally:
+            events.clear()
+
+
+def history_view(agent) -> list[dict]:
+    """`--resume` 回来时给网页端一份能画的历史
+
+    **只要人说过的和它说过的**，工具调用和工具返回不回放：那些在终端的 scrollback
+    里是有来龙去脉的，回放到网页上只是一堆没有上下文的碎片
+    两种后端的 messages 结构不通用，所以这儿两种形状都认（照 `transcript()` 那样）
+    """
+    from .providers import _field
+
+    out = []
+    for msg in getattr(agent.backend, "messages", []) or []:
+        role = msg.get("role") if isinstance(msg, dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if role == "system" or role == "tool":
+            continue
+        if isinstance(content, str):
+            if role in ("user", "assistant") and content.strip():
+                out.append({"role": role, "text": content.strip()})
+            continue
+        for block in content or []:
+            # user 消息里的 tool_result 块要跳过，它不是人说的话
+            if _field(block, "type") != "text":
+                continue
+            text = (_field(block, "text") or "").strip()
+            if text:
+                out.append({"role": "assistant", "text": text})
+    return out

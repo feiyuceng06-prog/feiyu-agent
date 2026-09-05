@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import hooks as hooks_mod
 from . import mcp as mcp_mod
+from . import serve as serve_mod
 from . import skills as skills_mod
 from . import keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
@@ -53,6 +54,11 @@ def main() -> int:
         help="跑完再开一个只看产出的模型给改动打分 ",
     )
     parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="挂在 stdio 上说 JSON，给 feiyu-web 用 别手动跑，跑 feiyu-web ",
+    )
+    parser.add_argument(
         "prompt",
         nargs="*",
         help="直接跑一个任务，跑完就退出 ",
@@ -87,6 +93,11 @@ def main() -> int:
     tracer.write("run_start", version=__version__, model=agent.model,
                  name=agent.name, mode=agent.mode, verify=agent.verify or None,
                  task=" ".join(args.prompt) if args.prompt else None)
+
+    if args.serve:
+        # 装配全在 serve() 里：它要用自己那套走协议的回调去问人，
+        # 而下面这些 ui.confirm 版本在没有终端的地方一律返回"拒绝"
+        return _finish(agent, tracer, serve_mod.serve(agent, workspace, tracer, args.resume))
 
     # 一次性任务也要能答应确认 装在早退分支后面的话 approve 一直是 None，
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）

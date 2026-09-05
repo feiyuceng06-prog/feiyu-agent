@@ -14,6 +14,8 @@ import time
 
 from prompt_toolkit.utils import get_cwidth
 
+from . import events
+
 # 黑灰打底，其余四色刻意压暗，浅底深底都读得清
 _RGB = {
     "grey": "138;131;120",
@@ -311,6 +313,9 @@ _ARG_HINT = re.compile(
     r'"(path|command|url|regex|pattern|prompt|fact|plan|question|query)"\s*:\s*"((?:[^"\\]|\\.)*)"')
 # 参数短的时候没什么可报的进度，别抖着一个「已生成 1 行」
 _PROGRESS_MIN = 200
+# 报给别的前端时按这个步长攒：上游一个 delta 一次回调，不攒的话一个长文件
+# 就是几千条事件 终端那条路不受这个影响，它按 STATUS_TICK 重画
+PROGRESS_STEP = 400
 
 
 def tool_progress(name: str, partial: str) -> str:
@@ -332,6 +337,8 @@ def tool_progress(name: str, partial: str) -> str:
 
 
 def tool_call(name: str, args: dict) -> str:
+    events.emit("tool_start", name=name, label=tool_label(name), args=args,
+                target=tool_target(name, args))
     label = tool_label(name)
     key = _headline_key(name, args)
     head = args.get(key, "") if key else ""
@@ -342,6 +349,7 @@ def tool_call(name: str, args: dict) -> str:
 
 def tool_preview(rows: list[tuple[str, str]]) -> str:
     """确认之前先让人看见要改什么 跟结果那块同一套配色，但不带 ⎿ """
+    events.emit("preview", rows=[{"kind": k, "text": t} for k, t in rows])
     out = []
     for kind, text in rows:
         color = {"-": "red", "+": "blue"}.get(kind, "grey")
@@ -351,6 +359,8 @@ def tool_preview(rows: list[tuple[str, str]]) -> str:
 
 def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool) -> str:
     """detail 是 (kind, text)，kind 为 '-' / '+' / '' """
+    events.emit("tool_result", summary=summary, is_error=is_error,
+                detail=[{"kind": k, "text": t} for k, t in detail])
     tint = "red" if is_error else "grey"
     lines = ["  " + paint(tint, f"{ELBOW}  {clip(summary, width() - 6)}")]
     for kind, text in detail:
@@ -362,11 +372,13 @@ def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool) 
 
 def hook_line(ok: bool, text: str) -> str:
     """钩子的结果挂在工具结果那一级（⎿），不然它在两块输出之间悬着没有归属 """
+    events.emit("hook", ok=ok, text=text)
     return "  " + paint("grey" if ok else "red", f"{ELBOW}  {clip(text, width() - 6)}")
 
 
 def plan(text: str) -> str:
     """方案要用户看着点头，所以给它一条竖边，跟普通的灰字区分开 """
+    events.emit("plan", text=text or "")
     body = []
     for line in (text or "（没写方案）").split("\n"):
         for piece in wrap(line, width() - 6) or [""]:
@@ -409,14 +421,17 @@ def _lines(text: str, color: str) -> str:
 
 
 def notice(text: str) -> str:
+    events.emit("note", level="notice", text=text)
     return _lines(text, "grey")
 
 
 def warn(text: str) -> str:
+    events.emit("note", level="warn", text=text)
     return _lines(text, "amber")
 
 
 def error(text: str) -> str:
+    events.emit("note", level="error", text=text)
     return _lines(text, "red")
 
 
@@ -742,6 +757,7 @@ class Stream:
         self._line_start = 0    # 这一行正文从哪一列开始，用来判断「行上已经有东西」
         self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
         self._status_drawn = False
+        self._reported = -1     # 参数进度报到第几档了，见 progress()
         self._status_at = 0.0
         self._lead = True       # 正文第一行还没开始：开头带一个 ⏺，跟工具行区分开
         self.wrote_text = False
@@ -757,6 +773,8 @@ class Stream:
             return
         self.wrote_text = True
         self.text += text
+        # 报的是**原始 markdown**，不是渲染完的 ANSI：怎么画是前端的事
+        events.emit("text", delta=text)
         if not self._tty:
             sys.stdout.write(text)
             sys.stdout.flush()
@@ -767,6 +785,14 @@ class Stream:
     def progress(self, name: str, partial: str) -> None:
         """工具参数还在流式生成 存下就走：上游每个 delta 都会调一次，
         在这儿拼标签等于对越来越长的参数反复做正则，拼留到重画时（12 Hz）做 """
+        if events.active():
+            # **按步长报，不是每个 delta 都报**：上游一个 delta 一次调用，
+            # 一个长文件就是几千条事件，全推到浏览器只会把它卡住
+            # 同样只报原始值，不在这儿拼标签（拼是 O(n²)，见上）
+            step = len(partial) // PROGRESS_STEP
+            if step != self._reported:
+                self._reported = step
+                events.emit("tool_progress", name=name, size=len(partial))
         if not self._tty:
             return
         with self._lock:

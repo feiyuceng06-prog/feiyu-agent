@@ -43,6 +43,30 @@ EOF
 chmod +x "$SHIM"
 say "已放好 $SHIM"
 
+# ---- 网页端（可选）----
+# 要 cargo。**没有就跳过，不要让整个安装失败** —— 网页端是加分项，
+# 终端版才是这个工具本身。
+WEB_SHIM="${BIN}/feiyu-web"
+if command -v cargo >/dev/null 2>&1; then
+  say "编译网页端 feiyu-web（第一次要拉依赖，几十秒）"
+  if (cd web && cargo build --release --quiet 2>&1); then
+    cat > "$WEB_SHIM" <<EOF
+#!/usr/bin/env bash
+# 网页端跑起来要找 feiyu 那个可执行文件，直接指给它，省得依赖 PATH
+export FEIYU_BIN="\${FEIYU_BIN:-${ROOT}/.venv/bin/feiyu}"
+exec "${ROOT}/web/target/release/feiyu-web" "\$@"
+EOF
+    chmod +x "$WEB_SHIM"
+    say "已放好 $WEB_SHIM"
+  else
+    warn "网页端没编译成功，跳过 终端版不受影响，敲 feiyu 照常用"
+    rm -f "$WEB_SHIM"
+  fi
+else
+  warn "没装 cargo，跳过网页端（终端版不受影响）装了 rust 之后重跑这个脚本就有了"
+  rm -f "$WEB_SHIM"
+fi
+
 # 真的能跑起来才算装好 只看 pip 退出码不够，缺文件是在 import 时才炸的
 if ! VERSION="$(./.venv/bin/feiyu --version 2>&1)"; then
   echo
@@ -51,6 +75,9 @@ if ! VERSION="$(./.venv/bin/feiyu --version 2>&1)"; then
 fi
 echo
 say "装好了：$VERSION"
+if [ -x "$WEB_SHIM" ]; then
+  say "网页端：feiyu-web（只监听 127.0.0.1）"
+fi
 
 case ":${PATH}:" in
   *":${BIN}:"*) ;;

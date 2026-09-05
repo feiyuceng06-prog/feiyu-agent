@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>feiyu</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead__inner">
+    <h1 class="nameplate">Feiyu</h1>
+    <p class="nameplate__gloss">终端编程 agent · 网页端</p>
+    <dl class="rail" id="rail">
+      <div class="rail__cell"><dt>工作目录</dt><dd id="m-workspace">—</dd></div>
+      <div class="rail__cell"><dt>模型</dt><dd id="m-model">—</dd></div>
+      <div class="rail__cell"><dt>权限</dt><dd id="m-mode">—</dd></div>
+      <div class="rail__cell"><dt>上下文</dt><dd id="m-context">—</dd></div>
+      <div class="rail__cell"><dt>花费</dt><dd id="m-cost">—</dd></div>
+    </dl>
+  </div>
+</header>
+
+<main class="sheet" id="sheet">
+  <div class="stream" id="stream"></div>
+  <div class="empty" id="empty">
+    <p class="empty__line">把要做的事写在下面。</p>
+    <p class="empty__hint">
+      <kbd>⏎</kbd> 发送 · <kbd>⇧⏎</kbd> 换行 · <kbd>esc</kbd> 中断 · <kbd>/</kbd> 命令
+    </p>
+  </div>
+</main>
+
+<footer class="composer" id="composer">
+  <div class="composer__inner">
+    <div class="palette" id="palette" hidden></div>
+    <div class="composer__row">
+      <span class="composer__caret" aria-hidden="true">›</span>
+      <textarea id="input" rows="1" spellcheck="false" autocomplete="off"
+                placeholder="说一件要做的事，或者 / 开头的命令"></textarea>
+      <button id="send" class="btn btn--go" type="button">发送</button>
+      <button id="stop" class="btn btn--stop" type="button" hidden>中断</button>
+    </div>
+    <p class="composer__state" id="state">连接中…</p>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

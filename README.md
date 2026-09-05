@@ -57,6 +57,8 @@ Other flags:
 - `--json-schema <file>`: emit JSON matching a schema, see [Embedding](#embedding).
 - `--review`: have a second model grade the change afterwards.
 
+For a browser instead of a terminal, run `feiyu-web` — see [the web front end](#the-web-front-end).
+
 ## Interface
 
 ```
@@ -249,6 +251,28 @@ Exit code 0 allows, non-zero blocks. `PreToolUse` blocks the call, `PostToolUse`
 Project hooks need your approval the first time they are seen, and again when the file changes. Commands that came with a repository should not run just because you cloned it.
 
 **Independent grading.** `/review` or `--review` opens a second model and shows it only the task and the final diff. It scores 0 to 10 on completeness, bugs and unrequested extras. It costs an extra API call, so it is manual.
+
+## The web front end
+
+```
+feiyu-web                         # start one in the current directory, opens a browser
+feiyu-web -w ~/code/my-project    # pick the workspace
+feiyu-web -p 7788                 # another port (7777 by default)
+feiyu-web -r                      # continue the last conversation in this directory
+feiyu-web --no-open               # don't open a browser
+```
+
+Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown in the page as a diff or the literal command, and nothing runs until you approve; "allow for this session" and a permanent rule are both there. Slash commands, skills, custom commands and `esc` to interrupt all work.
+
+**It listens on `127.0.0.1` only.** Anyone who reaches that port can have it write files and run commands on your machine, and it has no login and no token — the only boundary is that only this machine can connect. To use it from elsewhere, tunnel over ssh:
+
+```
+ssh -L 7777:127.0.0.1:7777 that-machine
+```
+
+Under the hood it is one static Rust binary (~900K): HTTP, WebSocket and the front-end assets are all inside it, supervising a `feiyu --serve` child process, one JSON object per line between them. **The split is not there to make the agent faster** — local tools add up to under 20ms and a round is almost entirely spent waiting for the model. It is there so the Python side gains no new dependency while you get an executable that needs no runtime installed.
+
+The web front end needs `cargo`. It is optional in `install.sh`: without Rust the step is skipped and the terminal version is unaffected.
 
 ## Skills and custom commands
 
