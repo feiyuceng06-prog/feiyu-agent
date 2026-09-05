@@ -240,17 +240,17 @@ for (const width of [1280, 390]) {
     { width, height: 900, deviceScaleFactor: 1, mobile: false });
   await sleep(400);
   const box = await cdp.eval(`JSON.stringify((() => {
-    const m = document.querySelector(".mark");
+    const m = document.querySelector(".bar__mark");
     if (!m) return { w: 0, h: 0, missing: true };
     const r = m.getBoundingClientRect();
     return { w: Math.round(r.width), h: Math.round(r.height) };
   })())`);
   const { w, h } = JSON.parse(box);
-  if (w < 24 || h < 24) {
-    console.error(`${width}px 下那只狗没了或太小：`, box);
+  if (w < 14 || h < 14) {
+    console.error(`${width}px 下标题栏那只狗没了或太小：`, box);
     process.exitCode = 1;
   } else {
-    console.log(`${width}px 下记号 ${w}×${h}`);
+    console.log(`${width}px 下标题栏记号 ${w}×${h}`);
   }
 }
 

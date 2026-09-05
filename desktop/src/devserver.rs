@@ -1,38 +1,12 @@
-//! feiyu-web —— feiyu 的网页端。
+//! feiyu-devserver —— **只给测试用的**静态服务，不是产品的一部分。
 //!
-//! 一个静态二进制：HTTP + WebSocket 服务，前端资源编进二进制，底下监管一个
-//! `feiyu --serve` 子进程，两边一行一个 JSON 对话。
+//! Tauri 在 Linux 上用的是 webkit2gtk，**没有 CDP**，`dev/shoot.mjs` / `dev/input.mjs`
+//! 那套 headless Chrome 夹具接不上去。这个二进制把同一份 `ui/` 用 HTTP 端出来，
+//! 夹具照旧能跑；前端靠 `window.__TAURI__` 在不在自己决定走哪条传输。
 //!
-//! # 为什么这半边是 Rust
-//!
-//! **不是为了让 agent 跑得更快** —— 实测本地工具加起来不到 20ms，而一轮要等模型
-//! 3 到 10 秒，重写工具层是把 20ms 优化成 5ms。这半边是 Rust 的理由只有一条：
-//! Python 那边的硬性约定是「不引新依赖」（现在只有 anthropic / pillow /
-//! prompt_toolkit），而网页端要 HTTP、WebSocket、静态资源和并发连接。放在这儿，
-//! Python 侧一个依赖都不用加，同时用户拿到的是一个不用装运行时的可执行文件。
-//!
-//! # 谁能连上来
-//!
-//! 连上这个端口的人可以让 agent 在这台机器上写文件、跑命令，所以这里有三道门，
-//! **三道都是必要的，别删任何一道**：
-//!
-//! 1. **只听 127.0.0.1**。不要改成可配置的；要从别的机器用就开 ssh 隧道
-//!    （`ssh -L 7777:127.0.0.1:7777 这台机器`），那样认证是 ssh 的事。
-//! 2. **一次性令牌**。每次启动随机生成，只出现在开浏览器的那个地址里。
-//!    光靠「只听回环」不够：这台机器上**任何一个进程、任何一个用户**都能连回环地址。
-//! 3. **Origin 和 Host 校验**。这一条治的是最要命的那种：
-//!    **WebSocket 不受同源策略保护** —— 你在浏览器里随便打开一个网站，那个网站的
-//!    脚本就能 `new WebSocket("ws://127.0.0.1:7777/ws")` 连上来，浏览器照连不误，
-//!    也不会有 CORS 预检。实测过：这样连上之后可以 `/mode auto` 关掉确认、
-//!    让 agent 读任意文件并把内容通过同一条连接送出去、跑任意命令。
-//!    换句话说，**没有这道门，「访问一个网页」就等于「在你机器上执行任意代码」**。
-//!    Host 校验另外挡 DNS rebinding（把 evil.com 解析到 127.0.0.1 绕开 Origin）。
-//!
-//! # 一个进程，多个标签页
-//!
-//! agent 只有一个（它有工作目录、有对话历史，多开等于几个 agent 抢同一个仓库）。
-//! 浏览器开几个标签页都连到同一个上：事件走 broadcast 发给所有连接，
-//! 谁都能发指令。新连上的标签页会先收到一份最近的事件回放，不然它是一片空白。
+//! `/ws` 和 `/upload` 那两道门（令牌 + Origin + Host）**照旧全在** —— 它虽然只在
+//! 开发时起，但起的时候一样能让 agent 在这台机器上跑命令。静态资源不设门：
+//! 前端要用相对路径才能在 Tauri 里跑，给一份 HTML 加门只是防指纹，不值这个代价。
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -51,10 +25,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{broadcast, mpsc};
 
-const INDEX_HTML: &str = include_str!("../assets/index.html");
-const APP_CSS: &str = include_str!("../assets/app.css");
-const APP_JS: &str = include_str!("../assets/app.js");
-const LOGO_SVG: &str = include_str!("../assets/logo.svg");
+const INDEX_HTML: &str = include_str!("../ui/index.html");
+const APP_CSS: &str = include_str!("../ui/app.css");
+const APP_JS: &str = include_str!("../ui/app.js");
+const LOGO_SVG: &str = include_str!("../ui/logo.svg");
 
 /// 新标签页连上时回放多少条事件。够看清「刚才发生了什么」，又不至于把一场长任务
 /// 的几千条工具事件全堆给它。
@@ -307,24 +281,6 @@ async fn ws_handler(
         .on_upgrade(move |socket| client(socket, app))
 }
 
-async fn serve_index(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> Response {
-    if !app.token_ok(query.as_deref()) {
-        return no_token();
-    }
-    // 页面里两个资源地址也得带令牌，而令牌是启动时才有的，所以在这儿填。
-    // 只有 index 需要填，app.css / app.js 里没有占位符。
-    let page = INDEX_HTML.replace("__TOKEN__", &app.token);
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        page,
-    )
-        .into_response()
-}
-
 fn no_token() -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -332,20 +288,6 @@ fn no_token() -> Response {
         "地址里少了令牌。回到起 feiyu-web 的那个终端，用它印出来的完整地址打开。\n",
     )
         .into_response()
-}
-
-async fn serve_asset(
-    State(app): State<Arc<App>>,
-    RawQuery(query): RawQuery,
-    body: &'static str,
-    mime: &'static str,
-) -> Response {
-    // 静态资源也要令牌：拿不到页面就拿不到里面那份 app.js，
-    // 也就少一条「先摸清楚协议长什么样」的路。
-    if !app.token_ok(query.as_deref()) {
-        return no_token();
-    }
-    asset(body, mime)
 }
 
 async fn client(socket: WebSocket, app: Arc<App>) {
@@ -564,10 +506,10 @@ async fn main() {
     });
 
     let router = Router::new()
-        .route("/", get(serve_index))
-        .route("/app.css", get(|s, q| serve_asset(s, q, APP_CSS, "text/css; charset=utf-8")))
-        .route("/app.js", get(|s, q| serve_asset(s, q, APP_JS, "text/javascript; charset=utf-8")))
-        .route("/logo.svg", get(|s, q| serve_asset(s, q, LOGO_SVG, "image/svg+xml")))
+        .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
+        .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8") }))
+        .route("/app.js", get(|| async { asset(APP_JS, "text/javascript; charset=utf-8") }))
+        .route("/logo.svg", get(|| async { asset(LOGO_SVG, "image/svg+xml") }))
         .route("/ws", get(ws_handler))
         .route("/upload", post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD)))
         .with_state(app.clone());

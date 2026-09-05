@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Feiyu",
+  "version": "0.52.0",
+  "identifier": "com.feiyuz.feiyu",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Feiyu",
+        "width": 1240,
+        "height": 860,
+        "minWidth": 720,
+        "minHeight": 480,
+        "decorations": false,
+        "backgroundColor": "#ffffff"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/32.png", "icons/128.png", "icons/icon.png"]
+  }
+}

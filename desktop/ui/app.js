@@ -1,20 +1,31 @@
-/* feiyu-web 前端。
+/* Feiyu Desktop 的前端。
  *
- * 一条 WebSocket，收 agent 的结构化事件，画成页面；发回去的是
- * {op: prompt | command | reply | interrupt | status}。
+ * 一条传输通道，收 agent 的结构化事件画成页面；发回去的是
+ * {op: prompt | command | reply | interrupt | status | sessions | new | open | delete}。
  *
- * 没有框架，也没有外部依赖 —— 跟这个项目的其余部分一个规矩。
- * markdown 渲染是自己写的一小份（见 md()）：agent 吐的是原始 markdown，
- * 怎么画是前端的事，把终端那套 ANSI 发过来再解析回去是最糟的做法。
+ * **传输有两条路**，靠 window.__TAURI__ 在不在自己判断：
+ *   · 桌面（Tauri）—— invoke("send") / listen("feiyu://event")，进程内通道，不开端口
+ *   · 开发（浏览器）—— WebSocket 连 feiyu-devserver。Tauri 在 Linux 上是 webkit2gtk，
+ *     没有 CDP，headless Chrome 那套夹具接不上去，所以留这条路专门给测试用
+ *
+ * 没有框架，也没有外部依赖。markdown 渲染是自己写的一小份（见 md()）。
+ * 信息架构照 Hermes Desktop（NousResearch/hermes-agent，MIT），样式是博客那一套。
  */
 "use strict";
+
+/* 在 Tauri 窗口里跑还是在浏览器里跑。**必须在最上面**：下面好几处在用它，
+   而 const 不提升，放后面会撞 TDZ。 */
+const TAURI = window.__TAURI__;
+
+/* devserver 那条路要的令牌，从地址里取。桌面端没有这东西（也不需要 ——
+   进程内通道，外面够不着）。 */
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
 
 const $ = (id) => document.getElementById(id);
 const streamEl = $("stream");
 const sheetEl = $("sheet");
 const inputEl = $("input");
 const paletteEl = $("palette");
-const stateEl = $("state");
 
 let socket = null;
 let busy = false;
@@ -29,6 +40,8 @@ let seenAsk = new Set();
 let wantHelp = false;
 /* 已经上传好、等着随下一条消息一起交出去的文件（工作区相对路径） */
 let clips = [];
+/* 启动时那几句环境说明（MCP / 项目钩子 / 项目技能），按来源存一份 */
+const boots = new Map();
 
 /* ── 小工具 ─────────────────────────────────────────────────── */
 
@@ -152,29 +165,43 @@ function md(src) {
 
 /* ── 事件 ──────────────────────────────────────────────────── */
 
+/* 状态栏那三样：连接点、左边的目录、右边的模型/权限/上下文/花费。
+   **只有能据以行动的数才上状态栏** —— 上下文给百分比不给绝对 token，
+   这条从终端版一路沿用（用户为那个绝对数字抱怨过两次）。 */
+
+function setDot(state, text) {
+  $("dot").dataset.state = state;
+  $("s-state").textContent = text;
+}
+
+function shortPath(raw) {
+  const short = (raw || "—").replace(/^\/home\/[^/]+/, "~");
+  // 从左边裁、保住尾巴 —— 裁右边的话看到的是 /tmp/xxx/yyy/…，
+  // 恰好把「在哪个项目」裁掉了。跟终端的 ui.clip_path 同一个道理
+  return short.length > 46 ? "…" + short.slice(-45) : short;
+}
+
 function setStatus(s) {
   if (!s) return;
   busy = !!s.busy;
-  // 从左边裁、保住尾巴 —— 裁右边的话看到的是 /tmp/xxx/yyy/…，
-  // 恰好把「在哪个项目」裁掉了。跟终端的 ui.clip_path 同一个道理
-  const short = (s.workspace || "—").replace(/^\/home\/[^/]+/, "~");
-  $("m-workspace").textContent = short.length > 42 ? "…" + short.slice(-41) : short;
-  $("m-workspace").title = s.workspace || "";
-  $("m-model").textContent = s.ready ? (s.name || s.model || "—") : "未设置模型";
+  if (s.workspace) {
+    $("s-cwd").textContent = shortPath(s.workspace);
+    $("s-cwd").title = s.workspace;
+  }
+  $("model").textContent = s.ready ? (s.name || s.model || "—") : "未设置模型";
   const modes = { default: "默认", auto: "自动", plan: "计划", readonly: "只读" };
-  $("m-mode").textContent = modes[s.mode] || s.mode || "—";
-  $("m-mode").dataset.alert = s.mode === "auto" ? "1" : "0";
+  $("s-mode").textContent = modes[s.mode] || s.mode || "—";
+  $("s-mode").style.color = s.mode === "auto" ? "var(--alert)" : "";
   if (s.context_limit) {
-    const share = Math.round((s.context / s.context_limit) * 100);
-    $("m-context").textContent = share + "%";
+    $("s-ctx").textContent = Math.round((s.context / s.context_limit) * 100) + "%";
   }
   if (typeof s.cost === "number") {
-    $("m-cost").textContent = s.cost ? "¥" + s.cost.toFixed(4) : "¥0";
+    $("s-cost").textContent = s.cost ? "¥" + s.cost.toFixed(4) : "¥0";
   }
+  if (s.version) $("s-ver").textContent = "v" + s.version;
   $("send").hidden = busy;
   $("stop").hidden = !busy;
-  stateEl.textContent = busy ? "干活中 · esc 中断" : "就绪";
-  stateEl.dataset.alert = "0";
+  setDot(busy ? "busy" : "ready", busy ? "干活中 · esc 中断" : "就绪");
 }
 
 /* 一块正文写完了：重渲染一次去掉光标。
@@ -265,15 +292,13 @@ function handle(ev) {
     }
 
     case "boot": {
-      // 环境说明，不是对话：摆进刊头那条带里，**不碰正文流、不动空态提示**
-      const list = $("boot");
-      const old = list.querySelector(`[data-what="${ev.what}"]`);
-      const li = old || document.createElement("li");
-      li.dataset.what = ev.what;
-      li.dataset.level = ev.level || "notice";
-      li.textContent = ev.text;
-      if (!old) list.append(li);
-      list.hidden = false;
+      // 环境说明，不是对话：摆进状态栏，**不碰正文流**
+      boots.set(ev.what, ev.text);
+      const slot = $("s-boot");
+      slot.textContent = [...boots.values()].join(" · ");
+      slot.style.color = ev.level === "warn" ? "var(--alert)" : "";
+      slot.hidden = false;
+      $("s-boot-sep").hidden = false;
       break;
     }
 
@@ -354,8 +379,8 @@ function handle(ev) {
       break;
 
     case "gone":
-      stateEl.textContent = "agent 已退出 · 关掉这个页面，回终端重新起";
-      stateEl.dataset.alert = "1";
+      online = false;
+      setDot("off", "agent 已退出 · 关掉窗口重开");
       break;
   }
   keepBottom(wasDown);
@@ -461,15 +486,49 @@ function askCard(ev) {
   sheetEl.scrollTop = sheetEl.scrollHeight;
 }
 
-/* ── 侧边栏 ────────────────────────────────────────────────── */
+/* ── 侧栏 ──────────────────────────────────────────────────── */
+
+/* 置顶哪几条记在浏览器里 —— 这是「这台机器上这个人的偏好」，不是会话状态，
+   所以不进协议。跟侧栏收放同一个道理。 */
+const PIN_KEY = "feiyu.pinned";
+const SIDE_KEY = "feiyu.side";
+
+function pinned() {
+  try { return new Set(JSON.parse(localStorage.getItem(PIN_KEY) || "[]")); }
+  catch { return new Set(); }
+}
+
+function setPinned(set) {
+  try { localStorage.setItem(PIN_KEY, JSON.stringify([...set])); } catch { /* 无痕窗口 */ }
+}
+
+let allTalks = [];
+let currentTalk = null;
 
 function drawTalks(rows, current) {
+  allTalks = rows || [];
+  currentTalk = current;
+  renderTalks();
+}
+
+/* 搜索只在本地筛已经拿到的那份列表 —— 列表是摘要，本来就全在手上，
+   没必要为了筛几条字去问后端。 */
+function renderTalks() {
+  const needle = $("find").value.trim().toLowerCase();
+  const keep = allTalks.filter((r) => !needle || (r.title || "").toLowerCase().includes(needle));
+  const pins = pinned();
+  const top = keep.filter((r) => pins.has(r.id));
+  const rest = keep.filter((r) => !pins.has(r.id));
+
+  $("group-pinned").hidden = !top.length;
+  $("pinned").replaceChildren(...top.map((r) => talkRow(r, currentTalk)));
+
   const list = $("talks");
-  if (!rows.length) {
-    list.innerHTML = `<li class="side__empty">还没有历史对话</li>`;
-    return;
+  if (!rest.length) {
+    list.innerHTML = `<li class="side__empty">${needle ? "没有匹配的会话" : "还没有历史对话"}</li>`;
+  } else {
+    list.replaceChildren(...rest.map((r) => talkRow(r, currentTalk)));
   }
-  list.replaceChildren(...rows.map((row) => talkRow(row, current)));
 }
 
 function talkRow(row, current) {
@@ -478,7 +537,17 @@ function talkRow(row, current) {
   li.setAttribute("aria-current", row.id === current ? "true" : "false");
   li.innerHTML = `<span class="talk__title">${esc(row.title)}</span>` +
                  `<span class="talk__meta">${esc(row.when)} · ${row.count} 条</span>`;
-  li.onclick = () => send({ op: "open", id: row.id });
+  li.onclick = (e) => {
+    // shift+点 = 置顶 / 取消置顶，跟 Hermes 一样
+    if (e.shiftKey) {
+      const pins = pinned();
+      pins.has(row.id) ? pins.delete(row.id) : pins.add(row.id);
+      setPinned(pins);
+      renderTalks();
+      return;
+    }
+    send({ op: "open", id: row.id });
+  };
 
   const del = document.createElement("button");
   del.type = "button";
@@ -495,7 +564,7 @@ function talkRow(row, current) {
 }
 
 /* 删之前问一句。**不用 confirm() 弹窗**：一段对话是真数据，值得问，
-   但浏览器那个弹窗跟这套排版格格不入，而且会挡住整个页面。
+   但那个弹窗跟这套排版格格不入，而且会挡住整个窗口。
    就地把这一行换成「删掉？确认 / 取消」，跟确认工具调用是同一个路子。 */
 function askDelete(li, row) {
   const back = li.cloneNode(true);
@@ -525,22 +594,40 @@ function wire(li, row) {
   if (del) del.onclick = (e) => { e.stopPropagation(); askDelete(li, row); };
 }
 
-/* 收放状态记在浏览器里：**这是「这台机器上这个人的偏好」**，
-   不是会话状态，所以不进协议，也不该每次开页面都要重收一次。 */
-const SIDE_KEY = "feiyu.side";
-
 function setSide(on) {
   document.body.dataset.side = on ? "on" : "off";
   $("side-toggle").setAttribute("aria-expanded", on ? "true" : "false");
   try { localStorage.setItem(SIDE_KEY, on ? "on" : "off"); } catch { /* 无痕窗口 */ }
 }
 
-let sideOn = "off";
+let sideOn = "on";
 try { sideOn = localStorage.getItem(SIDE_KEY) || "on"; } catch { sideOn = "on"; }
 setSide(sideOn !== "off");
 
 $("side-toggle").onclick = () => setSide(document.body.dataset.side === "off");
 $("new-talk").onclick = () => send({ op: "new" });
+$("find").addEventListener("input", renderTalks);
+
+/* 侧栏那几个导航项和标题栏那几个钮**都走斜杠命令** —— 一个动作一个来源，
+   不给它们另开一套（这是 Hermes DESIGN.md 的 "One action, one home"）。 */
+const shortcuts = {
+  "nav-skills": "/skills", "nav-jobs": "/jobs", "nav-memory": "/memory",
+  "act-skills": "/help", "act-cost": "/cost", "act-mode": "/mode",
+};
+for (const [id, cmd] of Object.entries(shortcuts)) {
+  const el = $(id);
+  if (el) el.onclick = () => { if (cmd === "/help") wantHelp = true; send({ op: "command", text: cmd }); };
+}
+
+/* 窗口按钮。只有桌面端有窗口可操作，浏览器里把它们藏起来。 */
+if (TAURI) {
+  const win = TAURI.window.getCurrentWindow();
+  $("win-min").onclick = () => win.minimize();
+  $("win-max").onclick = () => win.toggleMaximize();
+  $("win-close").onclick = () => win.close();
+} else {
+  ["win-min", "win-max", "win-close"].forEach((id) => { $(id).hidden = true; });
+}
 
 /* ── 上传 ──────────────────────────────────────────────────── */
 
@@ -570,17 +657,23 @@ async function upload(file) {
   clips.push(clip);
   drawClips();
   try {
-    const reply = await fetch(`/upload?t=${encodeURIComponent(TOKEN)}`, {
-      method: "POST",
-      // 文件名走 header：它可能是中文，也可能带路径分隔符（服务端会收拾）
-      headers: { "x-feiyu-filename": encodeURIComponent(file.name) },
-      body: file,
-    });
-    if (!reply.ok) throw new Error(await reply.text());
-    const got = await reply.json();
+    let path;
+    if (TAURI) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      path = await TAURI.core.invoke("upload", { name: file.name, data: [...bytes] });
+    } else {
+      const reply = await fetch(`/upload?t=${encodeURIComponent(TOKEN)}`, {
+        method: "POST",
+        // 文件名走 header：它可能是中文，也可能带路径分隔符（服务端会收拾）
+        headers: { "x-feiyu-filename": encodeURIComponent(file.name) },
+        body: file,
+      });
+      if (!reply.ok) throw new Error(await reply.text());
+      path = (await reply.json()).path;
+    }
     clip.state = "ready";
-    clip.path = got.path;
-    clip.name = got.path;
+    clip.path = path;
+    clip.name = path;
   } catch (err) {
     clip.state = "failed";
     clip.error = String(err).slice(0, 120);
@@ -600,42 +693,58 @@ document.addEventListener("drop", (e) => {
   [...(e.dataTransfer?.files || [])].forEach(upload);
 });
 
-/* ── 连接 ──────────────────────────────────────────────────── */
+/* ── 传输 ──────────────────────────────────────────────────── */
 
-function send(msg) {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(msg));
-    return true;
-  }
-  // **断线时不能默默吞掉。** 用户点了发送、字也从输入框里没了，却什么都没发生 ——
-  // 那比报个错糟得多。
-  stateEl.textContent = "没连上，这条没发出去 · 正在重连";
-  stateEl.dataset.alert = "1";
-  return false;
+let online = false;
+
+function hello() {
+  online = true;
+  setDot("ready", "就绪");
+  send({ op: "command", text: "/help" });
+  send({ op: "status" });
+  send({ op: "sessions" });
 }
 
-/* 令牌在页面地址里（服务端只认带令牌的连接）。
-   WebSocket **不受同源策略保护**，随便一个网站都能连本机端口，所以服务端那边
-   还有 Origin / Host 校验；这份令牌是给「同机上别的进程」准备的那道门。 */
-const TOKEN = new URLSearchParams(location.search).get("t") || "";
+function inbound(raw) {
+  let ev;
+  try { ev = JSON.parse(raw); } catch { return; }
+  handle(ev);
+}
+
+function send(msg) {
+  if (!online) {
+    // **断线时不能默默吞掉。** 用户点了发送、字也从输入框里没了，却什么都没发生 ——
+    // 那比报个错糟得多。
+    setDot("off", "没连上，这条没发出去");
+    return false;
+  }
+  const line = JSON.stringify(msg);
+  if (TAURI) {
+    TAURI.core.invoke("send", { line }).catch(() => {
+      online = false;
+      setDot("off", "agent 断了");
+    });
+  } else {
+    socket.send(line);
+  }
+  return true;
+}
 
 function connect() {
+  if (TAURI) {
+    // 桌面：进程内通道，没有端口、没有令牌、没有 Origin 那一套
+    TAURI.event.listen("feiyu://event", (e) => inbound(e.payload));
+    TAURI.core.invoke("where_am_i").then((w) => { $("s-cwd").textContent = shortPath(w); });
+    hello();
+    return;
+  }
+  // 开发：连 feiyu-devserver，好让 headless Chrome 那套夹具还能跑
   socket = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(TOKEN)}`);
-  socket.onopen = () => {
-    stateEl.textContent = "就绪";
-    stateEl.dataset.alert = "0";
-    send({ op: "command", text: "/help" });
-    send({ op: "status" });
-    send({ op: "sessions" });
-  };
-  socket.onmessage = (e) => {
-    let ev;
-    try { ev = JSON.parse(e.data); } catch { return; }
-    handle(ev);
-  };
+  socket.onopen = hello;
+  socket.onmessage = (e) => inbound(e.data);
   socket.onclose = () => {
-    stateEl.textContent = "连接断了 · 正在重连";
-    stateEl.dataset.alert = "1";
+    online = false;
+    setDot("off", "连接断了 · 正在重连");
     setTimeout(connect, 1000);
   };
 }
@@ -752,6 +861,12 @@ inputEl.addEventListener("keydown", (e) => {
 // esc 中断，跟终端一个键。菜单开着时上面那段会把事件截住。
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && busy) send({ op: "interrupt" });
+  // 侧栏上写着 Ctrl N，那就得真的能用 —— 写了快捷键不实现比不写更糟
+  if (e.key === "n" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send({ op: "new" }); }
+  if (e.key === "b" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    setSide(document.body.dataset.side === "off");
+  }
 });
 
 $("send").onclick = submit;

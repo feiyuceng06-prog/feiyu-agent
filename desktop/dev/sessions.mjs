@@ -51,6 +51,18 @@ const check = (name, ok, detail) => {
 
 const busy = () => ev(`document.getElementById("stop").hidden === false`);
 
+/* 冒出确认卡就点「同意一次」。
+   **这条不能省**：default 模式下 agent 随时可能调 remember / write_file 这类要点头的
+   工具，卡在那儿就永远不「闲下来」，后面所有断言都会因为 turn 没结束而挂 ——
+   第一版就是这样，看着像会话存盘坏了，其实是它在等我点头。 */
+const approve = () => ev(`(() => {
+  const card = [...document.querySelectorAll(".ask")].find(c => !c.classList.contains("ask--done"));
+  if (!card) return 0;
+  const yes = [...card.querySelectorAll("button")].find(b => b.textContent.includes("同意"));
+  if (yes) { yes.click(); return 1; }
+  return 0;
+})()`);
+
 async function ask(text) {
   await ev(`input.value = ${JSON.stringify(text)};
             input.dispatchEvent(new Event("input"));
@@ -59,8 +71,11 @@ async function ask(text) {
   // 只等「不忙」是错的：刚点下去的那一刻本来就是不忙的，第一次轮询就返回了，
   // 后面的断言全跑在对话开始之前 —— 第一版就是这么把自己骗了一轮。
   for (let i = 0; i < 40 && !(await busy()); i++) await sleep(500);
-  for (let i = 0; i < 120 && (await busy()); i++) await sleep(2000);
-  await sleep(800);         // 收尾那几条事件（turn_end / status / sessions）画完
+  for (let i = 0; i < 150 && (await busy()); i++) {
+    await approve();
+    await sleep(2000);
+  }
+  await sleep(1000);        // 收尾那几条事件（turn_end / status / sessions）画完
 }
 
 const talks = async () => JSON.parse(await ev(`JSON.stringify(
@@ -75,10 +90,22 @@ await call("Emulation.setDeviceMetricsOverride",
   { width: 1400, height: 1000, deviceScaleFactor: 2, mobile: false });
 await call("Page.navigate", { url });
 await sleep(2500);
+/* 把**收到**的事件也记下来。只看 DOM 的话，「列表为什么少一条」永远只能靠猜；
+   记下时间线就能一眼看出是没发、还是发了没画。 */
+await ev(`window.__in = [];
+  (function () {
+    const real = WebSocket.prototype.addEventListener;
+    const sock = socket;
+    sock.addEventListener("message", (e) => {
+      const d = JSON.parse(e.data);
+      window.__in.push([Date.now() % 100000, d.kind,
+        d.kind === "sessions" ? d.rows.length + "行/current=" + d.current : ""]);
+    });
+  })(); true`);
 await ev(`document.body.dataset.side = "on"; true`);
 
 // 第一段对话
-await ask("记住一个词：菠萝。只回一个「好」。");
+await ask("我说一个水果：菠萝。只回一个「好」，别用任何工具。");
 await sleep(1200);
 let list = await talks();
 check("第一段对话进了侧边栏", list.length === 1 && list[0].current, list);
@@ -88,7 +115,7 @@ await ev(`document.getElementById("new-talk").click(); true`);
 await sleep(1500);
 check("新对话把正文清空了",
       (await ev(`document.querySelectorAll(".block").length`)) === 0, null);
-await ask("记住一个词：西瓜。只回一个「好」。");
+await ask("我说一个水果：西瓜。只回一个「好」，别用任何工具。");
 await sleep(1200);
 list = await talks();
 check("现在有两段，新的在最前", list.length === 2 && list[0].current, list);
@@ -102,12 +129,17 @@ check("切回去把上一段的历史捞回来了", restored.includes("菠萝"),
 list = await talks();
 check("当前那条跟着换", list.length === 2 && list[1].current, list);
 
-// agent 那边的上下文也真的换过去了（不是只换了画面）
-await ask("我刚让你记的那个词是什么？只回那两个字。");
-const answer = await ev(`document.getElementById("stream").textContent`);
+// agent 那边的上下文也真的换过去了（不是只换了画面）。
+// **只看最后一块「它说」**：正文里本来就有「菠萝」（是上面捞回来的历史），
+// 拿整段正文去 includes 等于白测。
+await ask("我上面说的那个水果是什么？只回那两个字，别用工具。");
+const answer = await ev(`(() => {
+  const said = [...document.querySelectorAll(".block")]
+    .filter(b => b.querySelector(".block__label").textContent === "它说");
+  return said.length ? said[said.length - 1].textContent : "";
+})()`);
 check("agent 的上下文也切过去了（答菠萝不是西瓜）",
-      answer.trimEnd().endsWith("菠萝") || /菠萝/.test(answer.slice(-40)),
-      answer.slice(-80));
+      answer.includes("菠萝") && !answer.includes("西瓜"), answer.slice(0, 80));
 
 // 上传一个文件，让它读
 await ev(`(async () => {
@@ -119,8 +151,12 @@ await sleep(1500);
 const clip = await ev(`JSON.stringify(clips)`);
 check("上传完了，附件条上有它", clip.includes(".feiyu/uploads/"), clip);
 await ask("读一下我上传的那个文件，把里面的暗号原样念出来。");
-const read = await ev(`document.getElementById("stream").textContent`);
-check("agent 真的读到了上传的文件", read.includes("蓝鲸七号"), read.slice(-160));
+const read = await ev(`(() => {
+  const said = [...document.querySelectorAll(".block")]
+    .filter(b => b.querySelector(".block__label").textContent === "它说");
+  return said.length ? said[said.length - 1].textContent : "";
+})()`);
+check("agent 真的读到了上传的文件", read.includes("蓝鲸七号"), read.slice(0, 120));
 
 await sleep(600);
 const { data } = await call("Page.captureScreenshot", { format: "png" });
@@ -128,6 +164,12 @@ writeFileSync(`${outDir}/sidebar.png`, Buffer.from(data, "base64"));
 console.log("拍了", `${outDir}/sidebar.png`);
 console.log("花费:", await ev(`document.getElementById("m-cost").textContent`));
 const bad = cases.filter((x) => !x).length;
+if (bad) {
+  const timeline = JSON.parse(await ev(`JSON.stringify(window.__in || [])`));
+  console.log("\n收到的事件时间线（只列会话相关的）:");
+  timeline.filter((r) => ["sessions", "cleared", "opened", "turn_start", "turn_end"].includes(r[1]))
+    .forEach((r) => console.log("  ", r[0], r[1], r[2]));
+}
 console.log(`${cases.length - bad}/${cases.length} 通过`);
 ws.close();
 chrome.kill();

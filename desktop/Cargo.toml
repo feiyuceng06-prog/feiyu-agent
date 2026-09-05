@@ -1,0 +1,35 @@
+[package]
+name = "feiyu-desktop"
+version = "0.52.0"
+edition = "2024"
+description = "feiyu 的桌面端：一个窗口，底下监管一个 feiyu --serve"
+license = "MIT"
+
+[[bin]]
+name = "feiyu-desktop"
+path = "src/main.rs"
+
+# 开发用的静态服务：Tauri 的 webview 在 Linux 上是 webkit2gtk，没有 CDP，
+# headless Chrome 那套夹具接不上去。留这个二进制把同一份 ui/ 用 HTTP 端出来，
+# 夹具照旧能跑。**它不是产品的一部分**，install.sh 不装它。
+[[bin]]
+name = "feiyu-devserver"
+path = "src/devserver.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# devserver 用
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

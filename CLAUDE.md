@@ -1,7 +1,7 @@
 # Feiyu Agent — 给 Claude 的项目约定
 
 跑在终端里的编程 agent。约 9300 行 Python，无框架。
-另有一个网页端（`web/`，Rust + 原生前端），入口是 `feiyu-web`。
+另有一个桌面端（`desktop/`，Tauri + 原生前端），入口是 `feiyu-desktop`。
 
 verify: .venv/bin/python -m unittest discover -s tests -t .
 
@@ -25,8 +25,9 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 | `feiyu/skills.py` | 技能（模型按需读）与自定义斜杠命令（用户敲），含项目技能的信任机制 |
 | `feiyu/events.py` | 结构化事件的 sink：ui 除了画终端，还能把同一件事报给别的前端 |
 | `feiyu/serve.py` | `--serve`：把 agent 挂在 stdio 上说行 JSON，给网页端用 |
-| `web/src/main.rs` | feiyu-web：HTTP + WebSocket，前端资源编进二进制，监管一个 `feiyu --serve` |
-| `web/assets/` | 网页端前端（index.html / app.css / app.js），无框架无依赖 |
+| `desktop/src/main.rs` | feiyu-desktop：Tauri 窗口，监管一个 `feiyu --serve`，走 invoke / emit |
+| `desktop/src/devserver.rs` | **只给测试用**的静态服务（Tauri 没 CDP，夹具接不上去），不是产品 |
+| `desktop/ui/` | 前端（index.html / app.css / app.js / logo.svg），无框架无依赖 |
 | `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
 | `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
@@ -1540,6 +1541,59 @@ id 是时间戳所以天生按时间排序）。0.50.x 那个形状装不下「�
 **协议层是验过的**：`--serve` 直接喂一条 prompt，收尾能看到 `sessions rows=1`。
 **UI 层是验过的**：`input.mjs` 39 条。**浏览器里两段真对话来回切没验成**，
 卡在中转站降速上，不是代码。
+
+## 从网页端改成桌面端（0.52.0）
+
+用户要一个桌面应用，框架照 Hermes Desktop（NousResearch/hermes-agent，MIT），
+样式保留博客那一套。
+
+**没有 fork 它。** `apps/desktop` 是 **524,089 行 TS/TSX、2183 个文件、33MB**
+（Electron 40 + React 19 + Vite + Tailwind 4 + @assistant-ui/react + xterm +
+Mermaid + CodeMirror）。真正值钱的是它那份 360 行的 `DESIGN.md`——信息架构和
+几条原则。照着它在我们这份 1500 行的前端上实现，一天，代码还是能读的。
+数字摆给用户看过，是他拍板的。
+
+### 借来的框架
+
+标题栏（自绘）/ 侧栏（导航项 + 搜索 + 已置顶/会话分组）/ 底部状态栏 /
+输入区左附件右模型选择器。加上它两条跟我们本来就一致的原则：
+**Flat, not boxed**（不许卡片套卡片）、**Tokens, not literals**（组件里不许有裸色值）。
+还有一条直接照抄的规矩：**One action, one home** —— 侧栏那几个导航项和标题栏那几个钮
+**都走斜杠命令**，不给它们另开一套逻辑。
+
+### Tauri 那半边
+
+- **不再监听端口**，所以 0.51 那一整套安全面（一次性令牌、Origin、Host、
+  DNS rebinding）**全都不需要了**。前端和 agent 之间是 `invoke` / `emit`，
+  走进程内通道，外面够不着。这是桌面端相对网页端唯一实打实的收益。
+- **`WEBKIT_DISABLE_DMABUF_RENDERER=1` 必须在 GTK 初始化之前设**，
+  NVIDIA + WebKitGTK 在 Wayland 上不设就直接协议错误退出（Writer 里也有这条）。
+- **`#[tauri::command]` 的函数名不要跟 `main` 里的局部变量撞**：
+  `generate_handler!` 展开出来的代码在那个作用域里按名字取函数，会被变量遮住。
+  `workspace` 撞过一次，改名 `where_am_i`。
+- `frontendDist` 是**相对 `tauri.conf.json` 所在目录**的。配置不在 `src-tauri/` 时
+  写 `"ui"` 而不是 `"../ui"`。
+
+### 为什么还留着一个 devserver
+
+**Tauri 在 Linux 上用的是 webkit2gtk，没有 CDP**，`dev/shoot.mjs` / `dev/input.mjs`
+那套 headless Chrome 夹具接不上去。`src/devserver.rs` 把同一份 `ui/` 用 HTTP 端出来，
+夹具照旧能跑；前端靠 `window.__TAURI__` 在不在自己决定走哪条传输。
+**它是测试夹具，不是产品**，install.sh 不装它。`/ws` 和 `/upload` 那两道门照旧全在。
+
+### 这一轮踩到的
+
+- **`[hidden]` 压不住 `display`**。`[hidden]` 的 UA 样式特指度跟 `.chip { display: inline-flex }`
+  打平，后写的作者样式赢 —— `el.hidden = true` 对任何设了 display 的类都失效。
+  全局补一条 `[hidden] { display: none !important }`。附件条、补全菜单、窗口按钮都中过。
+- **裸的 `find` 是 `window.find`**（浏览器自带的查找函数），不是 id 为 find 的那个输入框。
+  夹具里写 `find.value = "x"` 会静默无效。
+- **夹具的 `ev()` 必须把页面异常报出来**。抛了却返回 `undefined` 的话，断言会挂在一个
+  根本没执行的动作上 —— 顶层 `const` 跨 eval 重复声明就是这么骗了我一轮。
+- **Chrome 的 profile 目录跨次保留 localStorage**，上一轮置顶过的会话会留到下一轮把
+  列表顺序改掉。夹具开头 `localStorage.clear()`。
+- **夹具灌合成事件时会跟服务端自己推的事件抢**：它盘上有真会话，`sessions` 事件会在
+  合成列表之后到把 DOM 覆盖掉。灌完、点完，**再灌一遍**才断言。
 
 ### 权限和密钥在 serve 这条路上
 

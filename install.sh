@@ -43,28 +43,45 @@ EOF
 chmod +x "$SHIM"
 say "已放好 $SHIM"
 
-# ---- 网页端（可选）----
-# 要 cargo。**没有就跳过，不要让整个安装失败** —— 网页端是加分项，
-# 终端版才是这个工具本身。
-WEB_SHIM="${BIN}/feiyu-web"
+# ---- 桌面端（可选）----
+# 要 cargo，还要 webkit2gtk。**没有就跳过，不要让整个安装失败** ——
+# 桌面端是加分项，终端版才是这个工具本身。
+DESK_SHIM="${BIN}/feiyu-desktop"
 if command -v cargo >/dev/null 2>&1; then
-  say "编译网页端 feiyu-web（第一次要拉依赖，几十秒）"
-  if (cd web && cargo build --release --quiet 2>&1); then
-    cat > "$WEB_SHIM" <<EOF
+  say "编译桌面端 feiyu-desktop（第一次要拉依赖，几分钟）"
+  if (cd desktop && cargo build --release --quiet --bin feiyu-desktop 2>&1); then
+    cat > "$DESK_SHIM" <<EOF
 #!/usr/bin/env bash
-# 网页端跑起来要找 feiyu 那个可执行文件，直接指给它，省得依赖 PATH
+# 桌面端跑起来要找 feiyu 那个可执行文件，直接指给它，省得依赖 PATH
 export FEIYU_BIN="\${FEIYU_BIN:-${ROOT}/.venv/bin/feiyu}"
-exec "${ROOT}/web/target/release/feiyu-web" "\$@"
+exec "${ROOT}/desktop/target/release/feiyu-desktop" "\$@"
 EOF
-    chmod +x "$WEB_SHIM"
-    say "已放好 $WEB_SHIM"
+    chmod +x "$DESK_SHIM"
+    say "已放好 $DESK_SHIM"
+    # 桌面项。**Exec 必须写绝对路径** —— GNOME 启动 .desktop 用的是 systemd user
+    # 环境的 PATH，那里面没有 ~/.local/bin（shell 里有是因为 .zshrc，它读不到）
+    mkdir -p "${HOME}/.local/share/applications" "${HOME}/.local/share/icons/hicolor/256x256/apps"
+    cp -f desktop/icons/256.png "${HOME}/.local/share/icons/hicolor/256x256/apps/feiyu.png" 2>/dev/null || true
+    cat > "${HOME}/.local/share/applications/feiyu.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Feiyu
+Comment=终端编程 agent
+Exec=${DESK_SHIM} %F
+Icon=feiyu
+Terminal=false
+Categories=Development;
+StartupWMClass=Feiyu
+EOF
+    update-desktop-database "${HOME}/.local/share/applications" >/dev/null 2>&1 || true
+    say "已放好桌面项（应用列表里能搜到 Feiyu）"
   else
-    warn "网页端没编译成功，跳过 终端版不受影响，敲 feiyu 照常用"
-    rm -f "$WEB_SHIM"
+    warn "桌面端没编译成功，跳过 终端版不受影响，敲 feiyu 照常用"
+    rm -f "$DESK_SHIM"
   fi
 else
-  warn "没装 cargo，跳过网页端（终端版不受影响）装了 rust 之后重跑这个脚本就有了"
-  rm -f "$WEB_SHIM"
+  warn "没装 cargo，跳过桌面端（终端版不受影响）装了 rust 之后重跑这个脚本就有了"
+  rm -f "$DESK_SHIM"
 fi
 
 # 真的能跑起来才算装好 只看 pip 退出码不够，缺文件是在 import 时才炸的
@@ -75,8 +92,8 @@ if ! VERSION="$(./.venv/bin/feiyu --version 2>&1)"; then
 fi
 echo
 say "装好了：$VERSION"
-if [ -x "$WEB_SHIM" ]; then
-  say "网页端：feiyu-web（只监听 127.0.0.1）"
+if [ -x "$DESK_SHIM" ]; then
+  say "桌面端：feiyu-desktop（或在应用列表里搜 Feiyu）"
 fi
 
 case ":${PATH}:" in

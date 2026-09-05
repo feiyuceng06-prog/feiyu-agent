@@ -1,4 +1,6 @@
-web/target/
+desktop/target/
+# Tauri 生成的 schema，跟着构建走，不进版本库
+desktop/gen/
 
 __pycache__/
 *.py[cod]

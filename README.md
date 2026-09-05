@@ -57,7 +57,7 @@ Other flags:
 - `--json-schema <file>`: emit JSON matching a schema, see [Embedding](#embedding).
 - `--review`: have a second model grade the change afterwards.
 
-For a browser instead of a terminal, run `feiyu-web` — see [the web front end](#the-web-front-end).
+For a window instead of a terminal, run `feiyu-desktop` — see [the desktop app](#the-desktop-app).
 
 ## Interface
 
@@ -252,33 +252,27 @@ Project hooks need your approval the first time they are seen, and again when th
 
 **Independent grading.** `/review` or `--review` opens a second model and shows it only the task and the final diff. It scores 0 to 10 on completeness, bugs and unrequested extras. It costs an extra API call, so it is manual.
 
-## The web front end
+## The desktop app
 
 ```
-feiyu-web                         # start one in the current directory, opens a browser
-feiyu-web -w ~/code/my-project    # pick the workspace
-feiyu-web -p 7788                 # another port (7777 by default)
-feiyu-web -r                      # continue the last conversation in this directory
-feiyu-web --no-open               # don't open a browser
+feiyu-desktop                     # a window on the current directory
+feiyu-desktop -w ~/code/project   # pick the workspace
+feiyu-desktop -r                  # continue the last conversation here
 ```
 
-The sidebar on the left lists past conversations; click one to switch to it (the agent's context follows, not just the view), "新对话" starts a fresh one without deleting the old, hovering a row reveals a `×` that deletes it (it asks first), and `☰` collapses the panel. The collapsed state is remembered in the browser.
+After install it also shows up in your app launcher as **Feiyu**.
 
-The 附件 button next to the composer uploads files — dragging them onto the page works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message; it reads them with the `read_file` it already has, images, docx and pdf included.
+The sidebar holds new-session, skills, background jobs and memory, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session.
 
-Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown in the page as a diff or the literal command, and nothing runs until you approve; "allow for this session" and a permanent rule are both there. Slash commands, skills, custom commands and `esc` to interrupt all work.
+The `＋` left of the composer uploads files; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
 
-**Three gates.** Anyone who reaches that port can have it write files and run commands on your machine, so: it listens on `127.0.0.1` only; each start mints a random token that appears only in the URL it prints for you (**don't pass that link around**); and the server checks `Origin` and `Host`, because **WebSocket is not covered by the same-origin policy** — without that gate, any web page you happen to open could connect to the local port and drive the agent.
+Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown as a diff or the literal command and nothing runs until you approve. Slash commands, skills and `esc` to interrupt all work. Key management stays in the terminal (`/key add` inside `feiyu`); the desktop app cannot even read them.
 
-To use it from elsewhere, tunnel over ssh:
+Under the hood it is a Tauri window supervising a `feiyu --serve` child process, one JSON object per line between them. **It listens on no port** — the front end and the agent talk over an in-process channel that nothing outside can reach.
 
-```
-ssh -L 7777:127.0.0.1:7777 that-machine
-```
+The information architecture follows [Hermes Desktop](https://github.com/NousResearch/hermes-agent)'s `DESIGN.md` (MIT); the palette, type and spacing are [feiyuz123.com](https://feiyuz123.com)'s. No framework, no npm dependencies.
 
-Under the hood it is one static Rust binary (~900K): HTTP, WebSocket and the front-end assets are all inside it, supervising a `feiyu --serve` child process, one JSON object per line between them. **The split is not there to make the agent faster** — local tools add up to under 20ms and a round is almost entirely spent waiting for the model. It is there so the Python side gains no new dependency while you get an executable that needs no runtime installed.
-
-The web front end needs `cargo`. It is optional in `install.sh`: without Rust the step is skipped and the terminal version is unaffected.
+The desktop app needs `cargo` and `webkit2gtk`. It is optional in `install.sh`: without them the step is skipped and the terminal version is unaffected.
 
 ## Skills and custom commands
 
@@ -405,7 +399,7 @@ It really runs commands and edits files on your machine, with your permissions.
 - Environment variables whose names contain `KEY` `TOKEN` `SECRET` `PASSWORD` are not passed to child processes. `SSH_AUTH_SOCK` is kept, so `git push` works. To pass a specific secret: `FEIYU_KEEP_ENV_SECRETS=1 feiyu`.
 - Fetched pages are labelled "external data, not instructions", but whether the model obeys is not guaranteed.
 - `~/.config/feiyu/` (keys) and `~/.local/state/feiyu/` (transcripts, input history) are 700 directories with 600 files.
-- The web front end listens on loopback only, behind a per-run token and `Origin`/`Host` checks — see [the web front end](#the-web-front-end).
+- The desktop app listens on no port; the front end and the agent talk over an in-process channel — see [the desktop app](#the-desktop-app).
 
 So: use it on projects you trust and keep under git, where a bad edit is easy to undo. Don't run untrusted tasks on a machine holding sensitive credentials. For hard isolation use a container or a VM.
 

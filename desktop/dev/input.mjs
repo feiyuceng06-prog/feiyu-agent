@@ -36,8 +36,16 @@ ws.addEventListener("message", (e) => {
 });
 const call = (method, params = {}) =>
   new Promise((ok) => { pend.set(++id, ok); ws.send(JSON.stringify({ id, method, params })); });
-const ev = async (x) =>
-  (await call("Runtime.evaluate", { expression: x, returnByValue: true })).result?.value;
+const ev = async (x) => {
+  const out = await call("Runtime.evaluate", { expression: x, returnByValue: true });
+  if (out.exceptionDetails) {
+    // **不能静默**：eval 抛了却返回 undefined 的话，断言会挂在一个根本没执行的
+    // 动作上 —— 顶层 const 跨 eval 重复声明就是这么骗过我一轮的
+    throw new Error("页面里报错：" +
+      (out.exceptionDetails.exception?.description || out.exceptionDetails.text || "").slice(0, 200));
+  }
+  return out.result?.value;
+};
 
 const KEYS = {
   Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
@@ -85,6 +93,13 @@ await call("Page.enable");
 await call("Runtime.enable");
 await call("Page.navigate", { url });
 await sleep(2200);
+
+/* **每轮先把 localStorage 清干净。** Chrome 的 profile 目录是跨次保留的，
+   上一轮置顶过的会话会留到下一轮，把列表顺序改掉 —— 断言就挂在别人的数据上。
+   （侧栏收放和置顶都存在这儿。） */
+await ev(`localStorage.clear(); true`);
+await call("Page.navigate", { url });
+await sleep(1500);
 
 // 记下真正发出去的消息，用来判断「回车到底是提交了还是被补全吃掉了」
 await ev(`window.__sent = [];
@@ -254,11 +269,11 @@ await ev(`stream.replaceChildren();
   handle({kind:"boot", what:"mcp", level:"notice", text:"MCP：fin（29 个工具）"}); true`);
 const bootState = JSON.parse(await ev(`JSON.stringify({
   blocks: document.querySelectorAll(".block").length,
-  bootShown: !document.getElementById("boot").hidden,
-  bootText: document.getElementById("boot").textContent,
+  bootShown: !document.getElementById("s-boot").hidden,
+  bootText: document.getElementById("s-boot").textContent,
 })`));
 check("启动说明不进正文流", bootState.blocks === 0, bootState);
-check("启动说明摆在刊头里", bootState.bootShown && bootState.bootText.includes("MCP"), bootState);
+check("启动说明摆在状态栏里", bootState.bootShown && bootState.bootText.includes("MCP"), bootState);
 
 // 10. 普通一句话不该弹菜单
 await reset();
@@ -277,7 +292,7 @@ async function side() {
   })`));
 }
 
-await ev(`document.body.dataset.side = "on"; true`);
+await ev(`setSide(true); true`);
 let sd = await side();
 check("侧边栏展开时有宽度", sd.width > 100, sd);
 await ev(`document.getElementById("side-toggle").click(); true`);
@@ -388,9 +403,61 @@ await sleep(400);
 await ev(`document.getElementById("send").click(); true`);
 await sleep(200);
 const offline = JSON.parse(await ev(`JSON.stringify({
-  kept: input.value, note: document.getElementById("state").textContent })`));
+  kept: input.value, note: document.getElementById("s-state").textContent })`));
 check("断线时话留在输入框里", offline.kept === "这句发不出去", offline);
 check("断线时状态行说一声", offline.note.includes("没发出去"), offline);
+
+// ── 外壳（Hermes 那套信息架构）────────────────────────────
+const shell = JSON.parse(await ev(`JSON.stringify({
+  bar: !!document.querySelector(".bar"),
+  navs: [...document.querySelectorAll(".nav__text")].map(e => e.textContent),
+  find: !!document.getElementById("find"),
+  groups: [...document.querySelectorAll(".group__head")].map(e => e.textContent),
+  status: !!document.querySelector(".status"),
+  pick: document.getElementById("model").textContent,
+  winBtnsHidden: document.getElementById("win-min").hidden,
+})`));
+check("标题栏在", shell.bar, shell);
+check("侧栏四个导航项都在",
+      ["新建会话", "技能与命令", "后台任务", "长期记忆"].every(n => shell.navs.includes(n)), shell.navs);
+check("有搜索框", shell.find, shell);
+check("有「会话」分组", shell.groups.includes("会话"), shell.groups);
+check("有状态栏", shell.status, shell);
+check("浏览器里不显示窗口按钮（那是桌面端的）", shell.winBtnsHidden, shell);
+
+// 搜索只筛本地那份列表
+await ev(`handle({kind:"sessions", current:"B", rows:[
+  {id:"B", title:"改构建脚本", model:"m", count:9, saved_at:2, when:"09-05 01:10"},
+  {id:"A", title:"看看持仓", model:"m", count:4, saved_at:1, when:"09-04 11:02"}]});
+  (() => { const box = document.getElementById("find");
+    box.value = "构建"; box.dispatchEvent(new Event("input")); })(); true`);
+await sleep(200);
+const found = JSON.parse(await ev(`JSON.stringify(
+  [...document.querySelectorAll(".talk__title")].map(e => e.textContent))`));
+check("搜索筛得动", found.length === 1 && found[0].includes("构建"), found);
+await ev(`(() => { const b = document.getElementById("find");
+  b.value = ""; b.dispatchEvent(new Event("input")); })(); true`);
+
+// shift+点 = 置顶
+await sleep(150);
+await ev(`localStorage.removeItem("feiyu.pinned");
+  handle({kind:"sessions", current:"B", rows:[
+    {id:"B", title:"改构建脚本", model:"m", count:9, saved_at:2, when:"09-05 01:10"},
+    {id:"A", title:"看看持仓", model:"m", count:4, saved_at:1, when:"09-04 11:02"}]});
+  document.querySelectorAll(".talk")[1].dispatchEvent(
+    new MouseEvent("click", { shiftKey: true, bubbles: true })); true`);
+await sleep(200);
+// **点完要再灌一遍再断言。** 服务端自己也会推 sessions（它盘上有别的会话），
+// 那一条会在我们灌的合成列表之后到，把 DOM 覆盖掉 —— 断言就跑在别人的数据上了。
+await ev(`handle({kind:"sessions", current:"B", rows:[
+  {id:"B", title:"改构建脚本", model:"m", count:9, saved_at:2, when:"09-05 01:10"},
+  {id:"A", title:"看看持仓", model:"m", count:4, saved_at:1, when:"09-04 11:02"}]}); true`);
+await sleep(200);
+const pin = JSON.parse(await ev(`JSON.stringify({
+  shown: !document.getElementById("group-pinned").hidden,
+  top: [...document.querySelectorAll("#pinned .talk__title")].map(e => e.textContent),
+})`));
+check("shift+点把那条置顶", pin.shown && pin.top.length === 1, pin);
 
 const errs = await ev(`JSON.stringify(window.__errs || [])`);
 console.log("\n页面 JS 报错:", errs);
