@@ -263,7 +263,11 @@ console.log("拍了", await cdp.shot("5_image", { width: 1280, height: 1100 }));
 
 /* 图必须真的画出来了，而且只画了一次。
    零尺寸的图在截图里跟「没有这块」长得一模一样，只能靠量。 */
-const shots = await cdp.eval(`JSON.stringify([...document.querySelectorAll("figure.shot")].map((f) => {
+/* **只看这一屏喂进去的那张。** 每跑一次夹具就往工作区传一张图，
+   上一轮的残留会让"该只有一张"挂掉 —— 是夹具不可重复，不是产品坏了。 */
+const shots = await cdp.eval(`JSON.stringify([...document.querySelectorAll("figure.shot")]
+  .filter((f) => f.querySelector("figcaption").textContent === ${JSON.stringify(shotPath)})
+  .map((f) => {
   const img = f.querySelector("img");
   const r = img ? img.getBoundingClientRect() : { width: 0, height: 0 };
   return { w: Math.round(r.width), h: Math.round(r.height), failed: !!f.dataset.failed,

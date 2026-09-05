@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -302,3 +303,83 @@ class TestLegacyId(Base):
             json.dump({"messages": [{"role": "user", "content": "y"}], "saved_at": 2}, f)
         session.drop(self.ws, "20260101-000000")
         self.assertEqual([r["id"] for r in session.listing(self.ws)], [session.LEGACY])
+
+
+class TestCard(Base):
+    """侧边栏那张小卡片
+
+    `listing()` 原来把每一份存盘整个 json.loads 一遍，只为了拿一行标题：
+    40 份长会话（96 MB）要 131 ms。卡片是**派生数据**，坏了 / 没有 / 过期
+    都退回读整份 —— 它是缓存，不是第二份真相。
+    """
+
+    def agent(self, said="你好"):
+        b = FakeBackend([])
+        b.messages += [{"role": "user", "content": said},
+                       {"role": "assistant", "content": "在"}]
+        return Agentish(b)
+
+    def test_存的时候顺手写一张(self):
+        session.save(self.ws, self.agent(), "20260101-000000")
+        path = session._path(self.ws, "20260101-000000")
+        self.assertTrue(os.path.exists(session._card_path(path)))
+        self.assertEqual(os.stat(session._card_path(path)).st_mode & 0o777, 0o600)
+
+    def test_列表不读整份存盘(self):
+        session.save(self.ws, self.agent("我说一句很长的话"), "20260101-000000")
+        real = session._read
+        # legacy 那条路照旧要读（它没有卡片），只盯新目录里的
+        folder = session.folder(self.ws)
+        # **不能用 startswith**：旧位置是 DIR/<hash>.json，正好以 DIR/<hash> 开头
+        session._read = lambda p: (self.fail("不该读整份：" + p)
+                                   if os.path.dirname(p) == folder else real(p))
+        self.addCleanup(setattr, session, "_read", real)
+        rows = session.listing(self.ws)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("我说一句很长的话", rows[0]["title"])
+        self.assertEqual(rows[0]["count"], 3)
+
+    def test_没有卡片就退回读整份(self):
+        session.save(self.ws, self.agent(), "20260101-000000")
+        os.remove(session._card_path(session._path(self.ws, "20260101-000000")))
+        self.assertEqual([r["id"] for r in session.listing(self.ws)], ["20260101-000000"])
+
+    def test_卡片坏了也退回读整份(self):
+        session.save(self.ws, self.agent(), "20260101-000000")
+        card = session._card_path(session._path(self.ws, "20260101-000000"))
+        with open(card, "w", encoding="utf-8") as f:
+            f.write("{ 这不是 json")
+        self.assertEqual([r["id"] for r in session.listing(self.ws)], ["20260101-000000"])
+
+    def test_存盘比卡片新就不信卡片(self):
+        """别人（或者老版本）直接改了存盘，卡片就过期了 """
+        session.save(self.ws, self.agent("旧标题"), "20260101-000000")
+        path = session._path(self.ws, "20260101-000000")
+        data = json.load(open(path, encoding="utf-8"))
+        data["title"] = "新标题"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.utime(path, (time.time() + 10, time.time() + 10))
+        self.assertEqual(session.listing(self.ws)[0]["title"], "新标题")
+
+    def test_卡片自己不算一份会话(self):
+        session.save(self.ws, self.agent(), "20260101-000000")
+        self.assertEqual(len(session.listing(self.ws)), 1)
+
+    def test_删存盘要把卡片一起带走(self):
+        session.save(self.ws, self.agent(), "20260101-000000")
+        path = session._path(self.ws, "20260101-000000")
+        session.drop(self.ws, "20260101-000000")
+        self.assertFalse(os.path.exists(session._card_path(path)))
+
+    def test_数上限时不能把卡片算进去(self):
+        """算进去的话一份存盘顶两个，实际只留一半 """
+        for n in range(session.MAX_KEPT + 3):
+            session.save(self.ws, self.agent(), "202601%02d-000000" % (n + 1))
+        left = [n for n in os.listdir(session.folder(self.ws))
+                if n.endswith(".json") and not n.endswith(session.CARD_SUFFIX)]
+        self.assertEqual(len(left), session.MAX_KEPT)
+        # 清掉的那几份不留孤儿卡片
+        cards = [n for n in os.listdir(session.folder(self.ws))
+                 if n.endswith(session.CARD_SUFFIX)]
+        self.assertEqual(len(cards), session.MAX_KEPT)

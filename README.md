@@ -387,6 +387,12 @@ feiyu --json-schema review.schema.json "check calc.py for bugs" > out.json
 
 stdout carries only the JSON; the interface and logs go to stderr. Output that does not match is sent back for up to two retries, then the exit code is non-zero. Supports `type` `required` `properties` `items` `enum` `additionalProperties`.
 
+**History slimming watches the cache.** Resent history is cached by prefix — edit a message in
+the middle and everything after it falls back from the cache rate to full price. So folding away
+old tool output only happens when it pays: when the API does not cache at all (folding is then
+pure gain), or when the context is already past halfway (running out of window costs more than
+the tokens do). The hit rate in `/cost` is what that decision reads.
+
 **Logs.** One JSONL line per event in `~/.local/state/feiyu/logs/<date>.jsonl`: every tool call, its arguments, the permission decision, timing, token usage. To find out why it did something odd, filter by the `run` field. `FEIYU_NO_LOG=1` disables it.
 
 **Spend.** `/cost` summarises the last seven days by task:

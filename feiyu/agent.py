@@ -94,6 +94,20 @@ TRIM_KEEP = 1200         # 压完头尾各留这么多
 # 又没有"同一个文件又读了一次"那种过期信号，不按轮数折的话要等到 TRIM_RATIO 才动
 AGE_TOOLS = ("bash", "job")
 AGE_ROUNDS = 6           # 过了这么多批就折
+
+# **折叠会打掉前缀缓存。** 改了第 k 条消息，k 之后的全部从缓存价掉回原价 ——
+# 而 expire / age 改的都是靠前的消息。拿一份 40 轮的历史实测过：
+# age 省 10.9k token，下一轮花费涨 4.4 倍；expire 省 4.5k，涨 7.6 倍。
+# 也就是说，0.29.0 那套"省 token 要先省在历史上"在会缓存的后端上是**赔本买卖**。
+#
+# 但也不能一刀关掉：折叠还负责把上下文压在窗口里，撞了上限的代价（摘要重发、
+# 缓存整个作废）比折叠本身大得多。所以规矩改成两条，满足任一条才折：
+#   1. 这个后端**根本不缓存**（观察到的命中率很低）—— 那折叠是纯赚
+#   2. 上下文已经过了 FOLD_AFTER —— 快撞墙了，这时候省地方比省钱要紧
+FOLD_AFTER = 0.5
+# 命中率低于这个数就当它不缓存 样本太少时不下结论（见 _caching）
+CACHING_HIT = 0.2
+CACHING_SAMPLE = 20_000
 AGE_LIMIT = 600          # 超过这么多字符才登记，短的留着不值当折
 AGE_KEEP = 240           # 折完留开头这么多
 
@@ -1293,12 +1307,35 @@ class Feiyu:
             )
         return changed
 
+    def _caching(self) -> bool:
+        """这个后端到底缓不缓存 —— 缓存的话折叠就是赔本买卖
+
+        用的是已经在手的数（`tokens_in` / `tokens_hit`），不额外探测。
+        **样本太少不下结论**：头一两轮本来就没有可命中的前缀，
+        按"不缓存"处理的话会在会话最开头折得最狠，正好是最不该折的时候。
+        """
+        b = self.backend
+        got = getattr(b, "tokens_in", 0) or 0
+        if got < CACHING_SAMPLE:
+            return True                     # 还看不出来，先当它会缓存（不折）
+        return (getattr(b, "tokens_hit", 0) or 0) / got >= CACHING_HIT
+
+    def _should_fold(self) -> bool:
+        """现在折叠划不划算 见 FOLD_AFTER 那段 """
+        if not self._caching():
+            return True                     # 不缓存，折叠纯赚
+        return self.context > self.context_limit * FOLD_AFTER
+
     def _fold(self, calls, outputs: list[ToolOutput]) -> None:
         """同一个文件又读了一次、或者被改过，历史里旧的那几份就折叠掉
 
         每轮都重发全部历史，一份 1200 行的文件留在里面就是每轮多付一万多 token，
         而被取代的那几份对模型没有价值——它要的是最新那版 折叠不删消息、
         不碰配对，只把内容换成一句说明
+
+        **登记照旧每轮做，动手要等到划算**（`_should_fold`）：登记是免费的，
+        改历史不是。攒着一起折还有个好处 —— 前缀只作废一次，
+        而每轮折一点就是每轮都作废一次。
         """
         if self.backend is None:
             return
@@ -1344,7 +1381,7 @@ class Feiyu:
                 % (label, AGE_ROUNDS))))
         due = self._batches - AGE_ROUNDS
         old = {cid: note for batch, cid, note in self._aging if batch <= due}
-        if old:
+        if old and self._should_fold():
             self._aging = [e for e in self._aging if e[0] > due]
             done = history.age(self.backend.messages, old, keep=AGE_KEEP)
             if done:
@@ -1365,6 +1402,9 @@ class Feiyu:
                 "需要的话重新读一次 " % (shown, why))
 
     def _expire(self, key: str, note: str) -> None:
+        if not self._should_fold():
+            # **登记留着别 pop** —— 等上下文紧张了再一起折，那时这几条照样是过期的
+            return
         ids = self._reads.pop(key, [])
         if ids:
             history.expire(self.backend.messages, set(ids), note)

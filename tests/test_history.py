@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from feiyu import history
+from feiyu import agent as agent_mod, history
 from feiyu.agent import Feiyu
 from feiyu.tools import ToolResult
 from tests.fakes import FakeBackend, call, unpaired
@@ -121,6 +121,11 @@ class TestFoldInAgent(unittest.TestCase):
 
     def run_script(self, script):
         self.agent.backend = FakeBackend(script)
+        # **折叠现在是有闸的**（0.60.0）：会缓存的后端上折叠是赔本买卖，
+        # 所以只在"这后端不缓存"或"上下文过半"时才动手。这些用例测的是折叠
+        # 本身，先把闸打开——装成一个不缓存的后端。
+        self.agent.backend.tokens_in = 10 ** 6
+        self.agent.backend.tokens_hit = 0
         with contextlib.redirect_stdout(io.StringIO()):
             self.agent.send("干活")
         return self.agent.backend.messages
@@ -289,6 +294,9 @@ class TestAgeInAgent(unittest.TestCase):
         script = [("", [call("c%d" % i, "bash", command="ls -la %d" % i)]) for i in range(n)]
         script.append(("完了", []))
         self.agent.backend = FakeBackend(script)
+        # 折叠有闸了（0.60.0），这条测的是折叠本身 —— 装成不缓存的后端把闸打开
+        self.agent.backend.tokens_in = 10 ** 6
+        self.agent.backend.tokens_hit = 0
         with contextlib.redirect_stdout(io.StringIO()):
             self.agent.send("干活")
         return [m["content"] for m in self.agent.backend.messages if m.get("role") == "tool"]
@@ -315,3 +323,58 @@ class TestAgeInAgent(unittest.TestCase):
         self.assertTrue(self.agent._aging)
         self.agent.reset()
         self.assertFalse(self.agent._aging)
+
+
+class TestFoldGate(unittest.TestCase):
+    """折叠什么时候才划算
+
+    前缀缓存的规矩是"改了第 k 条，k 之后全部作废"，而 expire / age 改的都是
+    靠前的消息。实测一份 40 轮的历史：age 省 10.9k token 但下一轮花费涨 4.4 倍，
+    expire 涨 7.6 倍。所以会缓存的后端上**不到紧要关头不折**。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.agent = Feiyu(Path(self.tmp.name))
+        self.agent.name = "fake"
+        self.agent.backend = FakeBackend([])
+
+    def seen(self, got, hit):
+        self.agent.backend.tokens_in = got
+        self.agent.backend.tokens_hit = hit
+
+    def test_样本太少时先当它会缓存(self):
+        """头一两轮本来就没有可命中的前缀，按"不缓存"办的话
+        会在会话最开头折得最狠 —— 正好是最不该折的时候 """
+        self.seen(1000, 0)
+        self.assertTrue(self.agent._caching())
+        self.assertFalse(self.agent._should_fold())
+
+    def test_看出来不缓存就放开折(self):
+        self.seen(agent_mod.CACHING_SAMPLE * 2, 0)
+        self.assertFalse(self.agent._caching())
+        self.assertTrue(self.agent._should_fold())
+
+    def test_命中率高就不折(self):
+        self.seen(agent_mod.CACHING_SAMPLE * 2, agent_mod.CACHING_SAMPLE * 2)
+        self.assertTrue(self.agent._caching())
+        self.assertFalse(self.agent._should_fold())
+
+    def test_上下文过半了照折不误(self):
+        """快撞窗口了，这时候省地方比省钱要紧 """
+        self.seen(agent_mod.CACHING_SAMPLE * 2, agent_mod.CACHING_SAMPLE * 2)
+        self.agent.backend.tokens_context = int(
+            self.agent.context_limit * agent_mod.FOLD_AFTER) + 1
+        self.assertTrue(self.agent._should_fold())
+
+    def test_不折的时候登记要留着(self):
+        """留着才能等紧张了一起折 —— pop 掉的话那几条就再也折不了了 """
+        self.seen(agent_mod.CACHING_SAMPLE * 2, agent_mod.CACHING_SAMPLE * 2)
+        self.agent._reads["/x.py"] = ["c1"]
+        self.agent._expire("/x.py", "过期了")
+        self.assertEqual(self.agent._reads.get("/x.py"), ["c1"])
+        # 紧张起来之后同一条就折得动了
+        self.agent.backend.tokens_context = self.agent.context_limit
+        self.agent._expire("/x.py", "过期了")
+        self.assertNotIn("/x.py", self.agent._reads)

@@ -12,9 +12,21 @@ import sys
 import threading
 import time
 
-from prompt_toolkit.utils import get_cwidth
-
 from . import events, files
+
+# **prompt_toolkit 到用的时候再 import。** 整个包要 53 ms，占冷启动的一半，
+# 而只有交互 TUI 用得上它 —— `feiyu "任务"`、管道、`--serve`（桌面端起的就是它）
+# 全程可能一次都不画输入框。这里只借它一个 `get_cwidth`（算显示宽度，
+# 自己实现要处理组合字符和零宽，不值当 —— 那是这个项目栽过三次的地方）。
+_cwidth = None
+
+
+def get_cwidth(text: str) -> int:
+    global _cwidth
+    if _cwidth is None:
+        from prompt_toolkit.utils import get_cwidth as real
+        _cwidth = real
+    return _cwidth(text)
 
 # 黑灰打底，其余四色刻意压暗，浅底深底都读得清
 _RGB = {

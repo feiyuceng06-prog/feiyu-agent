@@ -377,6 +377,8 @@ feiyu --json-schema review.schema.json "检查 calc.py 有没有 bug" > out.json
 
 stdout 里只有 JSON，界面和日志全走 stderr。不合 schema 会让它重出，最多两次，还不行就非零退出。支持 `type` `required` `properties` `items` `enum` `additionalProperties`。
 
+**历史瘦身会看缓存。** 接口对重发的历史是按前缀缓存的——改了中间某一条，它后面的全部从缓存价掉回原价。所以「把旧的工具输出折叠掉」这件事只在两种时候做：这个接口压根不缓存（那折叠纯赚），或者上下文已经过半（快撞窗口了，省地方比省钱要紧）。`/cost` 里的命中率就是判断依据。
+
 **日志。** 每件事一行 JSONL 写到 `~/.local/state/feiyu/logs/<日期>.jsonl`：每次工具调用、参数、权限判定、耗时、token 用量。排查「它为什么干了那件怪事」按 `run` 字段过滤。`FEIYU_NO_LOG=1` 关掉。
 
 **花费。** `/cost` 按任务汇总最近七天：
