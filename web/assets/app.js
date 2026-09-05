@@ -15,7 +15,6 @@ const sheetEl = $("sheet");
 const inputEl = $("input");
 const paletteEl = $("palette");
 const stateEl = $("state");
-const emptyEl = $("empty");
 
 let socket = null;
 let busy = false;
@@ -50,7 +49,6 @@ function block(label, cls) {
   el.className = "block" + (cls ? " " + cls : "");
   el.innerHTML = `<div class="block__label">${esc(label)}</div><div class="block__body"></div>`;
   streamEl.append(el);
-  emptyEl.hidden = true;
   keepBottom(wasDown);
   return el.querySelector(".block__body");
 }
@@ -327,7 +325,6 @@ function handle(ev) {
     case "cleared":
       // 只清对话。刊头那条启动信息说的是环境，跟聊了什么无关，留着
       streamEl.replaceChildren();
-      emptyEl.hidden = false;
       break;
 
     case "help":

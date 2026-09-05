@@ -211,23 +211,6 @@ body {
   margin: 0 auto;
 }
 
-.empty {
-  max-width: var(--content);
-  margin: var(--space-6) auto 0;
-  border-top: 1px solid var(--line);
-  padding-top: var(--space-4);
-}
-
-.empty__line { margin: 0 0 var(--space-2); color: var(--soft); }
-.empty__hint { margin: 0; color: var(--muted); font-size: var(--text-xs); }
-
-kbd {
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  border: 1px solid var(--line-strong);
-  padding: 0 var(--space-1);
-}
-
 /* 一块内容 = 左边一列大写标签 + 右边正文。整个页面的骨架就是这一条网格。 */
 .block {
   display: grid;

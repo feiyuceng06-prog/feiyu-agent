@@ -250,17 +250,15 @@ check("/key 给的是解释不是「未知命令」",
       keyNote.includes("只在终端") && !keyNote.includes("未知命令"), keyNote);
 
 // 9e. 启动那条 MCP 说明不该占正文流，也不该顶掉空态提示
-await ev(`stream.replaceChildren(); empty.hidden = false;
+await ev(`stream.replaceChildren();
   handle({kind:"boot", what:"mcp", level:"notice", text:"MCP：fin（29 个工具）"}); true`);
 const bootState = JSON.parse(await ev(`JSON.stringify({
   blocks: document.querySelectorAll(".block").length,
   bootShown: !document.getElementById("boot").hidden,
   bootText: document.getElementById("boot").textContent,
-  emptyShown: !empty.hidden,
 })`));
 check("启动说明不进正文流", bootState.blocks === 0, bootState);
 check("启动说明摆在刊头里", bootState.bootShown && bootState.bootText.includes("MCP"), bootState);
-check("空态提示还在", bootState.emptyShown, bootState);
 
 // 10. 普通一句话不该弹菜单
 await reset();
