@@ -1168,6 +1168,25 @@ anthropic 直连的 `cache_creation_input_tokens` 原来并进 miss 按输入价
 - **非交互撞 25 轮上限**只说「再说一句话」，可一次性任务没人能说——`_stop_runaway` 按 `said` 是否为空
   区分，空的就提示 `feiyu --resume "接着做"`。
 
+## 改了配置，活着的那个实例得跟上（0.47.5）
+
+用户拿 OpenRouter 的 key 配模型，base_url 写成了 `https://openrouter.ai/api/v1/responses`
+（SDK 会往后接 `/chat/completions`，那是 Responses API 的路径，404）。发现后重新 `/key add`
+同名改对，**还是 404** —— `_key_add()` 只调 `keys.add()` 写盘，一个字都没碰 `agent.backend`，
+而客户端的 `base_url` 是 `OpenAI(...)` 建实例时定死的。更糟的是 `_model()` 里
+`if arg == agent.name: return 已经在用了` 会早退，同名切不回来，用户只剩重启一条路。
+
+现在 `_key_add(agent)` 保存后判一句：改的是正在用的那条、或者清单原来是空的，
+就 `agent.use_model(name)` 重建（顺带解决「加完第一条还要再 /model 一次」）。
+**加的是别的那条不能重建**——那会把人从正在用的模型上踢走，用例专门盯着。
+
+**这类问题的形状是「配置写盘了，但活着的实例没跟上」**，`/key add` 改价格、
+改 `max_tokens`、改 `limit` 全都撞得上，只是没有 404 那么显眼。以后往
+`~/.config/feiyu/` 里写东西时先问一句：这一轮正在用它的对象，需要重建吗？
+
+顺带 404 的提示原来咬定是「模型 id 退役了」，把人往错方向指了两轮，
+现在两种可能一起说（id 不对 / base_url 多写了一段路径）。
+
 ## 0.45.0：真实仓库实测修掉的一处，加十道中等题
 
 拿两个真实仓库（博客 SSG 的 2634 行 build.mjs、nvim 配置的 cp.lua）跑了五个任务，

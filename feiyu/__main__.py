@@ -374,7 +374,7 @@ def _key(agent: Feiyu, arg: str) -> str:
     rest = rest.strip()
     entries = keys.load()
     if action == "add":
-        return _key_add()
+        return _key_add(agent)
     if action == "rm":
         if not rest:
             return ui.error("用法：/key rm <名字>")
@@ -407,7 +407,7 @@ def _limit_note(name: str, entry: dict) -> str:
     return "   窗口 ~%s（撞墙学到的）" % ui.tokens(learned) if learned else ""
 
 
-def _key_add() -> str:
+def _key_add(agent: Feiyu) -> str:
     """逐项问 key 那一项走隐藏输入，也不会进 feiyu 自己的历史文件 """
     from prompt_toolkit import prompt as ask_line
     from prompt_toolkit.formatted_text import ANSI
@@ -447,6 +447,12 @@ def _key_add() -> str:
         tail += "，标了能看图"
     if cap:
         tail += "，单轮输出上限 %d" % cap
+    # 改的是正在用的那条、或者清单原来是空的：当场重建后端
+    # 只写盘不重建的话，客户端还挂着上一次建它时的 base_url 和 key，
+    # 这一轮改的东西本次会话一律不生效，而 /model 同名又会早退，用户只能重启
+    if name == agent.name or not agent.ready:
+        agent.use_model(name)
+        return ui.notice(f"已保存{tail} 已经在用 {name} 了，改的东西当场生效")
     return ui.notice(f"已保存{tail} 用 /model {name} 切过去")
 
 
@@ -821,8 +827,9 @@ def _piped(agent: Feiyu) -> int:
 _API_HINTS = (
     ("401", "key 不对或者过期了 /key 看看这条配置，或者 /key add 重新加一条"),
     ("403", "这个 key 没有访问权限，确认一下它开通了这个模型"),
-    ("404", "接口说没有这个模型 id 各家退役很勤，去厂商后台看现在叫什么，"
-            "再 /key add 改一条"),
+    ("404", "接口说没有这个东西 两种可能：模型 id 不对（各家退役很勤，"
+            "去厂商后台看现在叫什么），或者 base_url 多写了一段路径"
+            "（多数接口填到 /v1 就行）/key 看看这条配置"),
     ("429", "被限流了 等一会儿再试，或者 /model 换一条配置"),
     ("insufficient", "余额不够了"),
     ("Connection", "连不上接口 检查网络，或者这条配置的 base_url 写错了"),
