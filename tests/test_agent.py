@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 from feiyu import agent as agent_mod
-from feiyu import keys, permissions
+from feiyu import enabled, keys, permissions, tools as tools_mod
 from feiyu.agent import Feiyu
 from feiyu.tools import ToolResult
 from tests.fakes import FakeBackend, call, unpaired
@@ -37,6 +37,10 @@ class Base(unittest.TestCase):
         # 学到的上下文上限写在 state.json 里，不换掉会写进用户真正的那份
         keys.STORE = os.path.join(self.tmp.name, "models.json")
         keys.STATE = os.path.join(self.tmp.name, "state.json")
+        # image_generate 挂不挂看这份配置在不在 不换掉的话，工具清单会随
+        # 这台机器上的用户有没有配出图接口而变
+        tools_mod.IMAGE_CONFIG = os.path.join(self.tmp.name, "images.json")
+        enabled.STORE = os.path.join(self.tmp.name, "enabled.json")
         self.agent = Feiyu(Path(self.tmp.name))
         self.agent.name = "fake"
         self.agent.mode = "auto"
@@ -996,3 +1000,83 @@ class TestUndoNote(Base):
 
     def test_没得退(self):
         self.assertIsNone(self.agent.undo())
+
+
+class TestImageToolGate(Base):
+    """没配出图接口就不挂 image_generate 工具块在请求前缀，每轮都要发 """
+
+    def names(self):
+        return [t["name"] for t in self.agent.tool_schemas()]
+
+    def test_没配就不挂(self):
+        self.assertNotIn("image_generate", self.names())
+
+    def test_配了才挂(self):
+        with open(tools_mod.IMAGE_CONFIG, "w", encoding="utf-8") as f:
+            json.dump({"base_url": "https://relay.example/v1", "key": "sk-x"}, f)
+        self.assertIn("image_generate", self.names())
+
+    def test_只填一半不算(self):
+        with open(tools_mod.IMAGE_CONFIG, "w", encoding="utf-8") as f:
+            json.dump({"base_url": "https://relay.example/v1"}, f)
+        self.assertNotIn("image_generate", self.names())
+
+
+class TestToggles(Base):
+    """面板上的开关：关掉的工具不挂进请求，关掉的技能不进系统提示 """
+
+    def setUp(self):
+        super().setUp()
+        self.use(["好"])
+
+    def names(self):
+        return [t["name"] for t in self.agent.tool_schemas()]
+
+    def test_关掉的工具不挂(self):
+        self.assertIn("web_fetch", self.names())
+        enabled.set_on("tools", "web_fetch", False)
+        self.assertNotIn("web_fetch", self.names())
+        self.assertIn("bash", self.names())
+
+    def test_exit_plan_关不掉(self):
+        enabled.set_on("tools", "exit_plan", False)
+        self.assertIn("exit_plan", self.names())
+
+    def test_按了开关之后活着的实例要跟上(self):
+        """写盘不算数 —— 得当场把工具表重挂给后端，不然按了没反应 """
+        self.agent.apply_toggles()
+        hung = lambda: [t["function"]["name"] for t in self.agent.backend.tools]
+        self.assertIn("web_search", hung())
+        enabled.set_on("tools", "web_search", False)
+        self.agent.apply_toggles()
+        self.assertNotIn("web_search", hung())
+
+    def test_关掉的技能不进系统提示_也读不出来(self):
+        from feiyu.skills import Skill
+        self.agent.toolbox.skills = {
+            "甲": Skill("甲", "甲的用途", "甲的正文", "全局", "/x/甲.md"),
+            "乙": Skill("乙", "乙的用途", "乙的正文", "全局", "/x/乙.md"),
+        }
+        self.agent._refresh_system()
+        self.assertIn("甲的用途", self.agent.backend.system)
+        self.assertIn("乙的用途", self.agent.backend.system)
+
+        enabled.set_on("skills", "甲", False)
+        self.agent._refresh_system()
+        self.assertNotIn("甲的用途", self.agent.backend.system)
+        self.assertIn("乙的用途", self.agent.backend.system)
+
+        # 名字对得上但被关了，报错要说清是"关掉了"而不是"没有这份"——
+        # 只说没有的话它会换个名字接着猜
+        out = self.agent.toolbox.run("skill", {"name": "甲"})
+        self.assertTrue(out.is_error)
+        self.assertIn("关掉", out.content)
+        self.assertNotIn("甲的正文", out.content)
+        self.assertFalse(self.agent.toolbox.run("skill", {"name": "乙"}).is_error)
+
+    def test_一份都没开的时候当作没有技能(self):
+        from feiyu.skills import Skill
+        self.agent.toolbox.skills = {"甲": Skill("甲", "d", "b", "全局", "/x")}
+        enabled.set_on("skills", "甲", False)
+        out = self.agent.toolbox.run("skill", {"name": "甲"})
+        self.assertTrue(out.is_error)

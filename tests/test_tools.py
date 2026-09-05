@@ -8,7 +8,7 @@ import unittest.mock
 import zipfile
 from pathlib import Path
 
-from feiyu import tools
+from feiyu import enabled, tools
 from feiyu.tools import Toolbox
 
 
@@ -16,6 +16,9 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
+        before = enabled.STORE
+        enabled.STORE = str(self.root / "enabled.json")
+        self.addCleanup(setattr, enabled, "STORE", before)
         self.box = Toolbox(self.root)
 
     def tearDown(self):
@@ -1202,3 +1205,113 @@ class TestVenvHint(Base):
         out = self.box.run("bash", {"command": "python3 -c 'import definitely_missing_mod_xyz'"})
         self.assertTrue(out.is_error)
         self.assertIn(".venv/bin/python", out.content)
+
+
+class _Reply:
+    """够 `with _opener.open(...) as r: r.read()` 用就行 """
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, *_):
+        return self.raw
+
+
+class TestImageGenerate(Base):
+    """出图 不打网络：把 _opener.open 换掉 """
+
+    PIXEL = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+
+    def setUp(self):
+        super().setUp()
+        before = tools.IMAGE_CONFIG
+        tools.IMAGE_CONFIG = str(self.root / "images.json")
+        self.addCleanup(setattr, tools, "IMAGE_CONFIG", before)
+
+    def config(self, **extra):
+        import json
+        (self.root / "images.json").write_text(
+            json.dumps({"base_url": "https://relay.example/v1", "key": "sk-x", **extra}),
+            encoding="utf-8")
+
+    def reply(self, payload):
+        import json
+        return unittest.mock.patch.object(
+            tools._opener, "open", return_value=_Reply(json.dumps(payload).encode()))
+
+    def test_没配就说去哪儿配(self):
+        out = self.box.run("image_generate", {"prompt": "一只狗"})
+        self.assertTrue(out.is_error)
+        self.assertIn("images.json", out.content)
+
+    def test_没写描述(self):
+        self.config()
+        out = self.box.run("image_generate", {"prompt": "   "})
+        self.assertTrue(out.is_error)
+
+    def test_b64_存进工作区_结果带路径(self):
+        import base64
+        import json
+        self.config(model="gpt-image-2", size="1024x1024")
+        payload = {"data": [{"b64_json": base64.b64encode(self.PIXEL).decode()}]}
+        with self.reply(payload) as opened:
+            out = self.box.run("image_generate", {"prompt": " 一只  狗 ", "size": "512x512"})
+        self.assertFalse(out.is_error, out.content)
+        shown = json.loads(out.content)["image"]
+        self.assertTrue(shown.startswith(tools.IMAGE_DIR + "/"))
+        self.assertEqual((self.root / shown).read_bytes(), self.PIXEL)
+        # 前端就是靠 shows 把图画出来的，detail 里不要再重复一条路径
+        self.assertEqual(out.shows, shown)
+        self.assertEqual(out.detail, [])
+        # 描述压平了空白，参数里的 size 压过配置里的
+        sent = json.loads(opened.call_args[0][0].data)
+        self.assertEqual(sent["prompt"], "一只 狗")
+        self.assertEqual(sent["size"], "512x512")
+        self.assertEqual(sent["model"], "gpt-image-2")
+        # 写完要登记，不然它下一次想改这张图会被"没读过"拦下
+        self.assertTrue(self.box.files.seen(self.root / shown))
+
+    def test_同一秒出两张不互相覆盖(self):
+        import base64
+        self.config()
+        payload = {"data": [{"b64_json": base64.b64encode(self.PIXEL).decode()}]}
+        with self.reply(payload):
+            a = self.box.run("image_generate", {"prompt": "甲"})
+            b = self.box.run("image_generate", {"prompt": "乙"})
+        self.assertNotEqual(a.shows, b.shows)
+        self.assertTrue((self.root / b.shows).is_file())
+
+    def test_只回地址时再抓一次(self):
+        self.config()
+        import json
+        pages = [_Reply(json.dumps({"data": [{"url": "https://cdn.example/x.png"}]}).encode()),
+                 _Reply(self.PIXEL)]
+        with unittest.mock.patch.object(tools._opener, "open", side_effect=pages):
+            out = self.box.run("image_generate", {"prompt": "一只狗"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertEqual((self.root / out.shows).read_bytes(), self.PIXEL)
+
+    def test_地址指到内网就不抓(self):
+        self.config()
+        import json
+        payload = {"data": [{"url": "http://169.254.169.254/latest/meta-data/"}]}
+        with self.reply(payload):
+            out = self.box.run("image_generate", {"prompt": "一只狗"})
+        self.assertTrue(out.is_error)
+        self.assertIn("169.254.169.254", out.content)
+
+    def test_认不出的返回不当成功(self):
+        self.config()
+        with self.reply({"data": [{"revised_prompt": "..."}]}):
+            out = self.box.run("image_generate", {"prompt": "一只狗"})
+        self.assertTrue(out.is_error)
+        with self.reply({"error": {"message": "no quota"}}):
+            out = self.box.run("image_generate", {"prompt": "一只狗"})
+        self.assertTrue(out.is_error)
+        self.assertIn("no quota", out.content)

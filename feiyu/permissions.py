@@ -40,6 +40,7 @@ RULE_NAME = {
     "git": "Git",
     "symbol": "Symbol",
     "skill": "Skill",
+    "image_generate": "Image",
 }
 # MCP 工具的名字是 mcp_<服务器>_<工具>，规则一律写 Mcp(...)
 # 匹配文本是"服务器 工具"，由 Registry 在载入时填进来（服务器名里可能带下划线，从工具名上切不准）

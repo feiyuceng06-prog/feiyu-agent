@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "自绘标题栏要用到的窗口权限。没有这份文件的话 Tauri v2 把它们全拒了 —— 表现是窗口拖不动、最大化按钮没反应，而且不报错。",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "dialog:allow-open"
+  ]
+}

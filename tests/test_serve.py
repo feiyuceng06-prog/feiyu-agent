@@ -8,10 +8,15 @@
 import contextlib
 import io
 import json
+import os
+import queue
+import tempfile
 import threading
 import unittest
 
-from feiyu import events, serve, ui
+from feiyu import enabled, events, keys, permissions, serve, ui
+from feiyu import skills as skills_mod, tools as tools_mod
+from feiyu.agent import Feiyu
 from pathlib import Path
 
 
@@ -372,3 +377,98 @@ class TestHistoryView(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCatalog(unittest.TestCase):
+    """技能与工具那个面板要的三份清单，和开关的往返
+
+    **正文不在 catalog 里**：五十份技能各上万字，一次全推过去几百 KB，
+    而面板一次只看得见一份。这条跟 `skills.catalog()` 不放正文是同一个道理，
+    只是省的东西不一样 —— 那边省的是每轮的 token，这边省的是一次推送的体积。
+    """
+
+    class Box(serve.Server):
+        def __init__(self, agent, out):
+            self.agent = agent
+            self.inbox = queue.Queue()
+            self.busy = False
+            self.proto = serve.Protocol(out)
+
+        def push_status(self):
+            pass
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for mod, attr in ((permissions, "STORE"), (keys, "STORE"), (keys, "STATE"),
+                          (enabled, "STORE"), (tools_mod, "IMAGE_CONFIG")):
+            before = getattr(mod, attr)
+            setattr(mod, attr, os.path.join(self.tmp.name, attr.lower() + ".json"))
+            self.addCleanup(setattr, mod, attr, before)
+        self.agent = Feiyu(Path(self.tmp.name))
+        self.agent.toolbox.skills = {
+            "甲": skills_mod.Skill("甲", "甲的用途", "甲的正文很长" * 100, "全局", "/x/甲.md"),
+        }
+        self.out = io.StringIO()
+        self.server = self.Box(self.agent, self.out)
+
+    def events(self, kind):
+        rows = [json.loads(l) for l in self.out.getvalue().splitlines() if l.strip()]
+        return [r for r in rows if r.get("kind") == kind]
+
+    def test_三份清单齐全(self):
+        self.server.push_catalog()
+        got = self.events("catalog")[-1]
+        self.assertEqual([s["name"] for s in got["skills"]], ["甲"])
+        self.assertTrue(got["skills"][0]["on"])
+        self.assertIn("bash", [t["name"] for t in got["tools"]])
+        self.assertEqual(got["mcp"], [])
+
+    def test_清单里没有技能正文(self):
+        self.server.push_catalog()
+        got = self.events("catalog")[-1]
+        self.assertNotIn("body", got["skills"][0])
+        self.assertNotIn("甲的正文", self.out.getvalue())
+        self.assertEqual(got["skills"][0]["chars"], len("甲的正文很长" * 100))
+
+    def test_正文点开才给(self):
+        self.server.push_detail("skill", "甲")
+        got = self.events("detail")[-1]
+        # **载荷里不能有 kind**：send() 是 {"kind": 事件名, **载荷}，
+        # 重名的话事件名会被盖掉，前端那条 case 永远不匹配（真踩过）
+        self.assertEqual(got["kind"], "detail")
+        self.assertEqual(got["what"], "skill")
+        self.assertIn("甲的正文", got["body"])
+
+    def test_没有的技能回空正文而不是报错(self):
+        self.server.push_detail("skill", "没这个")
+        self.assertEqual(self.events("detail")[-1]["body"], "")
+
+    def test_开关往返(self):
+        self.server.toggle("tool", "web_fetch", False)
+        got = self.events("catalog")[-1]
+        off = [t["name"] for t in got["tools"] if not t["on"]]
+        self.assertEqual(off, ["web_fetch"])
+        self.server.toggle("tool", "web_fetch", True)
+        self.assertEqual([t["name"] for t in self.events("catalog")[-1]["tools"] if not t["on"]], [])
+
+    def test_锁住的那个开关标出来(self):
+        self.server.push_catalog()
+        row = next(t for t in self.events("catalog")[-1]["tools"] if t["name"] == "exit_plan")
+        self.assertTrue(row["locked"])
+        self.server.toggle("tool", "exit_plan", False)
+        row = next(t for t in self.events("catalog")[-1]["tools"] if t["name"] == "exit_plan")
+        self.assertTrue(row["on"])
+
+    def test_认不出的类别不动任何东西(self):
+        self.server.toggle("插件", "x", False)
+        self.assertEqual(self.events("catalog"), [])
+
+    def test_没配出图接口时清单里没有那一项(self):
+        """摆一个永远打不开的开关只会让人以为坏了 """
+        self.server.push_catalog()
+        self.assertNotIn("image_generate", [t["name"] for t in self.events("catalog")[-1]["tools"]])
+        with open(tools_mod.IMAGE_CONFIG, "w", encoding="utf-8") as f:
+            json.dump({"base_url": "https://x/v1", "key": "k"}, f)
+        self.server.push_catalog()
+        self.assertIn("image_generate", [t["name"] for t in self.events("catalog")[-1]["tools"]])

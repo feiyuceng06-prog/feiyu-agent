@@ -97,7 +97,13 @@ await sleep(2200);
 /* **每轮先把 localStorage 清干净。** Chrome 的 profile 目录是跨次保留的，
    上一轮置顶过的会话会留到下一轮，把列表顺序改掉 —— 断言就挂在别人的数据上。
    （侧栏收放和置顶都存在这儿。） */
-await ev(`localStorage.clear(); true`);
+/* **开头先打断一次。** 附件那条用例会真的发一个 prompt 出去，agent 会真的跑一轮；
+   夹具跑完那轮多半还没结束，下一次跑的时候 `/help` `/key` 这些命令就排在它后面，
+   看起来像「agent 不回话」。收尾也打断一次，别把这个烂摊子留给下一轮。 */
+await ev(`localStorage.clear();
+  if (window.socket && socket.readyState === 1) socket.send(JSON.stringify({op:"interrupt"}));
+  true`);
+await sleep(600);
 await call("Page.navigate", { url });
 await sleep(1500);
 
@@ -120,6 +126,13 @@ const check = (name, ok, detail) => {
   cases.push({ name, ok, detail });
   console.log((ok ? "  OK " : "  !! ") + name + (ok ? "" : "  → " + JSON.stringify(detail)));
 };
+
+/* **等命令清单到位再开始。** 补全靠的是连上时那条 /help 的回话，而 agent 启动要载
+   MCP（29 个工具），几秒才回得来。不等的话第一条断言跑在一个空清单上。 */
+for (let i = 0; i < 60; i++) {
+  if (await ev(`commands.length > 0`)) break;
+  await sleep(500);
+}
 
 // 1. 敲 / 应当弹出补全
 await reset();
@@ -244,7 +257,13 @@ await reset();
 await ev(`stream.replaceChildren(); true`);
 await type("/help");
 await key("Enter");
-await sleep(900);
+// **要等 agent 回话**，不是等 DOM。它启动时要载 MCP（29 个工具），
+// 固定 sleep 撞上冷启动就会挂在一个还没发生的事情上。
+for (let i = 0; i < 40; i++) {
+  await sleep(400);
+  if (await ev(`commands.length > 0 && [...document.querySelectorAll(".block__label")]
+      .some(e => e.textContent === "命令")`)) break;
+}
 const helped = await ev(`(() => {
   const b = [...document.querySelectorAll(".block")].find(
     (x) => x.querySelector(".block__label").textContent === "命令");
@@ -256,7 +275,10 @@ check("/help 画出命令表", helped > 8, { rows: helped });
 await reset();
 await type("/key");
 await key("Enter");
-await sleep(900);
+for (let i = 0; i < 40; i++) {
+  await sleep(400);
+  if (await ev(`[...document.querySelectorAll(".note")].some(e => e.textContent.includes("只在终端"))`)) break;
+}
 const keyNote = await ev(`(() => {
   const n = [...document.querySelectorAll(".note")].map(e => e.textContent).join(" | ");
   return n.slice(-160);
@@ -418,8 +440,31 @@ const shell = JSON.parse(await ev(`JSON.stringify({
   winBtnsHidden: document.getElementById("win-min").hidden,
 })`));
 check("标题栏在", shell.bar, shell);
-check("侧栏四个导航项都在",
-      ["新建会话", "技能与命令", "后台任务", "长期记忆"].every(n => shell.navs.includes(n)), shell.navs);
+
+// 技能与工具面板：Ctrl K 开、esc 关，开着的时候对话那一屏和输入区都收起来
+await ev(`document.dispatchEvent(new KeyboardEvent("keydown",
+  { key: "k", ctrlKey: true, bubbles: true })); true`);
+await sleep(250);
+const panel = JSON.parse(await ev(`JSON.stringify({
+  open: !document.getElementById("shelf").hidden,
+  sheet: document.getElementById("sheet").hidden,
+  composer: document.getElementById("composer").hidden,
+  tabs: [...document.querySelectorAll("#shelf-tabs .tab")].length,
+  pressed: document.getElementById("nav-shelf").getAttribute("aria-pressed"),
+})`));
+check("Ctrl K 打开技能与工具", panel.open && panel.tabs === 3, panel);
+check("面板开着时对话那一屏收起来", panel.sheet && panel.composer, panel);
+check("导航项跟着按下", panel.pressed === "true", panel);
+
+await ev(`document.dispatchEvent(new KeyboardEvent("keydown",
+  { key: "Escape", bubbles: true })); true`);
+await sleep(250);
+const closed = JSON.parse(await ev(`JSON.stringify({
+  open: !document.getElementById("shelf").hidden,
+  sheet: document.getElementById("sheet").hidden,
+})`));
+check("esc 退回对话", !closed.open && !closed.sheet, closed);
+check("侧栏就这两项", shell.navs.join("/") === "新建会话/技能与工具", shell.navs);
 check("有搜索框", shell.find, shell);
 check("有「会话」分组", shell.groups.includes("会话"), shell.groups);
 check("有状态栏", shell.status, shell);
@@ -458,6 +503,10 @@ const pin = JSON.parse(await ev(`JSON.stringify({
   top: [...document.querySelectorAll("#pinned .talk__title")].map(e => e.textContent),
 })`));
 check("shift+点把那条置顶", pin.shown && pin.top.length === 1, pin);
+
+// 收尾打断：附件那条把 agent 支使去跑活儿了，别留给下一轮
+await ev(`if (window.socket && socket.readyState === 1)
+  socket.send(JSON.stringify({op:"interrupt"})); true`);
 
 const errs = await ev(`JSON.stringify(window.__errs || [])`);
 console.log("\n页面 JS 报错:", errs);

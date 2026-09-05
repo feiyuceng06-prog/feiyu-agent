@@ -78,9 +78,73 @@ function inline(text) {
   let out = esc(text);
   out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  /* 图片要在链接**之前**处理：![x](y) 的后半截本身就是一条合法的链接语法，
+     反过来的话会渲染成一个前面挂着感叹号的链接。
+     远程地址不当图画 —— CSP 是 img-src 'self' data: blob:，画出来必然是个破图标；
+     本地那些交给 fillShots() 异步去读（那是唯一能拿到工作区文件的通道）。 */
+  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, src) =>
+    /^(https?|data|blob):/.test(src)
+      ? `<a href="${src}" target="_blank" rel="noreferrer noopener">${alt || src}</a>`
+      : `<figure class="shot" data-src="${src}"><figcaption>${alt || src}</figcaption></figure>`);
   out = out.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
     '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>');
   return out;
+}
+
+/* ── 工作区里的图 ───────────────────────────────────────────
+   两条传输各有各的通道：桌面端走 invoke（回的是 ArrayBuffer，包成 blob URL），
+   夹具那条走 devserver 的 /file。两边都在服务端比过工作区前缀 ——
+   路径是 agent 给的，而 agent 会读网页、会跑用户给的命令，不是可信来源。 */
+
+const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+               gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+
+async function imgSrc(path) {
+  if (!TAURI) return "/file?t=" + encodeURIComponent(TOKEN) + "&p=" + encodeURIComponent(path);
+  const buf = await TAURI.core.invoke("read_image", { path });
+  const kind = MIME[String(path).split(".").pop().toLowerCase()] || "image/png";
+  return URL.createObjectURL(new Blob([buf], { type: kind }));
+}
+
+/* 这一轮里已经画过的图。正文里再 ![](同一个路径) 就不画第二遍 ——
+   模型生成完常会顺手把路径重述一遍，那会让同一张图上下挨着出现两次。 */
+let shownShots = new Set();
+
+/* 工具那一块里把图画出来（image_generate 出的、read_file 看过的）。
+   登记进 shownShots，正文里再提到同一个路径就不画第二遍。 */
+function showShot(target, path) {
+  shownShots.add(path);
+  const wasDown = atBottom();
+  const fig = document.createElement("figure");
+  fig.className = "shot";
+  fig.innerHTML = `<figcaption>${esc(path)}</figcaption>`;
+  target.append(fig);
+  imgSrc(path).then((url) => {
+    const img = new Image();
+    img.src = url;
+    img.alt = path;
+    img.onload = () => keepBottom(wasDown);
+    fig.prepend(img);
+  }).catch((err) => {
+    fig.dataset.failed = "1";
+    fig.querySelector("figcaption").textContent = path + " —— 画不出来：" + err;
+  });
+}
+
+/* 把 <figure class="shot" data-src> 填成真图。md() 是同步的纯函数，
+   而读文件是异步的，所以渲染完再回来补一道。 */
+function fillShots(root) {
+  root.querySelectorAll("figure.shot[data-src]").forEach((fig) => {
+    const src = fig.dataset.src;
+    delete fig.dataset.src;
+    if (shownShots.has(src)) { fig.remove(); return; }
+    imgSrc(src).then((url) => {
+      const img = new Image();
+      img.src = url;
+      img.alt = src;
+      fig.prepend(img);
+    }).catch(() => { fig.dataset.failed = "1"; });
+  });
 }
 
 function md(src) {
@@ -184,7 +248,9 @@ function shortPath(raw) {
 function setStatus(s) {
   if (!s) return;
   busy = !!s.busy;
-  if (s.workspace) {
+  // **工作台不由 status 说了算。** 换台时旧进程可能还会再推一条 status 过来，
+  // 让它写的话状态栏会闪回旧目录。桌面端以 setDesk 为准，浏览器里才用它。
+  if (s.workspace && !TAURI) {
     $("s-cwd").textContent = shortPath(s.workspace);
     $("s-cwd").title = s.workspace;
   }
@@ -208,7 +274,10 @@ function setStatus(s) {
    **两个地方都要调** —— turn_end 是一种收尾，中途起了个工具调用也是一种，
    只管前者的话被打断的那块会一直留着一个闪的光标。 */
 function closeSaying() {
-  if (saying) saying.innerHTML = `<div class="prose">${md(sayingText)}</div>`;
+  if (saying) {
+    saying.innerHTML = `<div class="prose">${md(sayingText)}</div>`;
+    fillShots(saying);
+  }
   saying = null;
   sayingText = "";
 }
@@ -248,6 +317,7 @@ function handle(ev) {
       break;
 
     case "turn_start":
+      shownShots = new Set();
       closeSaying();
       block("你", "block--you").textContent = ev.text;
       break;
@@ -287,9 +357,22 @@ function handle(ev) {
         });
         target.append(list);
       }
+      if (ev.shows && !ev.is_error) showShot(target, ev.shows);
       liveTool = null;
       break;
     }
+
+    case "catalog":
+      shelf.data = { skills: ev.skills || [], tools: ev.tools || [], mcp: ev.mcp || [] };
+      shelf.got = true;
+      $("shelf-where").textContent = "开关记在 ~/.config/feiyu/enabled.json";
+      if (shelfOpen()) drawShelf();
+      break;
+
+    case "detail":
+      shelf.bodies[ev.name] = ev.body || "（这份技能没有正文）";
+      if (shelfOpen()) drawShelf();
+      break;
 
     case "boot": {
       // 环境说明，不是对话：摆进状态栏，**不碰正文流**
@@ -354,6 +437,7 @@ function handle(ev) {
       break;
 
     case "opened":
+      showShelf(false);
       (ev.history || []).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
         else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
@@ -486,6 +570,337 @@ function askCard(ev) {
   sheetEl.scrollTop = sheetEl.scrollHeight;
 }
 
+/* ── 终端面板 ──────────────────────────────────────────────────
+   一个真 pty 里的 shell，xterm 负责画。**它跟 agent 是两回事**：
+   agent 跑命令走它自己那条 bash 工具（有权限门、有沙箱、结果进对话），
+   这个面板是给你自己用的手。两边在同一个工作目录里，互不干涉。 */
+
+let term = null;
+let fit = null;
+let termOn = false;
+
+/* 配色跟全站一致：白纸墨字。xterm 默认是深色的，不给就是黑底。
+   取的是 app.css 里那几个变量的实际值，改主题不用改两处。 */
+function termTheme() {
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--text").trim() || "#000";
+  return {
+    background: css.getPropertyValue("--bg").trim() || "#fff",
+    foreground: ink,
+    cursor: css.getPropertyValue("--accent").trim() || "#000",
+    selectionBackground: css.getPropertyValue("--selection").trim(),
+    black: ink, red: css.getPropertyValue("--alert").trim(),
+    blue: css.getPropertyValue("--accent").trim(),
+    brightBlack: css.getPropertyValue("--faint").trim(),
+  };
+}
+
+function openTerm() {
+  if (term) return;
+  const css = getComputedStyle(document.documentElement);
+  term = new Terminal({
+    fontFamily: css.getPropertyValue("--font-mono").trim() || "monospace",
+    fontSize: 12,
+    lineHeight: 1.35,
+    cursorBlink: true,
+    theme: termTheme(),
+    // 面板不高，回滚多留一些
+    scrollback: 5000,
+  });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($("term-body"));
+  fit.fit();
+  term.onData((data) => TAURI.core.invoke("term_write", { data }).catch(() => {}));
+  term.onResize(({ cols, rows }) =>
+    TAURI.core.invoke("term_resize", { cols, rows }).catch(() => {}));
+  TAURI.event.listen("feiyu://term", (e) => term.write(e.payload));
+  // **起 shell 要带上当前工作台**，不然它落在这个进程的 cwd 上，跟 agent 不在一处
+  TAURI.core.invoke("term_start", {
+    cwd: deskNow, cols: term.cols, rows: term.rows,
+  }).catch((err) => term.write("\r\n起不来：" + err + "\r\n"));
+  // 面板尺寸跟着窗口走
+  new ResizeObserver(() => { try { fit.fit(); } catch { /* 面板收着的时候量不了 */ } })
+    .observe($("term-body"));
+}
+
+function showTerm(on) {
+  if (!TAURI) return;                 // 浏览器里没有 pty，这个面板没有意义
+  termOn = on;
+  $("term").hidden = !on;
+  if (!on) return;
+  openTerm();
+  // 收起再展开时尺寸会变，重量一次；聚焦到终端，不然还得点一下
+  requestAnimationFrame(() => { try { fit.fit(); } catch {} term.focus(); });
+}
+
+if (TAURI) {
+  $("act-term").onclick = () => showTerm($("term").hidden);
+  $("term-close").onclick = () => showTerm(false);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "`" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); showTerm($("term").hidden); }
+  });
+} else {
+  $("act-term").hidden = true;
+}
+
+/* ── 技能与工具 ─────────────────────────────────────────────
+   三份清单（技能 / 内置工具 / MCP 服务器），每项一个开关。关掉的东西
+   既不进系统提示也不挂进请求 —— 判定在 Python 那边（feiyu/enabled.py），
+   这里只负责画和把开关的动作发过去。
+
+   **正文是点开才要的**：五十份技能各上万字，一次全推过来几百 KB，
+   而这一屏一次只看得见一份。所以 catalog 里没有 body，选中时另发一条 detail。 */
+
+const shelf = { tab: "skills", find: "", pick: {}, data: { skills: [], tools: [], mcp: [] },
+                bodies: {}, got: false };
+
+function shelfOpen() { return !$("shelf").hidden; }
+
+function showShelf(on) {
+  $("shelf").hidden = !on;
+  // 它跟对话共占一格：不把这几样收起来的话两屏会叠在一起
+  $("sheet").hidden = on;
+  $("composer").hidden = on;
+  $("nav-shelf").setAttribute("aria-pressed", String(on));
+  if (on) {
+    if (termOn) showTerm(false);
+    send({ op: "catalog" });
+    requestAnimationFrame(() => $("shelf-find").focus());
+  }
+}
+
+function shelfRows() {
+  const want = shelf.find.trim().toLowerCase();
+  const rows = shelf.data[shelf.tab] || [];
+  if (!want) return rows;
+  return rows.filter((r) =>
+    (r.name + " " + (r.description || "") + " " + (r.source || "")).toLowerCase().includes(want));
+}
+
+function drawShelf() {
+  $("n-skills").textContent = shelf.data.skills.length || "";
+  $("n-tools").textContent = shelf.data.tools.length || "";
+  $("n-mcp").textContent = shelf.data.mcp.length || "";
+  const list = $("shelf-list");
+  list.textContent = "";
+  const rows = shelfRows();
+  if (!rows.length) {
+    const li = document.createElement("li");
+    li.className = "shelf__empty";
+    // **还没收到清单 ≠ 这台机器上没有** —— 两种情况长得一模一样，得分开说
+    li.textContent = !shelf.got ? "读取中…"
+      : shelf.find ? "没有对得上的" : emptyWord(shelf.tab);
+    list.append(li);
+    $("shelf-pane").textContent = "";
+    return;
+  }
+  const picked = shelf.pick[shelf.tab];
+  if (!rows.some((r) => r.name === picked)) shelf.pick[shelf.tab] = rows[0].name;
+  rows.forEach((row) => {
+    const li = document.createElement("li");
+    li.className = "shelf__row";
+    li.dataset.on = row.on ? "1" : "0";
+    li.setAttribute("aria-current", String(row.name === shelf.pick[shelf.tab]));
+    const left = document.createElement("div");
+    left.innerHTML = `<div class="shelf__name"></div><div class="shelf__meta"></div>`;
+    left.querySelector(".shelf__name").textContent = row.name;
+    left.querySelector(".shelf__meta").textContent = rowMeta(row);
+    const sw = document.createElement("button");
+    sw.className = "sw";
+    sw.type = "button";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(!!row.on));
+    sw.setAttribute("aria-label", (row.on ? "关掉 " : "打开 ") + row.name);
+    if (row.locked) sw.disabled = true;
+    // **开关必须 stopPropagation**：不然按一下开关的同时把这一项也选中了 ——
+    // 跟删对话那个叉是同一类错
+    sw.onclick = (e) => {
+      e.stopPropagation();
+      if (row.locked) return;
+      send({ op: "toggle", kind: KIND_OF[shelf.tab], name: row.name, on: !row.on });
+    };
+    li.append(left, sw);
+    li.onclick = () => { shelf.pick[shelf.tab] = row.name; drawShelf(); };
+    list.append(li);
+  });
+  drawShelfPane(rows.find((r) => r.name === shelf.pick[shelf.tab]));
+}
+
+const KIND_OF = { skills: "skill", tools: "tool", mcp: "mcp" };
+
+function emptyWord(tab) {
+  if (tab === "skills") return "还没有技能。一份技能就是一个 .md，放 ~/.config/feiyu/skills/ 下。";
+  if (tab === "mcp") return "还没接 MCP 服务器。写 ~/.config/feiyu/mcp.json，改完要重启。";
+  return "一个工具都没有";
+}
+
+function rowMeta(row) {
+  if (shelf.tab === "skills") return row.source || "";
+  if (shelf.tab === "mcp") return row.error ? "起不来" : (row.tools.length + " 个工具");
+  // 锁住的那个在清单上就得说明白，不然人会去点那个灰开关然后以为是坏的
+  return row.locked ? (row.label || "") + " · 常开" : (row.label || "");
+}
+
+function drawShelfPane(row) {
+  const pane = $("shelf-pane");
+  pane.textContent = "";
+  if (!row) return;
+  const head = document.createElement("h2");
+  head.textContent = row.name;
+  pane.append(head);
+  const words = row.error || row.description || "";
+  if (words) {
+    const lead = document.createElement("p");
+    lead.className = "lead";
+    lead.textContent = words;
+    pane.append(lead);
+  }
+
+  const facts = document.createElement("dl");
+  facts.className = "facts";
+  const put = (k, v) => {
+    if (!v) return;
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    facts.append(dt, dd);
+  };
+  put("状态", row.locked ? "常开（关不掉）" : row.on ? "开着" : "已关");
+  if (shelf.tab === "skills") {
+    put("来自", row.source);
+    put("文件", row.path);
+    put("正文", row.chars + " 字");
+  } else if (shelf.tab === "tools") {
+    put("规则名", row.label);
+    put("参数", (row.args || []).join("、"));
+  } else {
+    put("工具", String(row.tools.length));
+  }
+  pane.append(facts);
+
+  if (shelf.tab === "mcp") {
+    if (!row.error) {
+      const why = document.createElement("p");
+      why.className = "lead";
+      // 关掉不等于不起进程：配置在 mcp.json 里，改了要重启。这儿关的是"要不要
+      // 把它的工具挂给模型" —— 不说清楚的话，关了之后进程还在会让人以为没生效
+      why.textContent = row.on
+        ? "它的工具会挂给模型。关掉只是不挂，进程照旧起着（要不要起写在 mcp.json 里，改了得重启）。"
+        : "已关：它的工具不会挂给模型，模型也看不到这台服务器。";
+      pane.append(why);
+    }
+    const box = document.createElement("div");
+    box.className = "shelf__body-text";
+    box.textContent = row.tools.map((t) => t.name + (t.description ? " — " + t.description : ""))
+      .join("\n") || "（这台服务器没报出工具）";
+    pane.append(box);
+    return;
+  }
+  if (shelf.tab !== "skills") return;
+
+  const box = document.createElement("div");
+  box.className = "shelf__body-text";
+  const had = shelf.bodies[row.name];
+  box.textContent = had === undefined ? "读正文…" : had;
+  pane.append(box);
+  if (had === undefined) send({ op: "detail", kind: "skill", name: row.name });
+}
+
+$("nav-shelf").onclick = () => showShelf(!shelfOpen());
+$("shelf-find").oninput = (e) => { shelf.find = e.target.value; drawShelf(); };
+$("shelf-tabs").onclick = (e) => {
+  const tab = e.target.closest(".tab");
+  if (!tab) return;
+  shelf.tab = tab.dataset.tab;
+  [...$("shelf-tabs").children].forEach((b) =>
+    b.setAttribute("aria-selected", String(b === tab)));
+  drawShelf();
+};
+
+/* ── 工作台 ────────────────────────────────────────────────── */
+
+/* 去过哪些工作台记在浏览器里 —— 跟侧栏收放、置顶一样是本机偏好，不进协议。 */
+const DESK_KEY = "feiyu.desks";
+const DESK_MAX = 8;
+
+function desks() {
+  try { return JSON.parse(localStorage.getItem(DESK_KEY) || "[]"); } catch { return []; }
+}
+
+function rememberDesk(path) {
+  if (!path) return;
+  const list = [path, ...desks().filter((p) => p !== path)].slice(0, DESK_MAX);
+  try { localStorage.setItem(DESK_KEY, JSON.stringify(list)); } catch { /* 无痕窗口 */ }
+}
+
+let deskNow = "";
+
+function setDesk(path) {
+  deskNow = path || "";
+  $("desk-path").textContent = shortPath(path);
+  $("desk-path").title = path || "";
+  $("s-cwd").textContent = shortPath(path);
+  $("s-cwd").title = path || "";
+  rememberDesk(path);
+}
+
+function drawDesks() {
+  const list = $("desks");
+  const rows = desks().filter((p) => p !== deskNow);
+  list.replaceChildren(...rows.map((p) => {
+    const li = document.createElement("li");
+    li.textContent = shortPath(p);
+    li.title = p;
+    li.onclick = () => goDesk(p);
+    return li;
+  }));
+  const pick = document.createElement("li");
+  pick.dataset.pick = "1";
+  pick.textContent = "选个目录…";
+  pick.onclick = pickDesk;
+  list.append(pick);
+}
+
+async function goDesk(path) {
+  $("desks").hidden = true;
+  if (!TAURI || path === deskNow) return;
+  setDot("off", "正在换工作台…");
+  try {
+    const now = await TAURI.core.invoke("switch", { dir: path });
+    // 换过去就是另一段对话了：正文、侧栏、附件全部归零
+    streamEl.replaceChildren();
+    clips = [];
+    drawClips();
+    boots.clear();
+    $("s-boot").hidden = true;
+    $("s-boot-sep").hidden = true;
+    setDesk(now);
+    // 面板里那个 shell 也跟着换过去（Rust 那边已经把旧的收掉了）
+    if (term) {
+      term.reset();
+      TAURI.core.invoke("term_start", { cwd: now, cols: term.cols, rows: term.rows })
+        .catch(() => {});
+    }
+    hello();
+  } catch (err) {
+    setDot("ready", "换不过去：" + String(err).slice(0, 60));
+  }
+}
+
+async function pickDesk() {
+  if (!TAURI) return;
+  const dir = await TAURI.dialog.open({ directory: true, multiple: false, title: "选一个工作台" });
+  if (dir) goDesk(dir);
+}
+
+$("desk").onclick = () => {
+  const list = $("desks");
+  if (list.hidden) drawDesks();
+  list.hidden = !list.hidden;
+};
+
 /* ── 侧栏 ──────────────────────────────────────────────────── */
 
 /* 置顶哪几条记在浏览器里 —— 这是「这台机器上这个人的偏好」，不是会话状态，
@@ -605,19 +1020,8 @@ try { sideOn = localStorage.getItem(SIDE_KEY) || "on"; } catch { sideOn = "on"; 
 setSide(sideOn !== "off");
 
 $("side-toggle").onclick = () => setSide(document.body.dataset.side === "off");
-$("new-talk").onclick = () => send({ op: "new" });
+$("new-talk").onclick = () => { showShelf(false); send({ op: "new" }); };
 $("find").addEventListener("input", renderTalks);
-
-/* 侧栏那几个导航项和标题栏那几个钮**都走斜杠命令** —— 一个动作一个来源，
-   不给它们另开一套（这是 Hermes DESIGN.md 的 "One action, one home"）。 */
-const shortcuts = {
-  "nav-skills": "/skills", "nav-jobs": "/jobs", "nav-memory": "/memory",
-  "act-skills": "/help", "act-cost": "/cost", "act-mode": "/mode",
-};
-for (const [id, cmd] of Object.entries(shortcuts)) {
-  const el = $(id);
-  if (el) el.onclick = () => { if (cmd === "/help") wantHelp = true; send({ op: "command", text: cmd }); };
-}
 
 /* 窗口按钮。只有桌面端有窗口可操作，浏览器里把它们藏起来。 */
 if (TAURI) {
@@ -625,8 +1029,21 @@ if (TAURI) {
   $("win-min").onclick = () => win.minimize();
   $("win-max").onclick = () => win.toggleMaximize();
   $("win-close").onclick = () => win.close();
+  // 双击标题栏最大化 / 还原，跟系统窗口一个习惯
+  document.querySelector(".bar").addEventListener("dblclick", (e) => {
+    if (!e.target.closest("button, label, input")) win.toggleMaximize();
+  });
+  // 八个缩放热区。decorations:false 之后系统不给边框，只能自己拉。
+  document.querySelectorAll(".grips i").forEach((grip) => {
+    grip.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      win.startResizeDragging(grip.dataset.dir);
+    });
+  });
 } else {
+  // 浏览器里没有窗口可操作，这些都藏掉
   ["win-min", "win-max", "win-close"].forEach((id) => { $(id).hidden = true; });
+  document.querySelector(".grips").hidden = true;
 }
 
 /* ── 上传 ──────────────────────────────────────────────────── */
@@ -703,6 +1120,9 @@ function hello() {
   send({ op: "command", text: "/help" });
   send({ op: "status" });
   send({ op: "sessions" });
+  // 面板开着的时候连上（或断线重连），得把清单重新要一遍 ——
+  // 不要的话它会一直空着，而空清单跟"这台机器上没有技能"长得一模一样
+  if (shelfOpen()) send({ op: "catalog" });
 }
 
 function inbound(raw) {
@@ -734,7 +1154,7 @@ function connect() {
   if (TAURI) {
     // 桌面：进程内通道，没有端口、没有令牌、没有 Origin 那一套
     TAURI.event.listen("feiyu://event", (e) => inbound(e.payload));
-    TAURI.core.invoke("where_am_i").then((w) => { $("s-cwd").textContent = shortPath(w); });
+    TAURI.core.invoke("where_am_i").then(setDesk);
     hello();
     return;
   }
@@ -860,9 +1280,16 @@ inputEl.addEventListener("keydown", (e) => {
 
 // esc 中断，跟终端一个键。菜单开着时上面那段会把事件截住。
 document.addEventListener("keydown", (e) => {
+  // 面板开着时 esc 是"退回对话"，不是"打断这一轮" —— 那儿根本没有正在跑的一轮
+  if (e.key === "Escape" && shelfOpen()) { e.preventDefault(); showShelf(false); return; }
   if (e.key === "Escape" && busy) send({ op: "interrupt" });
+  if (e.key === "k" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); showShelf(!shelfOpen()); }
   // 侧栏上写着 Ctrl N，那就得真的能用 —— 写了快捷键不实现比不写更糟
-  if (e.key === "n" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send({ op: "new" }); }
+  if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    showShelf(false);
+    send({ op: "new" });
+  }
   if (e.key === "b" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     setSide(document.body.dataset.side === "off");

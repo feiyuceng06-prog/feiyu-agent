@@ -8,6 +8,8 @@
 //! 开发时起，但起的时候一样能让 agent 在这台机器上跑命令。静态资源不设门：
 //! 前端要用相对路径才能在 Tauri 里跑，给一份 HTML 加门只是防指纹，不值这个代价。
 
+mod pathguard;
+
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -377,6 +379,52 @@ fn free_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     dir.join(format!("{stem}-{}{ext}", std::process::id()))
 }
 
+/// 一张图最多端多大。
+const MAX_IMAGE: usize = 32 * 1024 * 1024;
+
+fn mime_of(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `GET /file?t=<令牌>&p=<工作区相对路径>` —— 把工作区里的一张图端出来。
+///
+/// 桌面端那条路走的是 `invoke("read_image")`，这条只给夹具用。
+/// **路径必须落在工作区内**，`canonicalize` 之后比前缀 —— 这个查询串是外面给的。
+/// 不校验 Origin：`<img src>` 的请求浏览器本来就不带 Origin，令牌那道门够了。
+async fn file(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> Response {
+    if !app.token_ok(query.as_deref()) {
+        return no_token();
+    }
+    let want = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("p="))
+        .map(percent_decode)
+        .unwrap_or_default();
+    let target = match pathguard::under_root(&app.workspace, &want) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, "no such file\n").into_response(),
+    };
+    match std::fs::read(&target) {
+        Ok(raw) if raw.len() <= MAX_IMAGE => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mime_of(&target)), (header::CACHE_CONTROL, "no-store")],
+            raw,
+        )
+            .into_response(),
+        Ok(_) => (StatusCode::PAYLOAD_TOO_LARGE, "too big\n").into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "no such file\n").into_response(),
+    }
+}
+
 async fn upload(
     State(app): State<Arc<App>>,
     RawQuery(query): RawQuery,
@@ -511,6 +559,7 @@ async fn main() {
         .route("/app.js", get(|| async { asset(APP_JS, "text/javascript; charset=utf-8") }))
         .route("/logo.svg", get(|| async { asset(LOGO_SVG, "image/svg+xml") }))
         .route("/ws", get(ws_handler))
+        .route("/file", get(file))
         .route("/upload", post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD)))
         .with_state(app.clone());
 

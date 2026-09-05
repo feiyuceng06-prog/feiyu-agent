@@ -14,7 +14,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const url = process.argv[2] || "http://127.0.0.1:7791/";
@@ -153,6 +153,36 @@ const TALK = [
   { kind: "turn_end" },
 ];
 
+/* 出图那一屏。图是真读磁盘的（devserver 的 /file），所以夹具要在仓库根上跑 ——
+   feiyu/logo.png 是这棵树里现成的一张图。
+   最后那段正文里**故意**又 ![]() 了同一个路径：模型生成完常会把路径重述一遍，
+   前端该认出来不画第二遍。这一条只能在这儿验，单元测试碰不到 DOM。 */
+/* 出图那一屏要一张真图，而**工作区是什么目录夹具事先不知道**。
+   走 /upload 把 logo 传进去，拿回来的相对路径正好就是 agent 出图时给的那种。
+   顺带也验了一次上传那条路。 */
+async function putImage() {
+  const raw = readFileSync(new URL("../../feiyu/logo.png", import.meta.url));
+  const reply = await fetch(new URL("/upload" + new URL(url).search, url), {
+    method: "POST",
+    headers: { "x-feiyu-filename": encodeURIComponent("shot.png"),
+               "content-type": "application/octet-stream", "origin": new URL(url).origin },
+    body: raw,
+  });
+  if (!reply.ok) throw new Error("上传失败 HTTP " + reply.status);
+  return (await reply.json()).path;
+}
+
+const SHOT = [
+  { kind: "turn_start", text: "画一只狗当这个项目的记号" },
+  { kind: "tool_start", name: "image_generate", label: "Image",
+    args: { prompt: "一只侧脸的狗，纯黑剪影，白底，极简" }, target: "一只侧脸的狗，纯黑剪影，白底，极简" },
+  { kind: "tool_result", summary: "出了一张图（12 KB）", is_error: false,
+    detail: [], shows: "@@SHOT@@" },
+  { kind: "text", delta: "画好了，剪影版本，白底黑狗：\n\n" },
+  { kind: "text", delta: "![一只狗](@@SHOT@@)\n\n要换个角度或者加点线条的话直接说。" },
+  { kind: "turn_end" },
+];
+
 const ASK = [
   { kind: "preview", rows: [
     { kind: "-", text: "  47  -  rx = re.compile(args[\"regex\"])" },
@@ -204,6 +234,115 @@ await cdp.call("Page.navigate", { url });
 await sleep(1200);
 await feed(TALK);
 console.log("拍了", await cdp.shot("4_talk", { width: 1280, height: 900 }));
+
+// 出图那一屏
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 1100, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+const shotPath = await putImage();
+await feed(JSON.parse(JSON.stringify(SHOT).replaceAll("@@SHOT@@", shotPath)));
+await sleep(900);                     // 图是异步读回来的，等它落地
+console.log("拍了", await cdp.shot("5_image", { width: 1280, height: 1100 }));
+
+/* 图必须真的画出来了，而且只画了一次。
+   零尺寸的图在截图里跟「没有这块」长得一模一样，只能靠量。 */
+const shots = await cdp.eval(`JSON.stringify([...document.querySelectorAll("figure.shot")].map((f) => {
+  const img = f.querySelector("img");
+  const r = img ? img.getBoundingClientRect() : { width: 0, height: 0 };
+  return { w: Math.round(r.width), h: Math.round(r.height), failed: !!f.dataset.failed,
+           cap: f.querySelector("figcaption").textContent };
+}))`);
+const rows = JSON.parse(shots);
+/* 高度那道门要卡得高一点：**读不到的图也有个盒子** —— 浏览器给破图标留 26px 左右，
+   卡在 24 上的话「图根本没读回来」会一路绿灯过去（夹具真这么骗过我一轮）。 */
+if (rows.length !== 1 || rows[0].failed || rows[0].w < 64 || rows[0].h < 64) {
+  console.error("出图那一屏不对（该只有一张、且看得见）：", shots);
+  process.exitCode = 1;
+} else {
+  console.log(`出图 ${rows[0].w}×${rows[0].h}，正文里重述的那次没画第二遍`);
+}
+
+/* 技能与工具那一屏。**不灌合成事件** —— 面板一打开就向服务端要 catalog，
+   合成的会被真推送盖掉（CLAUDE.md 里记过这个坑）。所以这里靠夹具跑在一份
+   备好技能的 XDG_CONFIG_HOME 上，拍的就是真数据。 */
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+/* **先等真的连上。** 起 MCP 服务器要好几秒，hello 排在那之后；
+   连上之前 send() 是空跑的，面板会一直空着 —— 第一版就是这么骗了我一轮。 */
+/* 看状态灯，**不要看 `online`** —— 那是个顶层 `let`，在 classic script 里
+   落在 script scope 上，CDP 的 eval 按裸名字取不到（会抛 ReferenceError）。 */
+for (let n = 0; n < 60; n++) {
+  const lit = await cdp.eval(`document.getElementById("dot").dataset.state`);
+  if (lit === "ready") break;
+  await sleep(250);
+}
+await cdp.eval(`showShelf(true); true`);
+await sleep(900);
+console.log("拍了", await cdp.shot("6_shelf", { width: 1280, height: 900 }));
+
+const shelfRows = await cdp.eval(`JSON.stringify({
+  tabs: [...document.querySelectorAll("#shelf-tabs .tab")].map((t) => t.textContent),
+  rows: [...document.querySelectorAll("#shelf-list .shelf__row")].map((r) => ({
+    name: r.querySelector(".shelf__name").textContent,
+    on: r.querySelector(".sw").getAttribute("aria-checked"),
+  })),
+  pane: (document.querySelector("#shelf-pane h2") || {}).textContent || "",
+  body: (document.querySelector(".shelf__body-text") || {}).textContent || "",
+  sheetHidden: sheet.hidden, composerHidden: document.getElementById("composer").hidden,
+})`);
+const shelf = JSON.parse(shelfRows);
+const bad = [];
+if (!shelf.rows.length) bad.push("技能一份都没列出来");
+if (!shelf.rows.some((r) => r.on === "false")) bad.push("关掉的那份没显示成关着");
+if (!shelf.pane) bad.push("详情栏是空的");
+if (!shelf.body || shelf.body === "读正文…") bad.push("技能正文没取回来");
+if (!shelf.sheetHidden || !shelf.composerHidden) bad.push("面板开着时对话那一屏没收起来");
+if (bad.length) {
+  console.error("技能面板：", bad.join("；"), shelfRows);
+  process.exitCode = 1;
+} else {
+  console.log(`技能面板 ${shelf.rows.length} 份，详情是「${shelf.pane}」，正文取回来了`);
+}
+
+// 工具集那一页：开关必须是看得见的方块，不是零尺寸
+await cdp.eval(`document.querySelector('[data-tab="tools"]').click(); true`);
+await sleep(400);
+console.log("拍了", await cdp.shot("7_shelf_tools", { width: 1280, height: 900 }));
+const sw = await cdp.eval(`JSON.stringify((() => {
+  const s = document.querySelector("#shelf-list .sw");
+  if (!s) return { w: 0, h: 0 };
+  const r = s.getBoundingClientRect();
+  const off = [...document.querySelectorAll("#shelf-list .shelf__row")]
+    .filter((x) => x.dataset.on === "0").map((x) => x.querySelector(".shelf__name").textContent);
+  const locked = [...document.querySelectorAll("#shelf-list .sw[disabled]")].length;
+  return { w: Math.round(r.width), h: Math.round(r.height), off, locked };
+})())`);
+const swBox = JSON.parse(sw);
+if (swBox.w < 20 || swBox.h < 12 || !swBox.locked || !swBox.off.length) {
+  console.error("工具集那一页不对（开关要看得见、要有关掉的和锁住的）：", sw);
+  process.exitCode = 1;
+} else {
+  console.log(`开关 ${swBox.w}×${swBox.h}，关掉的 ${swBox.off}，锁住的 ${swBox.locked} 个`);
+}
+
+// MCP 那一页
+await cdp.eval(`document.querySelector('[data-tab="mcp"]').click(); true`);
+await sleep(400);
+console.log("拍了", await cdp.shot("8_shelf_mcp", { width: 1280, height: 900 }));
+
+// esc 退回对话 —— 面板开着时它不该是"打断这一轮"
+await cdp.eval(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true`);
+await sleep(300);
+const backed = await cdp.eval(`JSON.stringify({ shelf: shelf0(), sheet: sheet.hidden })`
+  .replace("shelf0()", "document.getElementById('shelf').hidden"));
+if (JSON.parse(backed).shelf !== true || JSON.parse(backed).sheet !== false) {
+  console.error("esc 没退回对话：", backed);
+  process.exitCode = 1;
+} else {
+  console.log("esc 退回对话");
+}
 
 /* 量一遍网格：每块的大写标签必须跟正文第一行顶对齐。
    靠眼睛看差 2px 是看不出来的，但十几块堆起来整条 rail 就是歪的。

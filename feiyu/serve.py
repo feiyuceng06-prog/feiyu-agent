@@ -35,7 +35,8 @@ import sys
 import threading
 import _thread
 
-from . import events, keys, permissions, session as session_mod, skills as skills_mod, ui
+from . import enabled, events, keys, permissions, session as session_mod
+from . import skills as skills_mod, tools as tools_mod, ui
 from . import __version__
 
 # 等一个回话最多等这么久 网页关掉了、用户走开了，不能让 agent 永远挂在那儿
@@ -64,6 +65,8 @@ class Protocol:
         self._next_id = 0
 
     def send(self, kind: str, **payload) -> None:
+        # 载荷里的 kind 会把事件名盖掉，前端就再也认不出这条是什么 —— 真踩过一次
+        payload.pop("kind", None)
         line = json.dumps({"kind": kind, **payload}, ensure_ascii=False)
         with self._lock:
             try:
@@ -217,6 +220,67 @@ class Server:
         self.push_sessions()
         self.push_status()
 
+    # ---- 技能与工具 ----
+
+    def push_catalog(self) -> None:
+        """面板要的三份清单
+
+        **技能正文不放在这儿。** 五十份技能各上万字，一次全推过去几百 KB，
+        而面板一次只看得见一份 —— 点开哪份再要哪份（`detail` 那条）。
+        这跟 `catalog()` 只放名字和用途是同一个道理，只是省的东西不一样：
+        那边省的是每轮的 token，这边省的是一次推送的体积。
+        """
+        box = self.agent.toolbox
+        cfg = tools_mod.image_config()
+        has_image = bool(cfg.get("base_url") and cfg.get("key"))
+        skills = [{"name": s.name, "description": s.description, "source": s.source,
+                   "path": s.path, "chars": len(s.body), "on": enabled.on("skills", s.name)}
+                  for s in sorted(box.skills.values(), key=lambda s: s.name)]
+        tools = []
+        for spec in tools_mod.TOOL_SCHEMAS:
+            name = spec["name"]
+            if name == "image_generate" and not has_image:
+                # 没配出图接口它压根不存在，摆一个永远打不开的开关只会让人以为坏了
+                continue
+            tools.append({
+                "name": name, "label": ui.tool_label(name),
+                "description": " ".join(str(spec.get("description") or "").split()),
+                "args": sorted((spec.get("input_schema") or {}).get("properties") or {}),
+                "on": enabled.on("tools", name), "locked": name in enabled.LOCKED,
+            })
+        servers = []
+        for name, srv in sorted(box.mcp.servers.items()):
+            servers.append({
+                "name": name, "on": enabled.on("mcp", name),
+                "tools": [{"name": t.get("name") or "",
+                           "description": " ".join(str(t.get("description") or "").split())}
+                          for t in srv.tools],
+            })
+        for name, why in sorted(box.mcp.errors.items()):
+            servers.append({"name": name, "on": False, "error": why, "tools": []})
+        self.proto.send("catalog", skills=skills, tools=tools, mcp=servers)
+
+    def push_detail(self, kind: str, name: str) -> None:
+        """点开一项时才要的正文 现在只有技能有正文 """
+        if kind != "skill":
+            return
+        found = self.agent.toolbox.skills.get(name)
+        # **载荷里不能有 kind**：`send()` 是 `{"kind": 事件名, **载荷}`，
+        # 载荷里再来一个 kind 会把事件名整个盖掉，前端那条 case 永远不匹配
+        # （协议测试一跑就露馅了 —— 这就是它存在的理由）
+        self.proto.send("detail", what="skill", name=name,
+                        body=found.body if found else "")
+
+    def toggle(self, kind: str, name: str, value: bool) -> None:
+        plural = {"skill": "skills", "tool": "tools", "mcp": "mcp"}.get(kind)
+        if not plural:
+            return
+        enabled.set_on(plural, name, value)
+        # 写盘之后当场重挂工具表、重拼系统提示 —— 少这一步就是"按了没反应"
+        self.agent.apply_toggles()
+        self.push_catalog()
+        self.push_status()
+
     # ---- 命令 ----
 
     def run_command(self, text: str) -> None:
@@ -260,7 +324,8 @@ class Server:
                             text=said + "（下一句话时会告诉它）" if said else "没有可退的改动")
         elif head == "/skills":
             self.proto.send("note", level="notice",
-                            text=_plain(cli._skills(agent, self.commands)))
+                            text=_plain(cli._skills(agent, self.commands, rest)))
+            self.push_catalog()
         elif head == "/cost":
             self.proto.send("note", level="notice",
                             text=_plain(cli._cost(agent, self.workspace)))
@@ -373,6 +438,14 @@ class Server:
             self.inbox.put(("open", str(msg.get("id") or "")))
         elif op == "delete":
             self.inbox.put(("delete", str(msg.get("id") or "")))
+        elif op == "catalog":
+            self.push_catalog()
+        elif op == "detail":
+            self.push_detail(str(msg.get("kind") or ""), str(msg.get("name") or ""))
+        elif op == "toggle":
+            # 改的是工具表和系统提示，跟跑一轮是同一份状态 —— 放主线程做
+            self.inbox.put(("toggle", json.dumps(
+                {"kind": msg.get("kind"), "name": msg.get("name"), "on": msg.get("on")})))
         return True
 
     def run(self) -> int:
@@ -399,6 +472,10 @@ class Server:
                     self.open_session(text)
                 elif op == "delete":
                     self.delete_session(text)
+                elif op == "toggle":
+                    row = json.loads(text)
+                    self.toggle(str(row.get("kind") or ""), str(row.get("name") or ""),
+                                bool(row.get("on")))
                 elif op == "command" or text.startswith("/"):
                     self.run_command(text if text.startswith("/") else "/" + text)
                 else:

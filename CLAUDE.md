@@ -11,7 +11,7 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 |---|---|
 | `feiyu/__main__.py` | CLI 参数、主循环、斜杠命令 |
 | `feiyu/agent.py` | `SYSTEM_PROMPT`、`STYLES`、turn 循环、工具分发 |
-| `feiyu/tools.py` | 十七个工具的 schema 与实现，含办公文档抽取 |
+| `feiyu/tools.py` | 十八个工具的 schema 与实现，含办公文档抽取 |
 | `feiyu/providers.py` | anthropic / openai 兼容两种后端，用量与计价 |
 | `feiyu/keys.py` | 模型清单（接口地址/密钥/价格）的存取 |
 | `feiyu/permissions.py` | 命令级权限规则 |
@@ -23,9 +23,11 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 | `feiyu/memory.py` | 跨会话长期记忆（agent 自己记的事实） |
 | `feiyu/hooks.py` | 钩子：四个时机跑外部命令，含项目钩子的信任机制 |
 | `feiyu/skills.py` | 技能（模型按需读）与自定义斜杠命令（用户敲），含项目技能的信任机制 |
+| `feiyu/enabled.py` | 哪些技能 / 工具 / MCP 服务器是开着的（只存关掉的那些） |
 | `feiyu/events.py` | 结构化事件的 sink：ui 除了画终端，还能把同一件事报给别的前端 |
 | `feiyu/serve.py` | `--serve`：把 agent 挂在 stdio 上说行 JSON，给网页端用 |
 | `desktop/src/main.rs` | feiyu-desktop：Tauri 窗口，监管一个 `feiyu --serve`，走 invoke / emit |
+| `desktop/src/pathguard.rs` | 外面给的路径必须落在工作区里，两个二进制共用一份 |
 | `desktop/src/devserver.rs` | **只给测试用**的静态服务（Tauri 没 CDP，夹具接不上去），不是产品 |
 | `desktop/ui/` | 前端（index.html / app.css / app.js / logo.svg），无框架无依赖 |
 | `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
@@ -1703,3 +1705,114 @@ Mermaid + CodeMirror）。真正值钱的是它那份 360 行的 `DESIGN.md`—�
 `subagent.run(lsp=)` 把主 Toolbox 的 `lsp.Pool` 传进去共用，不另起进程：`Client.request`
 有锁，`didOpen` 每次都喂当前文件内容，子 agent 和主对话看的是同一份。
 三个条件照旧成立：只读、不用中途确认、可并行。
+
+## 出图（0.55.0）
+
+用户问「生成图片的模型能不能直接在对话里出图」形状照 Hermes 的 `image_generate`：
+工具把图存进工作区、只把**路径**告诉模型，界面自己去读那个文件画出来。
+
+- **没配就不挂这个工具**（`agent.tool_schemas()` 看 `~/.config/feiyu/images.json` 在不在）。
+  0.29.0 算过「按模式挂工具」不划算，理由是**工具集会中途变**、一改就作废整段 prompt cache；
+  这里判的是一份**整个会话里不会变**的配置（改了要重启，跟 MCP 一个规矩），
+  所以那条反对意见不成立。不出图的人不该每轮多发一份 schema。
+  代价是没配的时候模型只会说「我不能出图」，所以 README 两份都写清了怎么配。
+- **`ToolResult.shows` 跟 `.image` 是两回事**，别混：`image` 是 (media_type, base64)，
+  喂给**模型**看的，会进历史（所以有 `without_images()` 那一套）；`shows` 是一个工作区
+  相对路径，给**人**看的，走前端自己的读图通道，一个字节都不进对话历史。
+  `read_file` 读图时两个都填 —— 模型看到图，人也看到同一张。
+- **接口只回 URL 时，那个地址要照旧过 `_blocked_host`**：它是**接口**给的，不是用户给的。
+- **同一秒出两张图不能互相覆盖**：文件名是 `%Y%m%d-%H%M%S.png`，撞了往后缀加序号。
+- 权限规则名 `Image`，进 `GUARDED`（出网 + 花钱）和 `WRITES`（往磁盘写），
+  **不进 `PARALLEL_SAFE`**。`ui._HEADLINE_ARG["image_generate"] = "prompt"` —— 确认那行
+  必须显出描述，否则等于让人给一张看不见的图付钱（跟 `remember` 显 `fact` 同一个理由）。
+- **没往系统提示里加句子。** 前面栽过四次（0.16.0 todo / 0.30.0 remember / 0.46.0
+  web_search / 0.48.0），但那四次的共同点是**模型手上有个它更顺手的笨办法**
+  （bash grep 代替 search、埋头做代替列清单）。出图没有替代品，而且 schema 的第一句
+  就点名了触发条件 —— 跟 0.49.0 技能目录行能靠提示词那条路是同一个道理。
+
+### 前端
+
+- **路径不可信**，两条传输各自在**服务端**比工作区前缀：桌面端 `invoke("read_image")`、
+  夹具那条 `GET /file`，共用 `desktop/src/pathguard.rs`（六条用例，回退验证过）。
+  `Path::starts_with` 是按分量比的，所以 `ws-secrets` 不会被当成 `ws` 的子目录。
+- **`read_image` 回 `tauri::ipc::Response`（原始字节 → ArrayBuffer），不要回 `Vec<u8>`** ——
+  后者会被序列化成一个个数字的 JSON 数组，一张 2MB 的图变成 8MB 文本。
+  CSP 因此要放 `blob:`（页面自己造的同源 URL）。
+- **`![]()` 要在链接规则之前处理**：`![x](y)` 的后半截本身就是合法的链接语法，
+  反过来会渲染成一个前面挂着感叹号的链接。远程地址**不当图画**（CSP 挡着，画出来必然是
+  破图标），渲染成链接。
+- **同一轮里画过的路径，正文里再 `![]()` 就不画第二遍**（`shownShots`）。
+  Hermes 那份 `generated-images.ts` 里也有这条：模型生成完极爱把路径再重述一遍，
+  不挡的话同一张图上下挨着出现两次。`turn_start` 时清空登记。
+- `fillShots()` 只在 `closeSaying()` 里跑，**不在每个 delta 上跑** —— 那会边流边反复读文件。
+
+`shoot.mjs` 加了第五张 `5_image`，并且**量图的盒子**：零尺寸的图在截图里跟"没有这块"
+长得一模一样（跟窄屏那只狗是同一类坑）。同时验"重述那次没画第二遍"——
+这条只能在 DOM 里验，单元测试碰不到。
+
+## 技能与工具面板（0.56.0）
+
+用户要一个 Hermes Desktop 那样的「技能与工具」模块：三个页签（技能 / 工具集 / MCP），
+左边清单带开关，右边详情。
+
+### 开关表只存关掉的那些
+
+`feiyu/enabled.py`，`~/.config/feiyu/enabled.json`，0600。**默认全开，文件里记的是关掉的名字。**
+反过来（记开着的）有两个毛病：新装一份技能得先想起来去开它；升级加了新工具，
+老用户表里没有于是拿不到 —— 那正是 0.33.0「老用户拿不到新出厂规则」的形状，这次一开始就避开。
+所以这份文件通常根本不存在，或者只有一两行。
+
+- **不缓存，每次现读。** 面板上一按就写盘，而正在跑的那个 agent 得当场跟上
+  （0.47.5 那条「配置写盘了，活着的实例没跟上」）。文件几十字节，省这一次读没意义。
+- **`exit_plan` 关不掉**（`enabled.LOCKED`）。它不是一项能力，是计划模式**唯一的出口** ——
+  关掉之后 `_gate` 还会指名让模型调它，而它不在工具表里，那一轮就转不出来。
+  这是这个功能里唯一真正的脚枪，一行常量就堵上了，别为了"什么都能关"把它放开。
+- **`agent.apply_toggles()` 是必须的**：写盘之后要 `set_tools()` 重挂工具表 + `_refresh_system()`
+  重拼系统提示。少这一步就是"按了没反应"。
+- 终端也吃这份表（它是这台机器上的配置，不是桌面端的私有状态），
+  并且 **`/skills <名字>` 能在终端里开关一份** —— 只在图形界面里能开的话，
+  没有图形界面的机器上那份技能就永远回不来了。
+
+### 关 MCP 关的是"挂不挂工具"，不是"起不起进程"
+
+起不起写在 `mcp.json` 里、改了要重启。面板上关掉只是不把它的工具挂给模型
+（顺带系统提示里那段介绍也不提它）。这句话要写在详情栏里 ——
+不说清楚的话，关了之后进程还在，人会以为没生效。
+
+### 协议
+
+三条新 op：`catalog`（要三份清单）/ `detail`（要一份技能的正文）/ `toggle`（开关一项）。
+`toggle` 走 inbox 到主线程做 —— 它动工具表和系统提示，跟跑一轮是同一份状态。
+
+- **清单里没有技能正文。** 五十份技能各上万字，一次全推过去几百 KB，而面板一次只看得见一份。
+  跟 `skills.catalog()` 不放正文是同一个道理，只是省的东西不一样：那边省每轮的 token，
+  这边省一次推送的体积。
+- **`Protocol.send()` 的载荷里不能有 `kind`。** 它拼的是 `{"kind": 事件名, **载荷}`，
+  重名的话事件名被整个盖掉，前端那条 case 永远不匹配。`detail` 第一版就写成
+  `send("detail", kind="skill", ...)`，发出去是 `{"kind":"skill"}`。
+  现在 `send()` 自己 `payload.pop("kind")` 兜底，字段改叫 `what`。
+  **这条是协议测试跑出来的，肉眼看代码看不出来。**
+- **没配出图接口时清单里不放 `image_generate`** —— 摆一个永远打不开的开关只会让人以为坏了。
+
+### 前端
+
+面板跟 `.sheet` 占同一格（`grid-row: 2 / 5`），开着的时候把对话那一屏和输入区整个收起来。
+它是配置不是对话，浮在上面或者挤在旁边都会让人分不清自己在哪儿。
+
+- **开关是方的。** Hermes 那个是圆角胶囊，这套系统里除图片外全是直角。蓝只做面：
+  开着是蓝底白块，关着是描边空块。
+- **开关必须 `stopPropagation()`**，不然按一下开关的同时把这一项也选中了 ——
+  跟 0.51.1 那个删对话的叉是同一类错。
+- **"还没收到清单" ≠ "这台机器上没有"**，两种情况长得一模一样，得分开说（`shelf.got`）。
+  连上（含断线重连）时面板要是开着就把清单重新要一遍 —— 不然它会一直空着。
+
+夹具：`shoot.mjs` 多了 `6_shelf` / `7_shelf_tools` / `8_shelf_mcp` 三张，
+并且量开关的盒子（零尺寸的开关在截图里就是"不存在"，跟那只狗是同一类坑）；
+`input.mjs` 补了 Ctrl K 开、esc 关、开着时对话那屏收起来。
+
+**跑这几张要让夹具连到一份备好技能的 `XDG_CONFIG_HOME` 上**，因为面板一打开就向服务端
+要 catalog，灌合成事件会被真推送盖掉（CLAUDE.md 里早记过这个坑）。另外两条：
+- **要先等真的连上再开面板**（看状态灯 `#dot`，不要看 `online` —— 那是顶层 `let`，
+  在 classic script 里落在 script scope 上，CDP 的 eval 按裸名字取不到，会抛 ReferenceError）。
+- 出图那一屏不再依赖"夹具跑在仓库根上"：走 `/upload` 把 logo 传进工作区，
+  拿回来的相对路径正好就是 agent 出图时给的那种，顺带也验了一次上传。

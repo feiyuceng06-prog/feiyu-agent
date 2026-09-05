@@ -106,13 +106,13 @@ Type `/` for command completion:
 | `/helper <name>` | Use a cheaper model for summaries, subagents and page extraction; `/helper off` to revert |
 | `/style` | Reply style: `default` / `concise` / `explanatory` / `teaching` |
 | `/theme` | UI theme: `default` / `swiss` |
-| `/skills` | List the available skills and custom commands |
+| `/skills` | List the available skills and custom commands; `/skills <name>` toggles one |
 | `/clear` | Clear the conversation and its save file |
 | `/exit` | Quit |
 
 ## Tools
 
-Seventeen tools, every call printed on screen:
+Eighteen tools, every call printed on screen:
 
 | Tool | What it does |
 |---|---|
@@ -129,6 +129,7 @@ Seventeen tools, every call printed on screen:
 | `exit_plan` | Hand you the plan in plan mode |
 | `ask_user` | Ask you a question when unsure |
 | `skill` | Pull in the full text of one skill |
+| `image_generate` | Generate an image into the workspace (only present once an image endpoint is configured) |
 
 A few things that come up daily:
 
@@ -181,6 +182,18 @@ There is no dedicated PR tool; it uses `git` and `gh` through bash. The order it
 {"provider": "brave", "key": "…"}
 {"provider": "searxng", "url": "http://localhost:8080"}
 ```
+
+**Image generation needs configuring.** Point `~/.config/feiyu/images.json` at any
+OpenAI-compatible images endpoint:
+
+```json
+{"base_url": "https://…/v1", "key": "…", "model": "gpt-image-2", "size": "1024x1024"}
+```
+
+The `image_generate` tool only appears once that file exists — people who never
+generate images shouldn't pay for its schema on every turn. Images land in
+`.feiyu/images/` inside the workspace; the desktop app draws them inline, the
+terminal prints the path.
 
 ## Permissions
 
@@ -262,7 +275,11 @@ feiyu-desktop -r                  # continue the last conversation here
 
 After install it also shows up in your app launcher as **Feiyu**.
 
-The sidebar holds new-session, skills, background jobs and memory, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session.
+The sidebar holds new-session and skills-and-tools, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session. The row at the top is the workspace; click it to switch directories.
+
+**Skills and tools** (`Ctrl K`) is three tabs: skills, tools, MCP. Every entry has a switch, and whatever you switch off neither enters its context nor can be called — a skill drops out of the catalog in the system prompt, a tool is not attached to the request, and an MCP server's tools are not exposed. Changes take effect immediately and are recorded in `~/.config/feiyu/enabled.json`, which lists only what is *off*, so a skill you install later is on from the start. `/skills <name>` toggles one from the terminal too.
+
+`exit_plan` cannot be switched off: it is the only way out of plan mode. Switching off an MCP server only stops its tools being attached — the process still starts, since whether it starts is written in `mcp.json` and needs a restart to change.
 
 The `＋` left of the composer uploads files; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
 

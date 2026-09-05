@@ -8,7 +8,7 @@ from . import hooks as hooks_mod
 from . import mcp as mcp_mod
 from . import serve as serve_mod
 from . import skills as skills_mod
-from . import keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
+from . import enabled, keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import CONTEXT_FILES, MODE_ORDER, MODES, STYLES, Feiyu, find_score
@@ -296,7 +296,7 @@ def main() -> int:
             elif cmd == "/mcp":
                 print(_mcp(agent))
             elif cmd == "/skills":
-                print(_skills(agent, commands))
+                print(_skills(agent, commands, arg))
             elif cmd == "/undo":
                 said = agent.undo()
                 print(ui.notice(said + "（下一句话时会告诉它）") if said
@@ -609,8 +609,21 @@ def _theme(arg: str) -> str:
     return "\n".join(rows)
 
 
-def _skills(agent: Feiyu, commands: dict) -> str:
+def _skills(agent: Feiyu, commands: dict, arg: str = "") -> str:
+    """`/skills` 看清单，`/skills <名字>` 开关一份
+
+    开关这件事桌面端有个面板，但**终端得有一条路能把关掉的东西开回来** ——
+    只在图形界面里能开的话，没有图形界面的机器上那份技能就永远回不来了。
+    """
     found = sorted(agent.toolbox.skills.values(), key=lambda s: s.name)
+    arg = arg.strip()
+    if arg:
+        names = {s.name for s in found}
+        if arg not in names:
+            return ui.warn("没有叫 %s 的技能 现有：%s" % (arg, "、".join(sorted(names)) or "（一份都没有）"))
+        now = enabled.set_on("skills", arg, not enabled.on("skills", arg))
+        agent.apply_toggles()
+        return ui.notice("技能 %s 已%s" % (arg, "打开" if now else "关掉"))
     if not found and not commands:
         return ui.notice(
             "还没有技能和自定义命令 一份技能就是一个 .md：全局放 %s/，"
@@ -619,10 +632,13 @@ def _skills(agent: Feiyu, commands: dict) -> str:
             % (skills_mod.GLOBAL_SKILLS, skills_mod.PROJECT_SKILLS, skills_mod.PROJECT_COMMANDS))
     rows = []
     if found:
-        rows.append(ui.notice("技能（它自己按需读，用 skill 工具）"))
+        rows.append(ui.notice("技能（它自己按需读，用 skill 工具；/skills <名字> 开关一份）"))
         for one in found:
+            # 关掉的才标出来 —— 常态不占位置，异常才出现
+            state = "" if enabled.on("skills", one.name) else "（已关）"
             rows.append("    " + ui.bold(ui.pad(one.name, 16))
-                        + ui.paint("grey", "%s · %s" % (one.description, one.source)))
+                        + ui.paint("red" if state else "grey",
+                                   "%s%s · %s" % (state, one.description, one.source)))
     if commands:
         if rows:
             rows.append("")

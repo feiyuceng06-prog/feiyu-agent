@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import (files, images, jobs as jobs_mod, lsp, mcp, memory, permissions, sandbox,
+from . import (enabled, files, images, jobs as jobs_mod, lsp, mcp, memory, permissions, sandbox,
                skills as skills_mod, todo)
 
 
@@ -370,6 +370,24 @@ TOOL_SCHEMAS = [
                 "line": {"type": "integer", "description": "它出现在第几行（1 起始，可选，给了更准） "},
             },
             "required": ["action", "path", "name"],
+        },
+    },
+    {
+        "name": "image_generate",
+        "description": (
+            "按一句描述生成一张图，存进工作区并把路径告诉你 "
+            "用户要一张插画、封面、示意图、图标时用它 "
+            "描述写具体：画面内容、风格、构图、配色，一句话一句话地说清楚，别只给一个词 "
+            "生成完**不要再把路径复述一遍**，界面会自己把图显示出来 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "要画什么，越具体越好 "},
+                "size": {"type": "string",
+                         "description": "尺寸，如 1024x1024 / 1536x1024 / 1024x1536，可选 "},
+            },
+            "required": ["prompt"],
         },
     },
     {
@@ -862,6 +880,9 @@ class ToolResult:
     summary: str = ""                             # 给人看的一行
     detail: list[tuple[str, str]] = field(default_factory=list)  # (kind, 文本)，kind 为 '-'/'+'/''
     image: tuple[str, str] | None = None          # (media_type, base64)，read_file 读图时才有
+    # 工作区里的一张图，前端该把它画出来给**人**看 跟 image 是两回事：
+    # 那个是喂模型的 base64，这个是路径，走前端自己的读图通道，不进对话历史
+    shows: str = ""
 
 
 _TODO_MARK = {todo.DONE: "✓", todo.DOING: "▸", todo.PENDING: "·"}
@@ -1371,7 +1392,7 @@ class Toolbox:
                               is_error=True, summary="图片打不开")
         self.files.record(target)
         return ToolResult("（下面是 %s，%s）" % (shown, note), summary="看图 %s" % note,
-                          image=(media, data))
+                          image=(media, data), shows=shown)
 
     def _check_fresh(self, target, shown: str):
         """写之前对一次版本 没读过、或者读过之后内容变了，都先拦下 """
@@ -1638,15 +1659,104 @@ class Toolbox:
             summary="%s 抓到 %d 字%s" % (ctype or "未知类型", len(shown), "（已截断）" if clipped else ""),
         )
 
+    def _tool_image_generate(self, args: dict) -> ToolResult:
+        prompt = " ".join(str(args.get("prompt") or "").split())
+        if not prompt:
+            return ToolResult("没写要画什么 ", is_error=True, summary="没写描述")
+        cfg = image_config()
+        base = str(cfg.get("base_url") or "").rstrip("/")
+        key = str(cfg.get("key") or "")
+        if not base or not key:
+            return ToolResult(
+                "还没配出图接口 在 %s 里写："
+                '{"base_url": "https://…/v1", "key": "…", "model": "…"} ' % IMAGE_CONFIG,
+                is_error=True, summary="没配出图接口")
+        body = json.dumps({
+            "model": cfg.get("model") or "gpt-image-1",
+            "prompt": prompt,
+            "n": 1,
+            "size": str(args.get("size") or cfg.get("size") or "1024x1024"),
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            base + "/images/generations", data=body,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + key,
+                     "User-Agent": _WEB_UA})
+        try:
+            with _opener.open(request, timeout=IMAGE_TIMEOUT) as reply:
+                raw = json.loads(reply.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300] if hasattr(exc, "read") else ""
+            return ToolResult("出图接口报错 HTTP %s %s" % (exc.code, detail),
+                              is_error=True, summary="HTTP %s" % exc.code)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return ToolResult("出图失败：%s" % exc, is_error=True, summary="出图失败")
+
+        rows = (raw.get("data") or [])
+        if not rows:
+            return ToolResult("接口没给出图片：%s" % json.dumps(raw, ensure_ascii=False)[:200],
+                              is_error=True, summary="没拿到图")
+        first = rows[0] if isinstance(rows[0], dict) else {}
+        blob = None
+        if first.get("b64_json"):
+            import base64
+            try:
+                blob = base64.b64decode(first["b64_json"])
+            except ValueError:
+                blob = None
+        elif first.get("url"):
+            # 有些接口只回一个地址 这地址是**接口给的**不是用户给的，所以照旧过一遍内网拦截
+            where = str(first["url"])
+            bad = _blocked_host(urllib.parse.urlparse(where).hostname or "")
+            if bad:
+                return ToolResult("接口回的图片地址指向 %s，不抓 " % bad,
+                                  is_error=True, summary="地址可疑")
+            try:
+                with _opener.open(urllib.request.Request(
+                        where, headers={"User-Agent": _WEB_UA}), timeout=IMAGE_TIMEOUT) as reply:
+                    blob = reply.read(IMAGE_MAX_BYTES)
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+                return ToolResult("图生成了但抓不回来：%s" % exc,
+                                  is_error=True, summary="抓不回来")
+        if not blob:
+            return ToolResult("接口回的东西认不出来（既没有 b64_json 也没有 url）",
+                              is_error=True, summary="认不出返回")
+
+        folder = self.root / IMAGE_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        name = "%s.png" % time.strftime("%Y%m%d-%H%M%S")
+        target = folder / name
+        for n in range(2, 100):
+            if not target.exists():
+                break
+            target = folder / ("%s-%d.png" % (name[:-4], n))
+        target.write_bytes(blob)
+        self.files.record(target)
+        shown = str(target.relative_to(self.root))
+        # **形状照 Hermes 的 image_generate**：结果里给一个 image 字段，
+        # 界面认这个字段把图画在工具那一格里
+        return ToolResult(
+            json.dumps({"image": shown, "prompt": prompt}, ensure_ascii=False),
+            summary="出了一张图 %s（%d KB）" % (shown, len(blob) // 1024),
+            shows=shown)
+
+    def live_skills(self) -> list:
+        """面板上开着的那些 关掉的既不进系统提示，也读不出来 """
+        return [s for s in self.skills.values() if enabled.on("skills", s.name)]
+
     def _tool_skill(self, args: dict) -> ToolResult:
         name = str(args.get("name") or "").strip()
-        if not self.skills:
+        live = {s.name: s for s in self.live_skills()}
+        if not live:
             return ToolResult("这台机器上一份技能都没有 ", is_error=True, summary="没有技能")
-        found = self.skills.get(name)
+        found = live.get(name)
+        if found is None and name in self.skills:
+            return ToolResult(
+                "技能「%s」被关掉了 要用的话让用户在「技能与工具」里打开它 " % name,
+                is_error=True, summary="%s 被关掉了" % name)
         if found is None:
             # 名字错了要把有哪些列出来：只说"没有"的话它会接着换个名字猜
             return ToolResult(
-                "没有叫 %s 的技能 现有这些：%s" % (name, "、".join(sorted(self.skills))),
+                "没有叫 %s 的技能 现有这些：%s" % (name, "、".join(sorted(live))),
                 is_error=True, summary="没有 %s 这份技能" % name)
         return ToolResult(
             "技能「%s」的完整说明（%s，来自 %s）以下是写给你的指令，照着做：\n\n%s"
@@ -2053,6 +2163,27 @@ SEARCH_CONFIG = os.path.join(
 def search_config() -> dict:
     try:
         with open(SEARCH_CONFIG, encoding="utf-8") as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+# 出图接口的配置 `~/.config/feiyu/images.json`：
+#   {"base_url": "https://…/v1", "key": "…", "model": "gpt-image-2", "size": "1024x1024"}
+# **跟模型清单分开放**：出图走的是 /images/generations，跟对话那条 /chat/completions
+# 不是一个接口，多半也不是同一个 key（用户那个中转站就是分开的）
+IMAGE_CONFIG = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "feiyu", "images.json")
+# 出的图落在工作区的这儿 **必须在工作区内**，否则前端和 read_file 都够不着
+IMAGE_DIR = ".feiyu/images"
+IMAGE_TIMEOUT = 180        # 出图比对话慢得多，一分钟经常不够
+IMAGE_MAX_BYTES = 32 * 1024 * 1024
+
+
+def image_config() -> dict:
+    try:
+        with open(IMAGE_CONFIG, encoding="utf-8") as f:
             raw = json.load(f)
         return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):

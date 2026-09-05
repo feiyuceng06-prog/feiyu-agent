@@ -101,16 +101,19 @@ body {
   font: var(--w-regular) var(--text-base) / var(--leading-body) var(--font-sans);
   display: grid;
   grid-template-columns: var(--side) minmax(0, 1fr);
-  grid-template-rows: var(--bar) minmax(0, 1fr) auto var(--bar-s);
+  grid-template-rows: var(--bar) minmax(0, 1fr) auto auto var(--bar-s);
   height: 100dvh;
   overflow: hidden;
 }
 
 .bar     { grid-column: 1 / -1; grid-row: 1; }
-.side    { grid-column: 1; grid-row: 2 / 4; }
+.side    { grid-column: 1; }
 .sheet   { grid-column: 2; grid-row: 2; }
-.composer{ grid-column: 2; grid-row: 3; }
-.status  { grid-column: 1 / -1; grid-row: 4; }
+.shelf   { grid-column: 2; grid-row: 2 / 5; }
+.term    { grid-column: 2; grid-row: 3; }
+.composer{ grid-column: 2; grid-row: 4; }
+.status  { grid-column: 1 / -1; grid-row: 5; }
+.side    { grid-row: 2 / 5; }
 
 /* ── 标题栏 ────────────────────────────────────────────────── */
 
@@ -125,7 +128,9 @@ body {
 }
 
 .bar__left, .bar__right { display: flex; align-items: center; gap: var(--space-1); }
-.bar__gap { width: var(--space-3); }
+/* 专门用来拖的那一块。**必须是独立元素**：标题栏的子元素会把父元素上的
+   data-tauri-drag-region 挡住，只在 <header> 上写一个是拖不动的。 */
+.bar__drag { flex: 1; align-self: stretch; }
 
 .bar__mark { opacity: 0.8; margin-left: var(--space-2); }
 
@@ -155,9 +160,63 @@ body {
 }
 
 .chip:hover { color: var(--text); background: var(--panel); }
-.chip--win { color: var(--faint); }
-.chip--close:hover { background: var(--alert); color: #fff; }
 .chip--attach { border-color: var(--line-strong); }
+
+/* 窗口按钮**用 CSS 画，不用字形**。`─ □ ✕` 这些字符在中日文字体里大小和基线都会飘，
+   三个钮长得一个高一个低。画出来的线宽、尺寸、位置全是自己说了算。 */
+.win {
+  -webkit-app-region: no-drag;
+  position: relative;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.win::before, .win::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  border: 1px solid var(--muted);
+}
+
+.win:hover::before, .win:hover::after { border-color: var(--text); }
+
+/* 一条横线 */
+.win--min::before { width: 10px; height: 0; border-width: 1px 0 0; }
+.win--min::after { display: none; }
+
+/* 一个方框 */
+.win--max::before { width: 9px; height: 9px; }
+.win--max::after { display: none; }
+
+/* 两条斜线 */
+.win--close::before, .win--close::after { width: 11px; height: 0; border-width: 1px 0 0; }
+.win--close::before { rotate: 45deg; }
+.win--close::after { rotate: -45deg; }
+.win--close:hover { background: var(--alert); }
+.win--close:hover::before, .win--close:hover::after { border-color: #fff; }
+
+/* 无边框窗口的缩放热区。**八个方向都要有**，只做右下角的话左边和上边缩不了。
+   6px 够点得中，又不至于抢走内容的点击。 */
+.grips i {
+  position: fixed;
+  z-index: 99;
+}
+
+.grips [data-dir="North"] { top: 0; left: 6px; right: 6px; height: 4px; cursor: ns-resize; }
+.grips [data-dir="South"] { bottom: 0; left: 6px; right: 6px; height: 4px; cursor: ns-resize; }
+.grips [data-dir="West"]  { left: 0; top: 6px; bottom: 6px; width: 4px; cursor: ew-resize; }
+.grips [data-dir="East"]  { right: 0; top: 6px; bottom: 6px; width: 4px; cursor: ew-resize; }
+.grips [data-dir="NorthWest"] { top: 0; left: 0; width: 8px; height: 8px; cursor: nwse-resize; }
+.grips [data-dir="NorthEast"] { top: 0; right: 0; width: 8px; height: 8px; cursor: nesw-resize; }
+.grips [data-dir="SouthWest"] { bottom: 0; left: 0; width: 8px; height: 8px; cursor: nesw-resize; }
+.grips [data-dir="SouthEast"] { bottom: 0; right: 0; width: 8px; height: 8px; cursor: nwse-resize; }
 
 /* ── 侧栏 ──────────────────────────────────────────────────── */
 
@@ -171,6 +230,65 @@ body {
 
 body[data-side="off"] { --side: 0px; }
 body[data-side="off"] .side { border-right: 0; }
+
+/* 工作台选择器。**摆在侧栏最上面**：它是「这一切发生在哪儿」，
+   比会话列表更靠上一层，跟 Hermes 把 Projects 放侧栏是同一个道理。 */
+.desk {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-3);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.desk:hover { background: var(--panel); }
+
+.desk__label {
+  display: block;
+  font-size: var(--text-3xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.desk__path {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;          /* 路径从左边裁，保住尾巴那一段 */
+  text-align: left;
+}
+
+.desks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.desks li {
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--soft);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desks li:hover { background: var(--bg); color: var(--text); }
+.desks li[data-pick="1"] { color: var(--accent); font-family: var(--font-sans); }
 
 .side__nav { padding: var(--space-3) var(--space-2) var(--space-2); }
 
@@ -449,6 +567,38 @@ body[data-side="off"] .side { border-right: 0; }
   padding-left: var(--space-4);
 }
 
+/* 图 —— agent 出的图、read_file 看过的图，正文里 ![]() 指到工作区里的图。
+   照"除图片外全是直角"：图本身不加圆角也不加边框，只用一条发丝线跟上下分开，
+   说明文字走 mono 灰字那一档（它是路径，不是话）。 */
+.shot {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-4);
+}
+
+.shot img {
+  display: block;
+  max-width: 100%;
+  /* 一屏放得下：太高的竖图会把整块正文顶出视野 */
+  max-height: 62vh;
+  object-fit: contain;
+  object-position: left top;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  /* 透明底的图（图标、去背的插画）在纯白纸上会看不见边界 */
+  background: var(--panel);
+}
+
+.shot figcaption {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  padding-top: var(--space-1);
+  overflow-wrap: anywhere;
+}
+
+.shot[data-failed] figcaption { color: var(--alert); }
+
 /* 提示 / 警告 / 报错 */
 .note {
   /* 它是 <p>，浏览器默认给 1em 上下边距 —— 不清掉的话 meta-rail 上的标签
@@ -620,6 +770,260 @@ body[data-side="off"] .side { border-right: 0; }
 
 @keyframes blink { 50% { opacity: 0; } }
 
+
+/* ── 终端面板 ──────────────────────────────────────────────────
+   xterm 自带的样式只管终端内容那一块，外面这一圈是我们自己的。
+   高度固定 —— 做成可拖的分隔条要多一套拖拽状态，值不回来。 */
+/* ── 技能与工具 ─────────────────────────────────────────────
+   一张三栏的表：上面是分类和筛选，中间左列是清单右列是详情，下面一句说明。
+   照"Flat, not boxed"：没有卡片没有底色块，全靠发丝线分区。 */
+.shelf {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.shelf__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs { display: flex; }
+
+.tab {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: var(--space-3) var(--space-3);
+  margin-bottom: -1px;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+  /* 蓝只做线和面，永远不做字 —— 选中靠这条线，不靠把字染蓝 */
+  border-bottom-color: var(--accent);
+}
+
+.tab b {
+  font-weight: var(--w-regular);
+  font-size: var(--text-2xs);
+  color: var(--faint);
+  margin-left: var(--space-2);
+}
+
+#shelf-find {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: var(--space-2) 0;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+#shelf-find:focus { outline: 0; }
+#shelf-find::placeholder { color: var(--faint); }
+
+.shelf__body {
+  display: grid;
+  grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.shelf__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-right: 1px solid var(--line);
+}
+
+.shelf__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.shelf__row[aria-current="true"] { background: var(--panel); }
+.shelf__row:hover { background: var(--code-bg); }
+
+.shelf__name {
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.shelf__meta {
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* 关掉的那些整行压灰 —— 一眼扫过去就知道哪些不在起作用 */
+.shelf__row[data-on="0"] .shelf__name { color: var(--faint); }
+
+/* 开关。Hermes 那个是圆角胶囊，这套系统里除图片外全是直角，所以画成方的。
+   蓝只做面：开着是蓝底白块，关着是描边空块。 */
+.sw {
+  appearance: none;
+  width: 2rem;
+  height: 1rem;
+  flex: none;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.sw::before {
+  content: "";
+  width: calc(1rem - 6px);
+  height: 100%;
+  background: var(--line-strong);
+  transition: none;
+}
+
+.sw[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  justify-content: flex-end;
+}
+
+.sw[aria-checked="true"]::before { background: var(--bg); }
+
+.sw[disabled] { cursor: default; opacity: 0.45; }
+
+.shelf__pane {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-5) var(--space-6) var(--space-8);
+  min-width: 0;
+}
+
+.shelf__pane h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--w-regular);
+  line-height: var(--leading-body);
+}
+
+.shelf__pane .lead {
+  margin: var(--space-2) 0 var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--soft);
+}
+
+/* 元信息表。跟 .block 一样是两列网格，标签在左、值在右，没有边框没有底色。 */
+.facts {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0 var(--space-4);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+}
+
+.facts dt {
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  line-height: var(--leading-body);
+}
+
+.facts dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.shelf__body-text {
+  margin-top: var(--space-5);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  color: var(--soft);
+}
+
+.shelf__empty {
+  color: var(--faint);
+  font-size: var(--text-sm);
+  padding: var(--space-5);
+}
+
+.shelf__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-5);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-2xs);
+  color: var(--faint);
+}
+
+.shelf__foot .mono { font-family: var(--font-mono); }
+.shelf__hint { margin-left: auto; }
+
+.term {
+  border-top: 1px solid var(--line-strong);
+  height: 18rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.term__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-2) 0 var(--space-4);
+  border-bottom: 1px solid var(--line);
+  height: var(--bar-s);
+}
+
+.term__label {
+  font-size: var(--text-3xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.term__hint { flex: 1; font-size: var(--text-2xs); color: var(--faint); }
+
+.term__body { flex: 1; min-height: 0; padding: var(--space-2) var(--space-4); }
+
+/* xterm 的默认配色是深色的，这套系统是白纸墨字 —— 配色在 JS 里给，
+   这儿只管让它把地方占满 */
+.term__body .xterm { height: 100%; }
+.term__body .xterm-viewport { background: transparent !important; }
+
+.bar__sep { width: 1px; height: 1rem; background: var(--line); margin: 0 var(--space-2); }
 
 /* ── 输入区 ────────────────────────────────────────────────── */
 

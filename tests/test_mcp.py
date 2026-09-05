@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from feiyu import keys, mcp, permissions
+from feiyu import enabled, keys, mcp, permissions
 from feiyu.agent import Feiyu
 from feiyu.tools import Toolbox
 from tests.fakes import FakeBackend, call
@@ -190,3 +190,42 @@ class TestToolboxAndAgent(Base):
             self.agent.send("试试")
         bodies = [m["content"] for m in self.agent.backend.messages if m.get("role") == "tool"]
         self.assertIn("echo: ping", bodies[0])
+
+
+class TestMcpToggle(Base):
+    """在面板里关掉一台 MCP 服务器：它的工具不再挂给模型
+
+    **关掉不等于不起进程** —— 起不起写在 mcp.json 里，改了要重启。
+    这儿关的是"要不要把工具挂出去"，面板上那句话也是这么说的。
+    """
+
+    def setUp(self):
+        super().setUp()
+        before = enabled.STORE
+        enabled.STORE = os.path.join(self.tmp.name, "enabled.json")
+        self.addCleanup(setattr, enabled, "STORE", before)
+        keys.STORE = os.path.join(self.tmp.name, "models.json")
+        keys.STATE = os.path.join(self.tmp.name, "state.json")
+        self.write_global({"假": spec()})
+        self.agent = Feiyu(self.root)
+        self.agent.backend = FakeBackend([])
+        self.agent.load_mcp()
+        self.addCleanup(self.agent.toolbox.mcp.close)
+
+    def names(self):
+        return [t["name"] for t in self.agent.tool_schemas()]
+
+    def test_默认挂着(self):
+        self.assertTrue([n for n in self.names() if n.startswith("mcp_")])
+
+    def test_关掉之后一个都不挂(self):
+        enabled.set_on("mcp", "假", False)
+        self.assertEqual([n for n in self.names() if n.startswith("mcp_")], [])
+        self.assertIn("bash", self.names())          # 内置的不受影响
+
+    def test_关掉之后系统提示里也不提它(self):
+        self.agent._refresh_system()
+        self.assertIn("假", self.agent.backend.system)
+        enabled.set_on("mcp", "假", False)
+        self.agent._refresh_system()
+        self.assertNotIn("外部 MCP 服务器", self.agent.backend.system)

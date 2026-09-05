@@ -272,6 +272,7 @@ _LABEL = {
     "git": "Git",
     "symbol": "Symbol",
     "skill": "Skill",
+    "image_generate": "Image",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -291,6 +292,8 @@ _HEADLINE_ARG = {
     "skill": "name",
     # 问句本身就是这次调用的全部内容，不显出来那行就只剩一个 Ask
     "ask_user": "question",
+    # 出图要花钱，不把描述显出来就是让人给一张看不见的图付钱
+    "image_generate": "prompt",
 }
 
 
@@ -357,9 +360,10 @@ def tool_preview(rows: list[tuple[str, str]]) -> str:
     return "\n".join(out)
 
 
-def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool) -> str:
-    """detail 是 (kind, text)，kind 为 '-' / '+' / '' """
-    events.emit("tool_result", summary=summary, is_error=is_error,
+def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool,
+                shows: str = "") -> str:
+    """detail 是 (kind, text)，kind 为 '-' / '+' / '' shows 是一张要画给人看的图 """
+    events.emit("tool_result", summary=summary, is_error=is_error, shows=shows,
                 detail=[{"kind": k, "text": t} for k, t in detail])
     tint = "red" if is_error else "grey"
     lines = ["  " + paint(tint, f"{ELBOW}  {clip(summary, width() - 6)}")]
@@ -1228,7 +1232,7 @@ SLASH = {
     "/jobs": "看 / 停掉挂在后台跑的命令",
     "/mcp": "看接入了哪些 MCP 服务器和它们的工具",
     "/undo": "退掉它最近一次写文件的改动，可以连着退",
-    "/skills": "看有哪些技能和自定义命令，各自是哪来的",
+    "/skills": "看有哪些技能和自定义命令；/skills <名字> 开关一份",
     "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
