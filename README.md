@@ -262,7 +262,7 @@ feiyu-web -r                      # continue the last conversation in this direc
 feiyu-web --no-open               # don't open a browser
 ```
 
-The sidebar on the left lists past conversations; click one to switch to it (the agent's context follows, not just the view), "新对话" starts a fresh one without deleting the old, and `☰` collapses the panel. The collapsed state is remembered in the browser.
+The sidebar on the left lists past conversations; click one to switch to it (the agent's context follows, not just the view), "新对话" starts a fresh one without deleting the old, hovering a row reveals a `×` that deletes it (it asks first), and `☰` collapses the panel. The collapsed state is remembered in the browser.
 
 The 附件 button next to the composer uploads files — dragging them onto the page works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message; it reads them with the `read_file` it already has, images, docx and pdf included.
 

@@ -469,15 +469,60 @@ function drawTalks(rows, current) {
     list.innerHTML = `<li class="side__empty">还没有历史对话</li>`;
     return;
   }
-  list.replaceChildren(...rows.map((row) => {
-    const li = document.createElement("li");
-    li.className = "talk";
-    li.setAttribute("aria-current", row.id === current ? "true" : "false");
-    li.innerHTML = `<span class="talk__title">${esc(row.title)}</span>` +
-                   `<span class="talk__meta">${esc(row.when)} · ${row.count} 条</span>`;
-    li.onclick = () => send({ op: "open", id: row.id });
-    return li;
-  }));
+  list.replaceChildren(...rows.map((row) => talkRow(row, current)));
+}
+
+function talkRow(row, current) {
+  const li = document.createElement("li");
+  li.className = "talk";
+  li.setAttribute("aria-current", row.id === current ? "true" : "false");
+  li.innerHTML = `<span class="talk__title">${esc(row.title)}</span>` +
+                 `<span class="talk__meta">${esc(row.when)} · ${row.count} 条</span>`;
+  li.onclick = () => send({ op: "open", id: row.id });
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "talk__x";
+  del.textContent = "×";
+  del.title = "删掉这段对话";
+  del.onclick = (e) => {
+    // **必须 stopPropagation**：不然点叉的同时也把这段对话打开了
+    e.stopPropagation();
+    askDelete(li, row);
+  };
+  li.append(del);
+  return li;
+}
+
+/* 删之前问一句。**不用 confirm() 弹窗**：一段对话是真数据，值得问，
+   但浏览器那个弹窗跟这套排版格格不入，而且会挡住整个页面。
+   就地把这一行换成「删掉？确认 / 取消」，跟确认工具调用是同一个路子。 */
+function askDelete(li, row) {
+  const back = li.cloneNode(true);
+  li.classList.add("talk--asking");
+  li.onclick = null;
+  li.innerHTML = `<span class="talk__title">删掉「${esc(row.title)}」？</span>`;
+  const bar = document.createElement("div");
+  bar.className = "talk__ask";
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = "btn btn--danger btn--small";
+  yes.textContent = "删掉";
+  yes.onclick = (e) => { e.stopPropagation(); send({ op: "delete", id: row.id }); };
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "btn btn--small";
+  no.textContent = "取消";
+  no.onclick = (e) => { e.stopPropagation(); li.replaceWith(back); wire(back, row); };
+  bar.append(yes, no);
+  li.append(bar);
+}
+
+/* cloneNode 不带事件，取消之后要把那一行重新接上 */
+function wire(li, row) {
+  li.onclick = () => send({ op: "open", id: row.id });
+  const del = li.querySelector(".talk__x");
+  if (del) del.onclick = (e) => { e.stopPropagation(); askDelete(li, row); };
 }
 
 /* 收放状态记在浏览器里：**这是「这台机器上这个人的偏好」**，

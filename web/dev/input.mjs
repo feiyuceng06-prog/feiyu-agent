@@ -322,6 +322,52 @@ const openSent = (await state()).sent.map(x => { try { return JSON.parse(x); } c
 check("点历史发 op:open 带 id",
       openSent.some(m => m.op === "open" && m.id === "A"), openSent);
 
+// ── 删对话 ──────────────────────────────────────────────────
+const twoTalks = `handle({kind:"sessions", current:"B", rows:[
+  {id:"B", title:"新的那段", model:"m", count:9, saved_at:2, when:"09-05 01:10"},
+  {id:"A", title:"旧的那段", model:"m", count:4, saved_at:1, when:"09-04 11:02"}]}); true`;
+
+await reset();
+await ev(twoTalks);
+await sleep(150);
+// 点叉**不能**顺手把这段对话打开
+await ev(`document.querySelector(".talk .talk__x").click(); true`);
+await sleep(200);
+let delSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("点叉不会顺手打开这段对话", !delSent.some(m => m.op === "open"), delSent);
+check("点叉先问一句，不是直接删",
+      (await ev(`document.querySelectorAll(".talk--asking").length`)) === 1 &&
+      !delSent.some(m => m.op === "delete"), delSent);
+
+// 取消要能回到原样，而且回去之后还能再点
+await ev(`[...document.querySelectorAll(".talk--asking button")]
+  .find(b => b.textContent === "取消").click(); true`);
+await sleep(200);
+check("取消回到原样",
+      (await ev(`document.querySelectorAll(".talk--asking").length`)) === 0 &&
+      (await ev(`document.querySelectorAll(".talk").length`)) === 2, null);
+await reset();
+await ev(`document.querySelector(".talk .talk__x").click(); true`);
+await sleep(200);
+check("取消之后那一行还能再点叉",
+      (await ev(`document.querySelectorAll(".talk--asking").length`)) === 1, null);
+
+// 确认才真发 delete
+await ev(`[...document.querySelectorAll(".talk--asking button")]
+  .find(b => b.textContent === "删掉").click(); true`);
+await sleep(200);
+delSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("确认之后才发 op:delete 带 id",
+      delSent.some(m => m.op === "delete" && m.id === "B"), delSent);
+
+// 平时不显形，划上去才出现
+await reset();
+await ev(twoTalks);
+await sleep(150);
+const vis = JSON.parse(await ev(`JSON.stringify({
+  idle: getComputedStyle(document.querySelector(".talk__x")).opacity })`));
+check("叉平时不显形", vis.idle === "0", vis);
+
 // ── 附件 ────────────────────────────────────────────────────
 await reset();
 await ev(`clips = [{name:".feiyu/uploads/a.png", state:"ready", path:".feiyu/uploads/a.png"}];

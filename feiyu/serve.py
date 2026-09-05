@@ -178,6 +178,23 @@ class Server:
         self.push_sessions()
         self.push_status()
 
+    def delete_session(self, sid: str) -> None:
+        """删掉一段对话
+
+        **删的是正在看的那段时，得把 agent 也归零**：不然盘上没了、内存里还在，
+        下一轮存盘又会照着旧 id 写回去，等于没删。
+        """
+        if not sid:
+            return
+        session_mod.drop(self.workspace, sid)
+        if sid == self.agent.session_id:
+            self.agent.reset()
+            self.agent.session_id = session_mod.new_id()
+            self.proto.send("cleared")
+            self.push_status()
+        self.push_sessions()
+        self.proto.send("note", level="notice", text="删掉了一段对话")
+
     def open_session(self, sid: str) -> None:
         if sid == self.agent.session_id:
             return
@@ -354,6 +371,8 @@ class Server:
             self.inbox.put(("new", ""))
         elif op == "open":
             self.inbox.put(("open", str(msg.get("id") or "")))
+        elif op == "delete":
+            self.inbox.put(("delete", str(msg.get("id") or "")))
         return True
 
     def run(self) -> int:
@@ -378,6 +397,8 @@ class Server:
                     self.new_session()
                 elif op == "open":
                     self.open_session(text)
+                elif op == "delete":
+                    self.delete_session(text)
                 elif op == "command" or text.startswith("/"):
                     self.run_command(text if text.startswith("/") else "/" + text)
                 else:

@@ -12,6 +12,7 @@ import threading
 import unittest
 
 from feiyu import events, serve, ui
+from pathlib import Path
 
 
 class Sink:
@@ -208,6 +209,74 @@ class TestReaderHardening(unittest.TestCase):
         # busy 是 False，扔了会落在没人接的地方，把整个服务带走
         self.server.busy = False
         self.assertTrue(self.feed('{"op":"interrupt"}'))
+
+
+class TestDeleteSession(unittest.TestCase):
+    """删对话 **删的是正在看的那段时，agent 也得归零** ——
+    盘上没了内存里还在的话，下一轮存盘会照着旧 id 写回去，等于没删。
+    """
+
+    class Agent:
+        def __init__(self, sid):
+            self.session_id = sid
+            self.reset_called = False
+            self.ready = True
+
+        def reset(self):
+            self.reset_called = True
+
+    def setUp(self):
+        import queue
+        import tempfile
+
+        from feiyu import session as session_mod
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._saved = session_mod.DIR
+        self.addCleanup(setattr, session_mod, "DIR", self._saved)
+        session_mod.DIR = str(Path(self.tmp.name) / "sessions")
+        self.ws = Path(self.tmp.name) / "ws"
+        self.dropped = []
+        # **换完要还回去。** 不还的话它跟着模块活到别的测试文件里，
+        # test_session 那几条删除用例会莫名其妙地挂 —— 真踩了一次。
+        self.addCleanup(setattr, session_mod, "drop", session_mod.drop)
+        session_mod.drop = lambda ws, sid: self.dropped.append(sid)
+
+        self.out = io.StringIO()
+        self.server = serve.Server.__new__(serve.Server)
+        self.server.workspace = self.ws
+        self.server.proto = serve.Protocol(self.out)
+        self.server.inbox = queue.Queue()
+        self.server.busy = False
+        # 状态那条要一整个 agent 才拼得出来，这儿测的是删的逻辑，换掉
+        self.server.push_status = lambda: None
+
+    def kinds(self):
+        return [json.loads(l)["kind"] for l in self.out.getvalue().splitlines() if l.strip()]
+
+    def test_删别的那段_不动_agent(self):
+        agent = self.Agent("20260101-000000")
+        self.server.agent = agent
+        self.server.delete_session("20251231-000000")
+        self.assertEqual(self.dropped, ["20251231-000000"])
+        self.assertFalse(agent.reset_called)
+        self.assertNotIn("cleared", self.kinds())
+        self.assertIn("sessions", self.kinds())
+
+    def test_删正在看的那段_要把_agent_归零并换新_id(self):
+        agent = self.Agent("20260101-000000")
+        self.server.agent = agent
+        self.server.delete_session("20260101-000000")
+        self.assertTrue(agent.reset_called)
+        self.assertNotEqual(agent.session_id, "20260101-000000")
+        self.assertIn("cleared", self.kinds())
+
+    def test_空_id_什么都不做(self):
+        self.server.agent = self.Agent("x")
+        self.server.delete_session("")
+        self.assertEqual(self.dropped, [])
+        self.assertEqual(self.kinds(), [])
 
 
 class TestPrivateDirs(unittest.TestCase):
