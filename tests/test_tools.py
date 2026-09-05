@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 
@@ -375,6 +376,23 @@ class TestWebGuards(Base):
     def test_公网地址放行(self):
         self.assertEqual(tools._blocked_host("example.com"), "")
 
+    def test_有一条公网记录就放行(self):
+        """DNS 被污染时公网域名会拿到一条内网记录 日志里 www.google.com 被拦过两次：
+        A 记录正常，AAAA 记录是 2001::1（Teredo 前缀，Python 算 is_private）
+        """
+        mixed = [(2, 1, 6, "", ("104.244.42.197", 0)), (10, 1, 6, "", ("2001::1", 0, 0, 0))]
+        with unittest.mock.patch.object(tools.socket, "getaddrinfo", return_value=mixed):
+            self.assertEqual(tools._blocked_host("www.example.com"), "")
+
+    def test_全是内网记录才拦(self):
+        allpriv = [(2, 1, 6, "", ("127.0.0.1", 0)), (10, 1, 6, "", ("::1", 0, 0, 0))]
+        with unittest.mock.patch.object(tools.socket, "getaddrinfo", return_value=allpriv):
+            self.assertTrue(tools._blocked_host("internal.example"))
+
+    def test_解析不出地址不拦(self):
+        with unittest.mock.patch.object(tools.socket, "getaddrinfo", return_value=[]):
+            self.assertEqual(tools._blocked_host("nothing.example"), "")
+
     def test_逃生门(self):
         os.environ["FEIYU_ALLOW_LOCAL_FETCH"] = "1"
         try:
@@ -391,6 +409,85 @@ class TestWebGuards(Base):
         out = self.box.run("web_fetch", {"url": "http://127.0.0.1:1/x"})
         self.assertTrue(out.is_error)
         self.assertIn("内网", out.summary)
+
+
+class TestFetchNote(Base):
+    def test_反爬和要登录给的是人话(self):
+        for code, word in ((401, "登录"), (403, "爬虫"), (429, "限流"), (404, "不存在")):
+            note = tools._fetch_note("HTTP %d" % code)
+            self.assertIn("web_search", note, code)
+            self.assertIn(word, note, code)
+
+    def test_认不出的状态码一个字不加(self):
+        # 跟 _sandbox_note 一个规矩：加错了比不加更误导
+        self.assertEqual(tools._fetch_note("HTTP 500"), "")
+        self.assertEqual(tools._fetch_note("抓取失败"), "")
+        self.assertEqual(tools._fetch_note("内网地址已拦"), "")
+
+
+class TestSearchUrlHint(Base):
+    def test_认得出手搓的搜索引擎地址(self):
+        for url in ("https://www.google.com/search?q=python+asyncio",
+                    "https://www.bing.com/search?q=x",
+                    "https://www.baidu.com/s?wd=x",
+                    "https://duckduckgo.com/?q=x"):
+            self.assertTrue(tools._is_search_url(url), url)
+
+    def test_引擎首页和普通站点不算(self):
+        for url in ("https://www.google.com/", "https://example.com/search?id=3",
+                    "https://news.ycombinator.com/"):
+            self.assertFalse(tools._is_search_url(url), url)
+
+    def test_抓搜索结果页会提示改用_web_search_且只提示一次(self):
+        # 真出网会慢也不稳，让 _fetch_page 直接返回失败：提示挂在失败那条路上
+        with unittest.mock.patch.object(
+                Toolbox, "_fetch_page", return_value=(None, "HTTP 403 Forbidden", "HTTP 403")):
+            first = self.box.run("web_fetch", {"url": "https://www.google.com/search?q=x"})
+            self.assertIn("web_search", first.content)
+            self.assertIn("反爬", first.content)          # 403 的说明也在
+            second = self.box.run("web_fetch", {"url": "https://www.bing.com/search?q=y"})
+            self.assertNotIn("别拿 web_fetch 抓引擎的结果页", second.content)
+
+
+class TestSymbolHint(Base):
+    def _search(self, regex, **extra):
+        return self.box.run("search", {"regex": regex, **extra})
+
+    def test_搜裸标识符会提示_symbol(self):
+        self.write("a.py", "def handle_timeout():\n    pass\n")
+        with unittest.mock.patch.object(tools.lsp, "server_for", return_value=["pyright"]):
+            out = self._search("handle_timeout")
+        self.assertIn("symbol", out.content)
+        self.assertIn("handle_timeout", out.content)
+
+    def test_只提示一次(self):
+        self.write("a.py", "def foo_bar():\n    pass\n")
+        with unittest.mock.patch.object(tools.lsp, "server_for", return_value=["pyright"]):
+            self._search("foo_bar")
+            out = self._search("foo_bar")
+        self.assertNotIn("symbol 工具", out.content)
+
+    def test_带正则记号的不提示(self):
+        """那是在搜文本，不是在找符号 """
+        self.write("a.py", "def foo():\n    pass\n")
+        with unittest.mock.patch.object(tools.lsp, "server_for", return_value=["pyright"]):
+            for regex in (r"def foo", r"foo\(", r"^foo", "fo"):
+                out = self._search(regex)
+                if not out.is_error and "无匹配" not in out.summary:
+                    self.assertNotIn("symbol 工具", out.content, regex)
+
+    def test_没有语言服务器就不提示(self):
+        self.write("a.txt", "handle_timeout\n")
+        with unittest.mock.patch.object(tools.lsp, "server_for", return_value=None):
+            out = self._search("handle_timeout")
+        self.assertNotIn("symbol 工具", out.content)
+
+    def test_从命中行里取路径只认匹配行(self):
+        # 带 context 时上下文行用 `-` 隔开，路径里本来也可能有 `-`
+        hits = ["my-file.py-11-    x = 1", "my-file.py:12:def foo():"]
+        self.assertEqual(tools._first_hit_path(hits, False), "my-file.py")
+        self.assertEqual(tools._first_hit_path(["a/b.py"], True), "a/b.py")
+        self.assertIsNone(tools._first_hit_path(["--"], False))
 
 
 class TestDocuments(Base):

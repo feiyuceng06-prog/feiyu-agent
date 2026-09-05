@@ -156,7 +156,7 @@ class TestConfinement(Base):
 
     def test_ssh_目录是空的(self):
         # 这条是查找命令，会附带"用 list_files"的提示，只看命令本身的输出
-        self.box.hinted = True
+        self.box.hinted.add("native")
         out = self.sh("ls -a ~/.ssh 2>/dev/null | grep -v '^\\.$' | grep -v '^\\.\\.$' | wc -l")
         self.assertEqual(out.content.strip().splitlines()[-1], "0")
 
