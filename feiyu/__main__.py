@@ -667,9 +667,10 @@ def _skills(agent: Feiyu, commands: dict, arg: str = "") -> str:
         for one in found:
             # 关掉的才标出来 —— 常态不占位置，异常才出现
             state = "" if enabled.on("skills", one.name) else "（已关）"
+            pack = "（包，%d 个附属文件）" % len(one.extras) if one.extras else ""
             rows.append("    " + ui.bold(ui.pad(one.name, 16))
                         + ui.paint("red" if state else "grey",
-                                   "%s%s · %s" % (state, one.description, one.source)))
+                                   "%s%s%s · %s" % (state, one.description, pack, one.source)))
     if commands:
         if rows:
             rows.append("")

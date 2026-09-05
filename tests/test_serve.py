@@ -547,3 +547,117 @@ class TestThinking(Base):
             stream._draw_status(0, None)
         self.assertIn("思考中", out.getvalue())
         self.assertNotIn("已经想了", out.getvalue())
+
+
+class TestNoTextOps(unittest.TestCase):
+    """不带正文的 op 不能被主循环那道"空的就跳过"的闸吃掉
+
+    那道闸是拦空 prompt 的。新加的 op 忘了登记就会**静默丢掉** ——
+    shift+tab 的 cycle_mode 就这么白做了一版：前端发得好好的，服务端一句话没说，
+    而两边的单测各自都是绿的（前端只验"发出去了"，后端根本没被调到）。
+    """
+
+    class Box(serve.Server):
+        def __init__(self):
+            self.inbox = queue.Queue()
+            self.busy = False
+            self.proto = serve.Protocol(io.StringIO())
+
+    def test_每个不带正文的_op_都登记了(self):
+        """反过来查：`_dispatch_in` 里凡是往 inbox 塞空正文的，都得在表里 """
+        box = self.Box()
+        for op in ("new", "cycle_mode"):
+            box.inbox = queue.Queue()
+            box._dispatch_in(json.dumps({"op": op}))
+            got_op, text = box.inbox.get_nowait()
+            self.assertEqual(got_op, op)
+            if not text.strip():
+                self.assertIn(op, serve.NO_TEXT_OPS, "%s 会被主循环静默丢掉" % op)
+
+    def test_带正文的_op_不在表里(self):
+        # 表里多塞东西会让空 prompt 也走下去
+        self.assertNotIn("prompt", serve.NO_TEXT_OPS)
+        self.assertNotIn("command", serve.NO_TEXT_OPS)
+
+
+class TestCommandBusy(unittest.TestCase):
+    """斜杠命令跑的时候要报 busy
+
+    `/review` 和 `/compact` 会真的调一次模型（十几秒起）。不报 busy 的话
+    桌面端秒表不转、停止键不出现，而那句"正在压缩…"只走 stderr ——
+    用户看到的就是点了一下什么都没发生。
+    """
+
+    class Box(serve.Server):
+        def __init__(self, out, boom=None):
+            self.busy = False
+            self.seen = []
+            self.commands = {}
+            self.boom = boom
+            self.proto = serve.Protocol(out)
+            self.agent = None
+
+        def push_status(self):
+            self.seen.append(self.busy)
+
+        def _dispatch(self, cli, head, rest):
+            self.seen.append("跑了:" + str(self.busy))
+            if self.boom:
+                raise self.boom
+
+    def test_跑的时候_busy_跑完清掉(self):
+        box = self.Box(io.StringIO())
+        box.run_command("/mode auto")
+        self.assertEqual(box.seen, [True, "跑了:True", False])
+
+    def test_命令抛异常也要把_busy_清掉(self):
+        """不清的话界面会永远停在"干活中"，而且下一次中断会落到没人接的地方 """
+        box = self.Box(io.StringIO(), boom=RuntimeError("炸了"))
+        with self.assertRaises(RuntimeError):
+            box.run_command("/review")
+        self.assertFalse(box.busy)
+
+
+class TestCommandPushes(unittest.TestCase):
+    """改了什么就推哪份清单
+
+    `/profile` 原来推的是 push_catalog（技能/工具/MCP），档案那一页照旧显示
+    切换前的状态。这类错编译器和单测都看不出来——两个方法名长得差不多，
+    推错了界面只是"没反应"。
+    """
+
+    class Box(serve.Server):
+        def __init__(self):
+            self.busy = False
+            self.commands = {}
+            self.pushed = []
+            self.proto = serve.Protocol(io.StringIO())
+            self.agent = None
+
+        def push_status(self): pass
+        def push_catalog(self): self.pushed.append("catalog")
+        def push_profiles(self): self.pushed.append("profiles")
+        def push_help(self): self.pushed.append("help")
+
+    def pushed_by(self, head, rest="", **fake):
+        import feiyu.__main__ as cli
+        box = self.Box()
+        before = {k: getattr(cli, k) for k in fake}
+        for k, v in fake.items():
+            setattr(cli, k, v)
+        try:
+            box._dispatch(cli, head, rest)
+        finally:
+            for k, v in before.items():
+                setattr(cli, k, v)
+        return box.pushed
+
+    def test_profile_推档案那份(self):
+        got = self.pushed_by("/profile", "甲", _profile=lambda a, r: "换好了")
+        self.assertIn("profiles", got)
+        self.assertNotIn("catalog", got)
+
+    def test_skills_推技能那份(self):
+        got = self.pushed_by("/skills", "甲", _skills=lambda a, c, r="": "列表")
+        self.assertIn("catalog", got)
+        self.assertNotIn("profiles", got)

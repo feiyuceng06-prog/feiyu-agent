@@ -1,6 +1,6 @@
 [package]
 name = "feiyu-desktop"
-version = "0.58.0"
+version = "0.59.0"
 edition = "2024"
 description = "feiyu 的桌面端：一个窗口，底下监管一个 feiyu --serve"
 license = "MIT"

@@ -342,6 +342,22 @@ Find out how $ARGUMENTS is implemented in this repo. Read only, change nothing.
 
 `/skills` lists what is available and where each came from. A project entry wins over a global one of the same name.
 
+**A skill can be a package.** One `.md` is one skill, and so is a directory containing a
+`SKILL.md`, which may sit next to companion files:
+
+```
+~/.config/feiyu/skills/
+├── release.md           ← one file, one skill
+└── teach/               ← one directory, one skill
+    ├── SKILL.md         ← the body
+    └── MISSION-FORMAT.md  ← a companion file, read on demand
+```
+
+Companion files **stay out of the body** — reading the body only lists their names, and it
+fetches the one it needs separately. Skill packages are usually distributed as a zip; drop it
+straight into `skills/` and it is unpacked automatically (the zip is kept, and an
+already-unpacked directory is never overwritten).
+
 **Project skills need your approval the first time**, and again whenever the directory's contents change — it decides on its own to load them, and a stretch of instructions that came down with a repo should not enter its context on `git clone`. **Project commands need no approval:** nothing happens until you type one, and typing one is the same as typing the text yourself.
 
 ## What it remembers

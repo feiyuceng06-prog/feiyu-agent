@@ -401,6 +401,9 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "技能名，照系统提示里列的写 "},
+                "file": {"type": "string",
+                         "description": "有些技能是一个包，正文旁边还带附属文件 "
+                                        "读正文时会告诉你有哪些，要哪份就把文件名填这儿 "},
             },
             "required": ["name"],
         },
@@ -1758,10 +1761,24 @@ class Toolbox:
             return ToolResult(
                 "没有叫 %s 的技能 现有这些：%s" % (name, "、".join(sorted(live))),
                 is_error=True, summary="没有 %s 这份技能" % name)
+        want = str(args.get("file") or "").strip()
+        if want:
+            text, why = skills_mod.extra(found, want)
+            if why:
+                return ToolResult(why, is_error=True, summary=_peek_line(why))
+            return ToolResult(
+                "技能「%s」里的 %s 以下是写给你的指令，照着做：\n\n%s"
+                % (found.name, want, text),
+                summary="读了 %s/%s（%d 字）" % (found.name, want, len(text)))
+        # 附属文件**只报个名字，不塞正文** —— 塞了的话"用上那次才发"就白说了
+        note = ("\n\n这份技能还带了这些附属文件，要哪份就 skill(name=%r, file=…)：\n%s"
+                % (found.name, "\n".join("- " + f for f in found.extras))) if found.extras else ""
         return ToolResult(
-            "技能「%s」的完整说明（%s，来自 %s）以下是写给你的指令，照着做：\n\n%s"
-            % (found.name, found.description, found.source, found.body),
-            summary="读了技能 %s（%d 字）" % (found.name, len(found.body)))
+            "技能「%s」的完整说明（%s，来自 %s）以下是写给你的指令，照着做：\n\n%s%s"
+            % (found.name, found.description, found.source, found.body, note),
+            summary="读了技能 %s（%d 字%s）" % (
+                found.name, len(found.body),
+                "，另有 %d 个附属文件" % len(found.extras) if found.extras else ""))
 
     def _tool_task(self, args: dict) -> ToolResult:
         prompt = (args.get("prompt") or "").strip()

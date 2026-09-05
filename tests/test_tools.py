@@ -274,7 +274,9 @@ class TestListCap(Base):
         self.assertEqual(out.content.splitlines(), ["a.py"])
         self.assertFalse([d for d in visited if ".venv" in d], "进了 .venv")
 
-    def test_到上限就停(self):
+    def test_上限改小也照样停(self):
+        """**名字不能跟上面那条重**：同名的话后定义的会把先定义的整个盖掉，
+        那条里"截断必须标出来"的断言就一次都没跑过（ruff F811 抓出来的）"""
         self.addCleanup(setattr, tools, "LIST_CAP", tools.LIST_CAP)
         tools.LIST_CAP = 5
         for i in range(60):

@@ -72,8 +72,17 @@ def _path(name: str) -> str:
     return os.path.join(DIR, name + ".md")
 
 
-def _parse(text: str, fallback: str) -> Profile:
-    name, description, body = skills.parse(text, fallback)
+def _parse(text: str, stem: str) -> Profile:
+    """**名字一律用文件名，frontmatter 里的 `name` 只当注释。**
+
+    `skills.parse` 是认 frontmatter 那个 name 的（技能按名字调，无所谓文件叫什么），
+    档案不行：切换、保存、删除全都按文件找。两个来源不一致的话，
+    `我的档案.md` 里写 `name: 严厉评审` 会让面板上出现一行叫「严厉评审」的档案，
+    而它**删不掉也存不对**（remove 去删 `严厉评审.md`，那个文件不存在）——
+    跟 0.56.1 那条删不掉的会话是同一类错：一个东西有两个名字来源。
+    """
+    _, description, body = skills.parse(text, stem)
+    name = stem
     model = ""
     front = skills._FRONT.match(text)
     if front:
@@ -81,7 +90,7 @@ def _parse(text: str, fallback: str) -> Profile:
             field = skills._FIELD.match(line)
             if field and field.group(1).lower() == "model":
                 model = field.group(2).strip().strip("\"'")
-    return Profile(name, description, body[:MAX_BODY], model, _path(fallback))
+    return Profile(name, description, body[:MAX_BODY], model, _path(stem))
 
 
 def load() -> list[Profile]:

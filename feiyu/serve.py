@@ -46,6 +46,10 @@ REPLY_TIMEOUT = 600.0
 # 一条消息最多这么长 正常的一句话几百字，几十万字的只可能是坏掉的客户端
 MAX_TEXT = 200_000
 
+# 本来就不带正文的那几个 op 主循环有一道"空的就跳过"的闸（拦空 prompt 用的），
+# 不列在这儿的话它们会被静默丢掉，前端那边看着像没接上
+NO_TEXT_OPS = {"new", "cycle_mode"}
+
 # 终端有、网页端**刻意不给**的命令，连同理由 —— 这份表同时用来
 # 1) 从补全菜单里剔掉它们（不该提供你不打算执行的东西）
 # 2) 用户硬打进来时给一句人话，而不是一句「未知命令」
@@ -242,7 +246,8 @@ class Server:
         cfg = tools_mod.image_config()
         has_image = bool(cfg.get("base_url") and cfg.get("key"))
         skills = [{"name": s.name, "description": s.description, "source": s.source,
-                   "path": s.path, "chars": len(s.body), "on": enabled.on("skills", s.name)}
+                   "path": s.folder or s.path, "chars": len(s.body),
+                   "extras": list(s.extras), "on": enabled.on("skills", s.name)}
                   for s in sorted(box.skills.values(), key=lambda s: s.name)]
         tools = []
         for spec in tools_mod.TOOL_SCHEMAS:
@@ -371,10 +376,18 @@ class Server:
         if custom is not None:
             self.handle_prompt(skills_mod.expand(custom, rest))
             return
-        agent = self.agent
-        # 下面这些 cli 函数内部就是拿 ui.notice() 拼的，不挡住会报两遍
-        with events.paused():
-            self._dispatch(cli, head, rest)
+        # **要置 busy。** `/review` 和 `/compact` 会真的调一次模型（十几秒起），
+        # 不置的话界面上秒表不转、停止键不出现、那句"正在压缩…"又只在 stderr ——
+        # 用户看到的就是点了一下什么都没发生。置了之后 esc 也能打断它
+        # （run_command 跑在主线程上，interrupt_main 正好落在这儿）。
+        self.busy = True
+        self.push_status()
+        try:
+            # 下面这些 cli 函数内部就是拿 ui.notice() 拼的，不挡住会报两遍
+            with events.paused():
+                self._dispatch(cli, head, rest)
+        finally:
+            self.busy = False
         self.push_status()
 
     def _dispatch(self, cli, head: str, rest: str) -> None:
@@ -388,7 +401,9 @@ class Server:
             self.proto.send("note", level="notice", text="对话历史已清空，存盘也删了")
         elif head == "/profile":
             self.proto.send("note", level="notice", text=_plain(cli._profile(agent, rest)))
-            self.push_catalog()
+            # **是 push_profiles 不是 push_catalog** —— 后者推的是技能/工具/MCP，
+            # 档案那一页照旧显示切换前的状态（写错过一次）
+            self.push_profiles()
         elif head == "/mode":
             self.proto.send("note", level="notice", text=_plain(cli._mode(agent, rest)))
         elif head == "/model":
@@ -547,7 +562,10 @@ class Server:
                 return 0
             if op == "stop":
                 return 0
-            if not text.strip() and op != "new":
+            # **不带正文的 op 要列在这儿。** 这道闸是拦"空 prompt"的，
+            # 漏了的话新加的 op 会被**静默丢掉** —— shift+tab 那个 cycle_mode
+            # 就这么白做了一版：前端发得好好的，服务端一句话没说。
+            if not text.strip() and op not in NO_TEXT_OPS:
                 continue
             try:
                 # 换会话要在主线程做：它动 agent 的历史，跟跑一轮是同一份状态

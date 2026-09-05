@@ -410,6 +410,58 @@ if (souls.rows.length < 3 || souls.switches !== 0 || !souls.soul || souls.acts.l
   console.log(`档案 ${souls.rows.length - 1} 份，正文取回来了，按钮 ${souls.acts.join("/")}`);
 }
 
+/* 档案的增删改：新建 → 改正文 → 存 → 删。**这条只能在 DOM 里验** ——
+   面板那几个动作各自要发对 op、发对名字，而"存到了另一个文件上"这种错
+   单测看不出来（清单和详情用的是同一个名字来源才行）。 */
+await cdp.eval(`document.querySelector(".shelf__row--new").click(); true`);
+await sleep(200);
+await cdp.eval(`(() => {
+  const box = document.querySelector(".newname");
+  box.value = "夹具新建的";
+  box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+})(); true`);
+await sleep(700);
+const born = JSON.parse(await cdp.eval(`JSON.stringify({
+  rows: [...document.querySelectorAll("#shelf-list .shelf__name")].map((e) => e.textContent),
+  pane: (document.querySelector("#shelf-pane h2") || {}).textContent || "",
+})`));
+if (!born.rows.includes("夹具新建的") || born.pane !== "夹具新建的") {
+  console.error("新建档案不对：", JSON.stringify(born));
+  process.exitCode = 1;
+} else {
+  console.log("新建档案，详情栏跟着跳过去了");
+}
+
+await cdp.eval(`(() => {
+  const box = document.querySelector(".soul");
+  box.value = "夹具改过的人格";
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  [...document.querySelectorAll(".acts .act")].find((b) => b.textContent === "保存").click();
+})(); true`);
+await sleep(800);
+const saved = await cdp.eval(`(document.querySelector(".soul") || {}).value || ""`);
+if (saved !== "夹具改过的人格") {
+  console.error("存完读回来的不是刚存的：", JSON.stringify(saved));
+  process.exitCode = 1;
+} else {
+  console.log("改正文存得回去、读得回来");
+}
+
+// 删：第一下是"真的删掉？"，第二下才删 —— 真数据值得问一句
+await cdp.eval(`[...document.querySelectorAll(".acts .act")].find((b) => b.textContent === "删掉").click(); true`);
+await sleep(200);
+const asking = await cdp.eval(`[...document.querySelectorAll(".acts .act")].some((b) => b.textContent === "真的删掉？")`);
+await cdp.eval(`[...document.querySelectorAll(".acts .act")].find((b) => b.textContent === "真的删掉？").click(); true`);
+await sleep(800);
+const left = JSON.parse(await cdp.eval(
+  `JSON.stringify([...document.querySelectorAll("#shelf-list .shelf__name")].map((e) => e.textContent))`));
+if (!asking || left.includes("夹具新建的")) {
+  console.error("删档案不对（该先问一句、再真删）：", asking, JSON.stringify(left));
+  process.exitCode = 1;
+} else {
+  console.log("删档案：先问一句，再真删掉");
+}
+
 // esc 退回对话 —— 面板开着时它不该是"打断这一轮"
 await cdp.eval(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true`);
 await sleep(300);

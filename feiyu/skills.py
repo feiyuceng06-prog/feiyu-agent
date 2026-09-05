@@ -33,6 +33,7 @@ clone 一个仓库，里面的技能就能往它的上下文里塞指令，跟�
 import hashlib
 import os
 import re
+import zipfile
 
 from . import files
 
@@ -49,6 +50,13 @@ PROJECT_COMMANDS = os.path.join(".feiyu", "commands")
 MAX_BODY = 12000
 # 目录行里的用途截多长 目录是每轮都发的，这里省的是真金白银
 MAX_DESC = 120
+# 包形式的技能里，哪个文件是正文 跟 Anthropic 那套技能包一致
+MAIN = "SKILL.md"
+# 一个包最多认几个附属文件（目录行里不列，只在 /skills 和面板上显示）
+MAX_EXTRAS = 40
+# 解 zip 的两道闸：成员个数和解压后的总大小
+MAX_ZIP_FILES = 200
+MAX_ZIP_BYTES = 4 * 1024 * 1024
 # 名字只认这些字符：它要当斜杠命令用（不能带空格和斜杠），也要当工具参数传
 # `\w` 在 Python 里是认 Unicode 的，中文名字照用——这个项目的技能多半是中文写的
 NAME_OK = re.compile(r"^[\w-]{1,40}$")
@@ -58,12 +66,16 @@ _FIELD = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:[ \t]*(.*?)[ \t]*$")
 
 
 class Skill:
-    def __init__(self, name: str, description: str, body: str, source: str, path: str):
+    def __init__(self, name: str, description: str, body: str, source: str, path: str,
+                 folder: str = "", extras: tuple[str, ...] = ()):
         self.name = name
         self.description = description
         self.body = body
         self.source = source      # 给 /skills 显示这条是哪来的
         self.path = path
+        # 包形式的技能：一个目录，SKILL.md 是正文，旁边那些是按需读的附属文件
+        self.folder = folder
+        self.extras = extras
 
     def __repr__(self):
         return "Skill(%r, %r)" % (self.name, self.source)
@@ -102,27 +114,122 @@ def parse(text: str, fallback: str) -> tuple[str, str, str]:
     return name, " ".join(description.split())[:MAX_DESC], body[:MAX_BODY]
 
 
+def _read_one(path: str, fallback: str, source: str, *,
+              folder: str = "", extras: tuple[str, ...] = ()) -> Skill | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    name, description, body = parse(text, fallback)
+    if not body or not NAME_OK.match(name):
+        return None
+    return Skill(name, description, body, source, path, folder, extras)
+
+
+def _package(folder: str, source: str) -> Skill | None:
+    """一个目录 + 里面的 SKILL.md 就是一份"包形式"的技能
+
+    这是 Anthropic 那套技能包的布局：`技能名/SKILL.md` 是正文，旁边那些
+    `XXX-FORMAT.md` 之类是**按需**读的附属文件。正文照旧只进一次上下文，
+    附属文件走 `skill(name, file=...)` 单独取 —— 全塞进正文的话，
+    "不用的时候只占一行目录"那个好处就没了。
+    """
+    main = os.path.join(folder, MAIN)
+    if not os.path.isfile(main):
+        return None
+    extras = []
+    for here, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for one in sorted(names):
+            rel = os.path.relpath(os.path.join(here, one), folder)
+            if rel != MAIN and not one.startswith("."):
+                extras.append(rel.replace(os.sep, "/"))
+    return _read_one(main, os.path.basename(folder), source,
+                     folder=folder, extras=tuple(sorted(extras)[:MAX_EXTRAS]))
+
+
 def _read_dir(folder: str, source: str) -> list[Skill]:
-    """读一个目录下所有 .md 名字不合法或正文是空的直接跳过，不报错也不半死不活 """
+    """一个目录下的技能 两种形式都认：
+
+    - 一个 `.md` 就是一份（原来的形式，改完照旧能用）
+    - 一个目录里放 `SKILL.md` 就是一份"包"，旁边可以带附属文件
+
+    名字不合法或正文是空的直接跳过，不报错也不半死不活。
+    """
+    _unpack_zips(folder)
     try:
         names = sorted(os.listdir(folder))
     except OSError:
         return []
     found = []
     for entry in names:
+        path = os.path.join(folder, entry)
+        if os.path.isdir(path):
+            one = _package(path, source)
+            if one is not None:
+                found.append(one)
+            continue
         if not entry.endswith(".md"):
             continue
-        path = os.path.join(folder, entry)
-        try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read()
-        except (OSError, UnicodeDecodeError):
-            continue
-        name, description, body = parse(text, entry[:-3])
-        if not body or not NAME_OK.match(name):
-            continue
-        found.append(Skill(name, description, body, source, path))
+        one = _read_one(path, entry[:-3], source)
+        if one is not None:
+            found.append(one)
     return found
+
+
+def _unpack_zips(folder: str) -> list[str]:
+    """把丢进来的 `.zip` 就地解开成目录 返回解开了哪几个
+
+    技能包在网上多半是以 zip 分发的，丢进 `skills/` 就该能用 ——
+    "先自己 unzip 一下"是个没必要的台阶。解完 **zip 原样留着**，
+    不删用户的文件；下次看到目录已经在就不再解。
+
+    解压是有名的一类洞（zip slip：成员名写 `../../.bashrc` 就写到目录外面去了），
+    所以每个成员都要**先算出绝对路径再确认它落在目标目录里**，
+    另外挡掉软链、限制个数和总大小。
+    """
+    done = []
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return done
+    for entry in names:
+        if not entry.endswith(".zip"):
+            continue
+        stem = entry[:-4]
+        target = os.path.join(folder, stem)
+        if os.path.exists(target):
+            continue                      # 解过了，别覆盖用户后来改的东西
+        try:
+            with zipfile.ZipFile(os.path.join(folder, entry)) as bundle:
+                rows = bundle.infolist()
+                if len(rows) > MAX_ZIP_FILES:
+                    continue
+                if sum(r.file_size for r in rows) > MAX_ZIP_BYTES:
+                    continue
+                root = os.path.realpath(target)
+                for row in rows:
+                    # 包里常常是 `技能名/SKILL.md` 这种带一层壳的，剥掉那一层
+                    inner = row.filename.replace("\\", "/")
+                    parts = [p for p in inner.split("/") if p not in ("", ".")]
+                    if parts and parts[0] == stem:
+                        parts = parts[1:]
+                    if not parts or any(p == ".." for p in parts):
+                        continue
+                    where = os.path.realpath(os.path.join(root, *parts))
+                    if where != root and not where.startswith(root + os.sep):
+                        continue          # zip slip，扔掉
+                    if row.is_dir():
+                        os.makedirs(where, exist_ok=True)
+                        continue
+                    os.makedirs(os.path.dirname(where), exist_ok=True)
+                    with bundle.open(row) as src, open(where, "wb") as out:
+                        out.write(src.read(MAX_ZIP_BYTES))
+            done.append(stem)
+        except (OSError, zipfile.BadZipFile, ValueError):
+            continue
+    return done
 
 
 def _merge(base: list[Skill], extra: list[Skill]) -> list[Skill]:
@@ -133,18 +240,28 @@ def _merge(base: list[Skill], extra: list[Skill]) -> list[Skill]:
 
 
 def digest(folder: str) -> str:
-    """整个目录的内容指纹 加了一份、删了一份、改了一个字都要变 """
+    """整个目录的内容指纹 加了一份、删了一份、改了一个字都要变
+
+    **必须连子目录一起摘。** 包形式的技能正文在 `技能名/SKILL.md` 里，
+    只摘顶层的话，项目技能同意过一次之后，包里的内容随便改都不会重新问 ——
+    那这道信任闸就白设了。
+    """
     h = hashlib.sha256()
+    rows = []
     try:
-        names = sorted(os.listdir(folder))
+        for here, dirs, names in os.walk(folder):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for one in names:
+                if one.endswith(".md"):
+                    rows.append(os.path.join(here, one))
     except OSError:
         return ""
-    for entry in names:
-        if not entry.endswith(".md"):
-            continue
-        h.update(entry.encode("utf-8"))
+    if not rows:
+        return ""
+    for path in sorted(rows):
+        h.update(os.path.relpath(path, folder).replace(os.sep, "/").encode("utf-8"))
         try:
-            with open(os.path.join(folder, entry), "rb") as f:
+            with open(path, "rb") as f:
                 h.update(f.read())
         except OSError:
             continue
@@ -170,6 +287,32 @@ def trust(workspace, fingerprint: str) -> None:
             json.dump(data, f, ensure_ascii=False, indent=1)
     except OSError:
         pass
+
+
+def extra(one: Skill, name: str) -> tuple[str, str]:
+    """读一份技能包里的附属文件 返回 (正文, 出错说明)，两者只有一个非空
+
+    **路径必须落在这个包自己的目录里**：名字是模型给的，而模型会读网页、
+    会照着技能正文里写的东西走 —— 一个 `../../../.ssh/id_rsa` 就能把
+    "读一份说明书"变成"读任意文件"。跟桌面端那个 pathguard 是同一条规矩。
+    """
+    if not one.folder:
+        return "", "技能「%s」不是包形式的，没有附属文件（它就一个 .md）" % one.name
+    want = (name or "").strip().replace("\\", "/")
+    if not want:
+        return "", "没写要读哪个文件"
+    root = os.path.realpath(one.folder)
+    where = os.path.realpath(os.path.join(root, want))
+    if where != root and not where.startswith(root + os.sep):
+        return "", "只能读这份技能包里的文件"
+    if os.path.relpath(where, root).replace(os.sep, "/") not in one.extras:
+        return "", "技能「%s」里没有 %s 这个文件 有这些：%s" % (
+            one.name, want, "、".join(one.extras) or "（没有附属文件）")
+    try:
+        with open(where, encoding="utf-8") as f:
+            return f.read()[:MAX_BODY], ""
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", "读不了 %s：%s" % (want, exc)
 
 
 def project_state(workspace) -> tuple[str, str, str]:

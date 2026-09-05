@@ -227,3 +227,148 @@ class TestPermissions(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PACK = """---
+name: 教书
+description: 教一门东西，分多次上课
+---
+
+正文在这儿。附属文件按需读。
+"""
+
+
+class TestPackage(Base):
+    """包形式：一个目录 + SKILL.md，旁边可以带附属文件
+
+    附属文件**不进正文**——那样"不用的时候只占一行目录"就白说了，
+    要哪份走 skill(name, file=…) 单独取。
+    """
+
+    def pack(self, folder, main=PACK, extras=(), kind="skills"):
+        base = Path(self.home.name) / kind / folder
+        base.mkdir(parents=True, exist_ok=True)
+        (base / skills.MAIN).write_text(main, encoding="utf-8")
+        for name, text in extras:
+            one = base / name
+            one.parent.mkdir(parents=True, exist_ok=True)
+            one.write_text(text, encoding="utf-8")
+        return base
+
+    def test_目录里的_SKILL_md_算一份技能(self):
+        self.pack("教", extras=[("A-FORMAT.md", "甲"), ("B-FORMAT.md", "乙")])
+        found = skills.load_skills(self.ws)[0]
+        self.assertEqual([s.name for s in found], ["教书"])
+        self.assertEqual(found[0].extras, ("A-FORMAT.md", "B-FORMAT.md"))
+        self.assertIn("正文在这儿", found[0].body)
+
+    def test_附属文件不进正文(self):
+        self.pack("教", extras=[("A-FORMAT.md", "这句不该出现在正文里")])
+        found = skills.load_skills(self.ws)[0][0]
+        self.assertNotIn("这句不该出现在正文里", found.body)
+
+    def test_没有_SKILL_md_的目录不算(self):
+        base = Path(self.home.name) / "skills" / "只是个目录"
+        base.mkdir(parents=True)
+        (base / "随便.md").write_text("x", encoding="utf-8")
+        self.assertEqual(skills.load_skills(self.ws)[0], [])
+
+    def test_单文件那种照旧能用(self):
+        self.write_global("发版.md", FULL)
+        self.pack("教")
+        names = sorted(s.name for s in skills.load_skills(self.ws)[0])
+        self.assertEqual(names, ["发版", "教书"])
+
+    def test_读附属文件(self):
+        self.pack("教", extras=[("A-FORMAT.md", "甲的内容")])
+        one = skills.load_skills(self.ws)[0][0]
+        text, why = skills.extra(one, "A-FORMAT.md")
+        self.assertEqual(why, "")
+        self.assertIn("甲的内容", text)
+
+    def test_附属文件不许跑出这个包(self):
+        """名字是模型给的，而模型会读网页、会照着技能正文里写的走 """
+        self.pack("教", extras=[("A-FORMAT.md", "甲")])
+        one = skills.load_skills(self.ws)[0][0]
+        outside = Path(self.home.name) / "偷看.md"
+        outside.write_text("秘密", encoding="utf-8")
+        for bad in ("../偷看.md", "../../偷看.md", "/etc/passwd", "", "没这个.md"):
+            text, why = skills.extra(one, bad)
+            self.assertEqual(text, "", bad)
+            self.assertTrue(why, bad)
+
+    def test_单文件的技能没有附属文件(self):
+        self.write_global("发版.md", FULL)
+        one = skills.load_skills(self.ws)[0][0]
+        text, why = skills.extra(one, "A.md")
+        self.assertEqual(text, "")
+        self.assertIn("不是包形式", why)
+
+
+class TestZip(Base):
+    """丢一个 zip 进来就该能用 —— "先自己 unzip 一下"是个没必要的台阶 """
+
+    def put_zip(self, name, members):
+        import io
+        import zipfile
+        folder = Path(self.home.name) / "skills"
+        folder.mkdir(parents=True, exist_ok=True)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for inner, text in members:
+                z.writestr(inner, text)
+        (folder / name).write_bytes(buf.getvalue())
+
+    def test_丢个_zip_进来自动解开(self):
+        self.put_zip("教.zip", [("教/SKILL.md", PACK), ("教/A-FORMAT.md", "甲")])
+        found = skills.load_skills(self.ws)[0]
+        self.assertEqual([s.name for s in found], ["教书"])
+        self.assertEqual(found[0].extras, ("A-FORMAT.md",))
+        # zip 原样留着，不删用户的文件
+        self.assertTrue((Path(self.home.name) / "skills" / "教.zip").exists())
+
+    def test_解过一次就不再解_不覆盖你后来改的(self):
+        self.put_zip("教.zip", [("教/SKILL.md", PACK)])
+        skills.load_skills(self.ws)
+        main = Path(self.home.name) / "skills" / "教" / skills.MAIN
+        main.write_text(PACK.replace("正文在这儿", "我自己改过了"), encoding="utf-8")
+        skills.load_skills(self.ws)
+        self.assertIn("我自己改过了", main.read_text(encoding="utf-8"))
+
+    def test_zip_slip_写不出去(self):
+        """成员名写 ../ 的话能写到目录外面去 —— 有名的一类洞 """
+        self.put_zip("坏.zip", [("../../跑出去了.md", "x"), ("坏/SKILL.md", PACK)])
+        skills.load_skills(self.ws)
+        self.assertFalse((Path(self.home.name).parent / "跑出去了.md").exists())
+        self.assertFalse((Path(self.home.name) / "跑出去了.md").exists())
+
+    def test_坏掉的_zip_不影响别的技能(self):
+        (Path(self.home.name) / "skills").mkdir(parents=True, exist_ok=True)
+        (Path(self.home.name) / "skills" / "坏.zip").write_bytes("这不是 zip".encode("utf-8"))
+        self.write_global("发版.md", FULL)
+        self.assertEqual([s.name for s in skills.load_skills(self.ws)[0]], ["发版"])
+
+
+class TestPackageDigest(Base):
+    """指纹必须连子目录一起摘
+
+    只摘顶层的话，项目技能同意过一次之后，包里的内容随便改都不会重新问 ——
+    那这道信任闸就白设了。
+    """
+
+    def test_改包里的正文要重新问(self):
+        base = self.ws / ".feiyu" / "skills" / "教"
+        base.mkdir(parents=True)
+        (base / skills.MAIN).write_text(PACK, encoding="utf-8")
+        first = skills.digest(str(self.ws / ".feiyu" / "skills"))
+        self.assertTrue(first)
+        (base / skills.MAIN).write_text(PACK + "\n偷偷加一句", encoding="utf-8")
+        self.assertNotEqual(skills.digest(str(self.ws / ".feiyu" / "skills")), first)
+
+    def test_加一个附属文件也要重新问(self):
+        base = self.ws / ".feiyu" / "skills" / "教"
+        base.mkdir(parents=True)
+        (base / skills.MAIN).write_text(PACK, encoding="utf-8")
+        first = skills.digest(str(self.ws / ".feiyu" / "skills"))
+        (base / "新的.md").write_text("塞点东西", encoding="utf-8")
+        self.assertNotEqual(skills.digest(str(self.ws / ".feiyu" / "skills")), first)

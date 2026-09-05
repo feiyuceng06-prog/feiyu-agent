@@ -872,7 +872,10 @@ function emptyWord(tab) {
 }
 
 function rowMeta(row) {
-  if (shelf.tab === "skills") return row.source || "";
+  if (shelf.tab === "skills") {
+    const pack = (row.extras || []).length;
+    return pack ? `${row.source} · 包（${pack} 个附属文件）` : (row.source || "");
+  }
   if (shelf.tab === "profiles") return (row.on ? "在用 · " : "") + (row.model || "跟随当前模型");
   if (shelf.tab === "mcp") return row.error ? "起不来" : (row.tools.length + " 个工具");
   // 锁住的那个在清单上就得说明白，不然人会去点那个灰开关然后以为是坏的
@@ -917,6 +920,8 @@ function drawShelfPane(row) {
     put("来自", row.source);
     put("文件", row.path);
     put("正文", row.chars + " 字");
+    // 包形式的技能：附属文件是**按需**读的，这儿只列名字
+    put("附属文件", (row.extras || []).join("、"));
   } else if (shelf.tab === "tools") {
     put("规则名", row.label);
     put("参数", (row.args || []).join("、"));

@@ -1217,7 +1217,8 @@ class Feiyu:
                 for call, blocked in approved
             ]
             # 按调用顺序取结果：任务本身是并发跑的，这里只是让输出有个定序
-            for (call, blocked), (_, future) in zip(approved, futures):
+            # strict：两串本来就一一对应，长度对不上就是上面拼错了，早点炸出来
+            for (call, blocked), (_, future) in zip(approved, futures, strict=True):
                 if blocked:
                     target = ui.tool_target(call.name, call.input)
                     print(ui.tool_result(
