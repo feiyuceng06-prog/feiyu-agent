@@ -253,3 +253,52 @@ class TestKeys(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLegacyId(Base):
+    """`legacy` 是个**读旧位置的别名**，不能同时又是一个真的文件名
+
+    两边不对称的后果是一行删不掉的会话：listing 从新目录里扫出 legacy.json、
+    给它 id `legacy`，而 drop 见到这个 id 只去删旧位置那份 —— 删不掉，
+    界面却照样回一句「删掉了一段对话」。用户拿截图来问过。
+    """
+
+    def agent(self):
+        b = FakeBackend([])
+        b.messages += [{"role": "user", "content": "你好"},
+                       {"role": "assistant", "content": "在"}]
+        return Agentish(b)
+
+    def test_存不出_legacy_json(self):
+        session.save(self.ws, self.agent(), session.LEGACY)
+        self.assertFalse(os.path.exists(session._path(self.ws, session.LEGACY)))
+        self.assertTrue(os.path.exists(session._legacy_path(self.ws)))
+        # 照样列得出来、读得回来
+        self.assertEqual([r["id"] for r in session.listing(self.ws)], [session.LEGACY])
+        self.assertTrue(session.load(self.ws, session.LEGACY))
+
+    def test_旧版留下的_legacy_json_删得掉(self):
+        """0.55.0 以前的 save 会往新目录里写 legacy.json，那份也得删得掉 """
+        os.makedirs(session.folder(self.ws), exist_ok=True)
+        with open(session._path(self.ws, session.LEGACY), "w", encoding="utf-8") as f:
+            json.dump({"messages": [{"role": "user", "content": "你好"}], "saved_at": 1}, f)
+        self.assertEqual([r["id"] for r in session.listing(self.ws)], [session.LEGACY])
+        session.drop(self.ws, session.LEGACY)
+        self.assertEqual(session.listing(self.ws), [])
+
+    def test_两个位置都有的时候一起删(self):
+        os.makedirs(session.folder(self.ws), exist_ok=True)
+        for path in (session._path(self.ws, session.LEGACY), session._legacy_path(self.ws)):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"messages": [{"role": "user", "content": "x"}], "saved_at": 1}, f)
+        session.drop(self.ws, session.LEGACY)
+        self.assertEqual(session.listing(self.ws), [])
+
+    def test_删别的不碰旧位置那份(self):
+        os.makedirs(session.folder(self.ws), exist_ok=True)
+        with open(session._legacy_path(self.ws), "w", encoding="utf-8") as f:
+            json.dump({"messages": [{"role": "user", "content": "x"}], "saved_at": 1}, f)
+        with open(session._path(self.ws, "20260101-000000"), "w", encoding="utf-8") as f:
+            json.dump({"messages": [{"role": "user", "content": "y"}], "saved_at": 2}, f)
+        session.drop(self.ws, "20260101-000000")
+        self.assertEqual([r["id"] for r in session.listing(self.ws)], [session.LEGACY])

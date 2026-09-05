@@ -56,8 +56,10 @@ const KEYS = {
   Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
 };
 
-async function key(name) {
-  const spec = KEYS[name];
+async function key(name, mods = {}) {
+  const spec = { ...KEYS[name] };
+  // CDP 的修饰键是个位掩码：1 alt / 2 ctrl / 4 meta / 8 shift
+  if (mods.shift) spec.modifiers = (spec.modifiers || 0) | 8;
   await call("Input.dispatchKeyEvent", { type: "keyDown", ...spec });
   await call("Input.dispatchKeyEvent", { type: "keyUp", ...spec });
   await sleep(120);
@@ -149,7 +151,8 @@ check("/mo 筛出 /model 和 /mode",
 // 3. Tab 补上高亮那条
 await key("Tab");
 s = await state();
-check("Tab 补全并关掉菜单", s.value.startsWith("/mod") && s.value.endsWith(" ") && !s.palette, s);
+// 补完命令名接着开参数菜单（这条命令有参数的话），省一次回车
+check("Tab 补全命令名", s.value.startsWith("/mod") && s.value.endsWith(" "), s);
 
 // 3b. **打全了再按 Tab，不该被补成别的命令**（/mode 不能变成 /model）
 await reset();
@@ -164,7 +167,9 @@ check("/mode + Tab 还是 /mode", s.value === "/mode ", s);
 await reset();
 await type("/mode auto");
 s = await state();
-check("打了参数之后菜单应当收起", !s.palette, s);
+// **打了参数菜单不该收起，该接着补参数** —— 0.56.x 之前一见空格就收，
+// 于是 `/mode ` 之后你得自己记住有哪四档（用户拿截图来问过）
+check("打了参数还在补参数", s.palette && s.items.every(i => "auto".startsWith(i) || i === "auto"), s);
 await key("Enter");
 s = await state();
 const sent = s.sent.map((x) => { try { return JSON.parse(x); } catch { return {}; } });
@@ -221,7 +226,7 @@ await key("ArrowDown");
 const wanted = (await state()).selected;
 await key("Enter");
 s = await state();
-check("挑过之后回车是补全，不是发送", s.value === wanted + " " && !s.palette, { s, wanted });
+check("挑过之后回车是补全，不是发送", s.value === wanted + " ", { s, wanted });
 
 // 8c. 改了字之后「挑过」要作废，回车重新变回发送
 await reset();
@@ -441,6 +446,58 @@ const shell = JSON.parse(await ev(`JSON.stringify({
 })`));
 check("标题栏在", shell.bar, shell);
 
+/* 命令补全那块。三条都是用户拿截图来问的：
+   ↑↓ 走到看不见的地方（菜单最高 16rem，命令十几条）；
+   `/命令 空格` 之后没有子选项；shift+tab 在桌面端没反应。 */
+await reset();
+await ev(`commands = [{name:"/help",about:"a"},{name:"/model",about:"b"},
+  {name:"/style",about:"c"},{name:"/mode",about:"d"},{name:"/allow",about:"e"},
+  {name:"/verify",about:"f"},{name:"/review",about:"g"},{name:"/cost",about:"h"},
+  {name:"/compact",about:"i"},{name:"/clear",about:"j"},{name:"/undo",about:"k"},
+  {name:"/jobs",about:"l"},{name:"/memory",about:"m"},{name:"/skills",about:"n"}];
+  cmdArgs = {"/mode":["default","auto","plan","readonly"],
+             "/model":["kimi-k2.6","deepseek-v4-pro"]};
+  input.value = "/"; input.dispatchEvent(new Event("input")); true`);
+await sleep(200);
+for (let n = 0; n < 12; n++) await key("ArrowDown");
+await sleep(200);
+const seen = JSON.parse(await ev(`JSON.stringify((() => {
+  const box = palette.getBoundingClientRect();
+  const hit = palette.querySelector('[aria-selected="true"]').getBoundingClientRect();
+  return { top: Math.round(hit.top - box.top), bot: Math.round(box.bottom - hit.bottom) };
+})())`));
+check("↑↓ 走到哪儿列表就滚到哪儿", seen.top >= -1 && seen.bot >= -1, seen);
+
+await reset();
+await ev(`input.value = "/mode "; input.dispatchEvent(new Event("input")); true`);
+await sleep(200);
+let sub = await state();
+check("命令 + 空格给子选项", sub.palette && sub.items.join("/") === "default/auto/plan/readonly",
+      sub.items);
+
+await ev(`input.value = "/mode au"; input.dispatchEvent(new Event("input")); true`);
+await sleep(200);
+sub = await state();
+check("子选项跟着往下筛", sub.items.join("/") === "auto", sub.items);
+await key("Tab");
+await sleep(150);
+check("补出去的是整串", (await ev(`input.value`)) === "/mode auto", await ev(`input.value`));
+
+await reset();
+await ev(`input.value = "/mode auto"; input.dispatchEvent(new Event("input")); true`);
+await sleep(150);
+await key("Enter");
+await sleep(200);
+const modeSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("参数打全了回车是发送不是补全",
+      modeSent.some(m => m.op === "command" && m.text === "/mode auto"), modeSent);
+
+await reset();
+await key("Tab", { shift: true });
+await sleep(200);
+const cycled = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("shift+tab 发 op:cycle_mode", cycled.some(m => m.op === "cycle_mode"), cycled);
+
 // 技能与工具面板：Ctrl K 开、esc 关，开着的时候对话那一屏和输入区都收起来
 await ev(`document.dispatchEvent(new KeyboardEvent("keydown",
   { key: "k", ctrlKey: true, bubbles: true })); true`);
@@ -452,7 +509,7 @@ const panel = JSON.parse(await ev(`JSON.stringify({
   tabs: [...document.querySelectorAll("#shelf-tabs .tab")].length,
   pressed: document.getElementById("nav-shelf").getAttribute("aria-pressed"),
 })`));
-check("Ctrl K 打开技能与工具", panel.open && panel.tabs === 3, panel);
+check("Ctrl K 打开技能与工具", panel.open && panel.tabs === 4, panel);
 check("面板开着时对话那一屏收起来", panel.sheet && panel.composer, panel);
 check("导航项跟着按下", panel.pressed === "true", panel);
 

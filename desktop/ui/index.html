@@ -85,6 +85,7 @@
       <button class="tab" data-tab="skills" aria-selected="true">技能<b id="n-skills"></b></button>
       <button class="tab" data-tab="tools" aria-selected="false">工具集<b id="n-tools"></b></button>
       <button class="tab" data-tab="mcp" aria-selected="false">MCP<b id="n-mcp"></b></button>
+      <button class="tab" data-tab="profiles" aria-selected="false">档案<b id="n-profiles"></b></button>
     </div>
     <input id="shelf-find" type="search" placeholder="按名字或用途筛…"
            spellcheck="false" autocomplete="off">
@@ -95,7 +96,7 @@
   </div>
   <div class="shelf__foot">
     <span id="shelf-where" class="mono"></span>
-    <span class="shelf__hint">关掉的东西既不进它的上下文，也调不出来。改动立刻生效。</span>
+    <span class="shelf__hint" id="shelf-hint"></span>
   </div>
 </section>
 

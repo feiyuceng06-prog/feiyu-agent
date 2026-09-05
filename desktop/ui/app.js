@@ -238,11 +238,11 @@ function setDot(state, text) {
   $("s-state").textContent = text;
 }
 
-function shortPath(raw) {
+function shortPath(raw, cap = 46) {
   const short = (raw || "—").replace(/^\/home\/[^/]+/, "~");
   // 从左边裁、保住尾巴 —— 裁右边的话看到的是 /tmp/xxx/yyy/…，
   // 恰好把「在哪个项目」裁掉了。跟终端的 ui.clip_path 同一个道理
-  return short.length > 46 ? "…" + short.slice(-45) : short;
+  return short.length > cap ? "…" + short.slice(-(cap - 1)) : short;
 }
 
 function setStatus(s) {
@@ -294,9 +294,15 @@ function toolLine(ev) {
   return wrap;
 }
 
-let liveTool = null;
-/* 最后一次工具调用是什么。确认卡插进来之后 liveTool 会被清掉，
-   之后的结果要另起一块，那一块的标题得靠它。 */
+/* 还没等到结果的那些工具块，**按调用 id 存**。
+   并行时一批四条是「四条 tool_start 全来完，四条 tool_result 才开始来」，
+   用一个 liveTool 槽位的话后三条结果会全挂到最后那条的标题下面 ——
+   屏幕上就是四行一模一样的 `Fetch(同一个地址)` 配着四个不同的结果。
+   用户拿截图来问过。 */
+let toolBlocks = new Map();
+/* 每次调用长什么样（标题要用）。确认卡插进来之后块被摘掉，
+   结果要另起一块，那一块的标题得靠它。 */
+let toolSeen = new Map();
 let lastTool = null;
 
 function handle(ev) {
@@ -325,20 +331,27 @@ function handle(ev) {
     case "tool_start":
       closeSaying();
       lastTool = ev;
-      liveTool = toolLine(ev);
+      toolSeen.set(ev.id || "", ev);
+      toolBlocks.set(ev.id || "", toolLine(ev));
       break;
 
-    case "tool_progress":
-      if (liveTool) {
-        const pending = liveTool.querySelector(".tool__pending");
+    case "tool_progress": {
+      // 参数还在生成 = 那条调用还没成形，只可能是最后开的那一块
+      const live = [...toolBlocks.values()].pop();
+      if (live) {
+        const pending = live.querySelector(".tool__pending");
         if (pending) pending.textContent = "生成参数… " + ev.size + " 字";
       }
       break;
+    }
 
     case "tool_result": {
-      // liveTool 为空 = 中间插过一张确认卡。**必须另起一块**，
+      const cid = ev.id || "";
+      // 找不到 = 中间插过一张确认卡（那时把块摘掉了）。**必须另起一块**，
       // 不然结果会画在授权它的那张卡上面，读起来像是先改了再问的
-      const target = liveTool || toolLine(lastTool || { label: "结果" });
+      const target = toolBlocks.get(cid)
+        || toolLine(toolSeen.get(cid) || lastTool || { label: "结果" });
+      toolBlocks.delete(cid);
       const pending = target.querySelector(".tool__pending");
       if (pending) pending.remove();
       const note = document.createElement("div");
@@ -358,19 +371,31 @@ function handle(ev) {
         target.append(list);
       }
       if (ev.shows && !ev.is_error) showShot(target, ev.shows);
-      liveTool = null;
       break;
     }
 
     case "catalog":
-      shelf.data = { skills: ev.skills || [], tools: ev.tools || [], mcp: ev.mcp || [] };
+      // **档案是另一条事件推的，别在这儿把它抹掉** —— 整个对象赋值下去,
+      // shelf.data.profiles 变 undefined，下一次 drawShelf 就在 .length 上抛
+      shelf.data.skills = ev.skills || [];
+      shelf.data.tools = ev.tools || [];
+      shelf.data.mcp = ev.mcp || [];
       shelf.got = true;
-      $("shelf-where").textContent = "开关记在 ~/.config/feiyu/enabled.json";
       if (shelfOpen()) drawShelf();
       break;
 
     case "detail":
-      shelf.bodies[ev.name] = ev.body || "（这份技能没有正文）";
+      shelf.bodies[ev.what === "profile" ? "档案:" + ev.name : ev.name] =
+        ev.body || (ev.what === "profile" ? "" : "（这份技能没有正文）");
+      if (shelfOpen()) drawShelf();
+      break;
+
+    case "profiles":
+      shelf.data.profiles = ev.rows || [];
+      shelf.got = true;
+      // 存完服务端会重推，这时候盘上那份才是真的 —— 把缓存的正文清掉重取
+      (ev.rows || []).forEach((r) => { if (shelf.draft[r.name] === undefined)
+        delete shelf.bodies["档案:" + r.name]; });
       if (shelfOpen()) drawShelf();
       break;
 
@@ -416,19 +441,22 @@ function handle(ev) {
       break;
 
     case "ask":
-      // 卡要插在当前这块工具行**下面**，所以先把它收掉；
-      // 结果回来时会照 lastTool 另起一块，接在卡后面
-      if (liveTool) {
-        const pending = liveTool.querySelector(".tool__pending");
+      /* 卡要插在已经开着的那些工具行**下面**，所以先把它们全摘掉；
+         结果回来时照 toolSeen 里那条另起一块，接在卡后面。
+         **全摘不是只摘一条**：并行那批是「四条 start 全来完才开始问」，
+         只摘一条的话另外三条的结果会画到授权它们的卡上面去。 */
+      toolBlocks.forEach((el) => {
+        const pending = el.querySelector(".tool__pending");
         if (pending) pending.textContent = "等你点头";
-        liveTool = null;
-      }
+      });
+      toolBlocks.clear();
       askCard(ev);
       break;
 
     case "turn_end":
       closeSaying();
-      liveTool = null;
+      toolBlocks.clear();
+      toolSeen.clear();
       pendingPreview = null;
       break;
 
@@ -451,6 +479,7 @@ function handle(ev) {
 
     case "help":
       commands = ev.commands || [];
+      cmdArgs = ev.args || {};
       // 连上时会自己发一次 /help 去取补全清单 —— **那一次不该画出来**，
       // 不然每次开页面都白白多一块。只有用户自己敲的那次才画。
       if (wantHelp) {
@@ -486,7 +515,9 @@ function askCard(ev) {
     choices = [
       ["yes", "同意一次", "btn--primary"],
       ["no", "拒绝", "btn--danger"],
-      ["all", "本次会话都允许", ""],
+      // **写「本轮」不是「本次会话」**：它是 _run_tools 那一批的局部标志，
+      // 下一轮照样会问。终端那边的键位提示写的也是「[a] 本轮全放」。
+      ["all", "本轮都允许", ""],
     ];
     if (ev.rule) choices.push(["save", "永久允许", "", ev.rule]);
   } else if (ev.type === "plan") {
@@ -652,8 +683,9 @@ if (TAURI) {
    **正文是点开才要的**：五十份技能各上万字，一次全推过来几百 KB，
    而这一屏一次只看得见一份。所以 catalog 里没有 body，选中时另发一条 detail。 */
 
-const shelf = { tab: "skills", find: "", pick: {}, data: { skills: [], tools: [], mcp: [] },
-                bodies: {}, got: false };
+const shelf = { tab: "skills", find: "", pick: {},
+                data: { skills: [], tools: [], mcp: [], profiles: [] },
+                bodies: {}, got: false, draft: {} };
 
 function shelfOpen() { return !$("shelf").hidden; }
 
@@ -666,6 +698,7 @@ function showShelf(on) {
   if (on) {
     if (termOn) showTerm(false);
     send({ op: "catalog" });
+    send({ op: "profiles" });
     requestAnimationFrame(() => $("shelf-find").focus());
   }
 }
@@ -682,6 +715,14 @@ function drawShelf() {
   $("n-skills").textContent = shelf.data.skills.length || "";
   $("n-tools").textContent = shelf.data.tools.length || "";
   $("n-mcp").textContent = shelf.data.mcp.length || "";
+  $("n-profiles").textContent = shelf.data.profiles.length || "";
+  // 底下那行说明跟着页签走 —— 档案存的不是开关，说成开关是错的
+  $("shelf-where").textContent = shelf.tab === "profiles"
+    ? "一份档案就是 ~/.config/feiyu/profiles/ 下的一个 .md"
+    : "开关记在 ~/.config/feiyu/enabled.json";
+  $("shelf-hint").textContent = shelf.tab === "profiles"
+    ? "人格设定每一轮都会发给模型，别写太长。换一份立刻生效。"
+    : "关掉的东西既不进它的上下文，也调不出来。改动立刻生效。";
   const list = $("shelf-list");
   list.textContent = "";
   const rows = shelfRows();
@@ -706,25 +747,62 @@ function drawShelf() {
     left.innerHTML = `<div class="shelf__name"></div><div class="shelf__meta"></div>`;
     left.querySelector(".shelf__name").textContent = row.name;
     left.querySelector(".shelf__meta").textContent = rowMeta(row);
-    const sw = document.createElement("button");
-    sw.className = "sw";
-    sw.type = "button";
-    sw.setAttribute("role", "switch");
-    sw.setAttribute("aria-checked", String(!!row.on));
-    sw.setAttribute("aria-label", (row.on ? "关掉 " : "打开 ") + row.name);
-    if (row.locked) sw.disabled = true;
-    // **开关必须 stopPropagation**：不然按一下开关的同时把这一项也选中了 ——
-    // 跟删对话那个叉是同一类错
-    sw.onclick = (e) => {
-      e.stopPropagation();
-      if (row.locked) return;
-      send({ op: "toggle", kind: KIND_OF[shelf.tab], name: row.name, on: !row.on });
-    };
-    li.append(left, sw);
+    if (shelf.tab === "profiles") {
+      /* **档案不给开关。** 它是「用哪一份」不是「开不开」—— 单选套上双态开关的皮，
+         人会以为可以两份一起开。当前那份靠 ● 标出来，换用在详情栏里按。 */
+      const mark = document.createElement("span");
+      mark.className = "pick-dot";
+      mark.textContent = row.on ? "●" : "";
+      li.append(left, mark);
+    } else {
+      const sw = document.createElement("button");
+      sw.className = "sw";
+      sw.type = "button";
+      sw.setAttribute("role", "switch");
+      sw.setAttribute("aria-checked", String(!!row.on));
+      sw.setAttribute("aria-label", (row.on ? "关掉 " : "打开 ") + row.name);
+      if (row.locked) sw.disabled = true;
+      // **开关必须 stopPropagation**：不然按一下开关的同时把这一项也选中了 ——
+      // 跟删对话那个叉是同一类错
+      sw.onclick = (e) => {
+        e.stopPropagation();
+        if (row.locked) return;
+        send({ op: "toggle", kind: KIND_OF[shelf.tab], name: row.name, on: !row.on });
+      };
+      li.append(left, sw);
+    }
     li.onclick = () => { shelf.pick[shelf.tab] = row.name; drawShelf(); };
     list.append(li);
   });
+  if (shelf.tab === "profiles" && !shelf.find) list.append(newProfileRow());
   drawShelfPane(rows.find((r) => r.name === shelf.pick[shelf.tab]));
+}
+
+/* 新建走**就地的一行输入**，不用 window.prompt ——
+   那在 webview 里是个模态框，一弹起来整个界面就不响应了（alert/confirm 同理）。
+   跟侧栏删对话的确认是同一个路子：把那一行原地换掉。 */
+function newProfileRow() {
+  const li = document.createElement("li");
+  li.className = "shelf__row shelf__row--new";
+  li.innerHTML = `<div><div class="shelf__name">＋ 新建一份</div>` +
+                 `<div class="shelf__meta">起一个新人格</div></div>`;
+  li.onclick = () => {
+    li.innerHTML = `<input class="newname" placeholder="档案名字，回车确认…"` +
+                   ` spellcheck="false" autocomplete="off">`;
+    const box = li.querySelector(".newname");
+    box.focus();
+    box.onkeydown = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); drawShelf(); return; }
+      if (e.key !== "Enter") return;
+      const name = box.value.trim();
+      if (!name) return drawShelf();
+      shelf.pick.profiles = name;
+      send({ op: "profile", action: "save", name,
+             body: "你是……（在这里写这份人格：它是谁、怎么说话、什么不做）" });
+    };
+    box.onblur = () => { if (li.isConnected) drawShelf(); };
+  };
+  return li;
 }
 
 const KIND_OF = { skills: "skill", tools: "tool", mcp: "mcp" };
@@ -732,11 +810,13 @@ const KIND_OF = { skills: "skill", tools: "tool", mcp: "mcp" };
 function emptyWord(tab) {
   if (tab === "skills") return "还没有技能。一份技能就是一个 .md，放 ~/.config/feiyu/skills/ 下。";
   if (tab === "mcp") return "还没接 MCP 服务器。写 ~/.config/feiyu/mcp.json，改完要重启。";
+  if (tab === "profiles") return "还没有配置档案。按下面的「新建一份」起一个。";
   return "一个工具都没有";
 }
 
 function rowMeta(row) {
   if (shelf.tab === "skills") return row.source || "";
+  if (shelf.tab === "profiles") return (row.on ? "在用 · " : "") + (row.model || "跟随当前模型");
   if (shelf.tab === "mcp") return row.error ? "起不来" : (row.tools.length + " 个工具");
   // 锁住的那个在清单上就得说明白，不然人会去点那个灰开关然后以为是坏的
   return row.locked ? (row.label || "") + " · 常开" : (row.label || "");
@@ -767,6 +847,14 @@ function drawShelfPane(row) {
     dd.textContent = v;
     facts.append(dt, dd);
   };
+  if (shelf.tab === "profiles") {
+    put("状态", row.on ? "正在用" : "没在用");
+    put("模型", row.model || "跟随当前模型");
+    put("文件", row.path);
+    pane.append(facts);
+    drawSoul(pane, row);
+    return;
+  }
   put("状态", row.locked ? "常开（关不掉）" : row.on ? "开着" : "已关");
   if (shelf.tab === "skills") {
     put("来自", row.source);
@@ -808,6 +896,61 @@ function drawShelfPane(row) {
   if (had === undefined) send({ op: "detail", kind: "skill", name: row.name });
 }
 
+/* 人格正文可以就地改。**没写完的稿子要留住**（shelf.draft）——
+   点开另一份再点回来、或者服务端推了新清单重画，都不该把你打的字冲掉。 */
+function drawSoul(pane, row) {
+  const box = document.createElement("textarea");
+  box.className = "soul";
+  box.spellcheck = false;
+  const draft = shelf.draft[row.name];
+  const saved = shelf.bodies["档案:" + row.name];
+  box.value = draft !== undefined ? draft : (saved === undefined ? "读取中…" : saved);
+  box.oninput = () => { shelf.draft[row.name] = box.value; drawActs(); };
+  pane.append(box);
+  if (saved === undefined) send({ op: "detail", kind: "profile", name: row.name });
+
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  pane.append(acts);
+
+  function drawActs() {
+    acts.textContent = "";
+    const dirty = shelf.draft[row.name] !== undefined
+      && shelf.draft[row.name] !== shelf.bodies["档案:" + row.name];
+    const use = document.createElement("button");
+    use.type = "button";
+    use.className = "act" + (row.on ? " act--now" : "");
+    use.textContent = row.on ? "正在用 · 点这里摘掉" : "用这份";
+    use.onclick = () => send({ op: "profile", action: row.on ? "off" : "use", name: row.name });
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "act";
+    save.textContent = "保存";
+    save.disabled = !dirty;
+    save.onclick = () => {
+      const body = shelf.draft[row.name] ?? "";
+      shelf.bodies["档案:" + row.name] = body;
+      delete shelf.draft[row.name];
+      send({ op: "profile", action: "save", name: row.name, body });
+    };
+    const said = document.createElement("span");
+    said.className = "acts__said";
+    said.textContent = dirty ? "有没保存的改动" : "";
+    const gone = document.createElement("button");
+    gone.type = "button";
+    gone.className = "act act--gone";
+    gone.textContent = "删掉";
+    gone.onclick = () => {
+      if (gone.dataset.sure) return send({ op: "profile", action: "delete", name: row.name });
+      // 问一句再删，跟侧栏删对话一个路子：真数据值得问，但不弹模态框
+      gone.dataset.sure = "1";
+      gone.textContent = "真的删掉？";
+    };
+    acts.append(use, save, said, gone);
+  }
+  drawActs();
+}
+
 $("nav-shelf").onclick = () => showShelf(!shelfOpen());
 $("shelf-find").oninput = (e) => { shelf.find = e.target.value; drawShelf(); };
 $("shelf-tabs").onclick = (e) => {
@@ -839,7 +982,8 @@ let deskNow = "";
 
 function setDesk(path) {
   deskNow = path || "";
-  $("desk-path").textContent = shortPath(path);
+  // 侧栏那一列比状态栏窄得多，budget 单给
+  $("desk-path").textContent = shortPath(path, 28);
   $("desk-path").title = path || "";
   $("s-cwd").textContent = shortPath(path);
   $("s-cwd").title = path || "";
@@ -1122,7 +1266,7 @@ function hello() {
   send({ op: "sessions" });
   // 面板开着的时候连上（或断线重连），得把清单重新要一遍 ——
   // 不要的话它会一直空着，而空清单跟"这台机器上没有技能"长得一模一样
-  if (shelfOpen()) send({ op: "catalog" });
+  if (shelfOpen()) { send({ op: "catalog" }); send({ op: "profiles" }); }
 }
 
 function inbound(raw) {
@@ -1206,18 +1350,34 @@ let palItems = [];
    变成 `/model `，参数无声丢掉、也没发出去 —— 这是最烦人的那个 bug。 */
 let palMoved = false;
 
+/* 每条命令的参数有哪些，服务端给（模型清单、档案、技能都会变，
+   写死在前端迟早对不上）。见 serve.Server.push_help。 */
+let cmdArgs = {};
+
 function showPalette() {
   const typed = inputEl.value;
   if (!typed.startsWith("/") || typed.includes("\n")) return hidePalette();
-  // **打了空格就是在写参数了**，这时候不该再插手（终端那边的补全也是这个口径）。
-  // 下面按整串筛本来也会筛空，这一行是把意图写明白。
-  if (typed.includes(" ")) return hidePalette();
-  // 按**整串**筛，不是按第一个词。原来是 `typed.split(" ")[0]`，于是打完
-  // `/mode auto` 菜单还开着，一回车被补全吃掉，变成 `/model `——参数没了，
-  // 也没发出去。这是这块最烦人的那个 bug。
-  palItems = commands.filter((c) => c.name.startsWith(typed));
-  // 完全相同的排最前：打全了 `/mode` 再按 Tab，不该给你补成 `/model`
-  palItems.sort((a, b) => (b.name === typed) - (a.name === typed));
+  const cut = typed.indexOf(" ");
+  if (cut < 0) {
+    // 还在打命令名。按**整串**筛，不是按第一个词 —— 原来是 `typed.split(" ")[0]`，
+    // 于是打完 `/mode auto` 菜单还开着，一回车被补全吃掉，变成 `/model `。
+    palItems = commands
+      .filter((c) => c.name.startsWith(typed))
+      .map((c) => ({ text: c.name, name: c.name, about: c.about, whole: false }));
+    // 完全相同的排最前：打全了 `/mode` 再按 Tab，不该给你补成 `/model`
+    palItems.sort((a, b) => (b.name === typed) - (a.name === typed));
+  } else {
+    /* 打了空格 = 在写参数了。**这时候要接着补参数**，不是收起来 ——
+       原来一见空格就 hidePalette，于是 `/mode ` 之后你得自己记住有哪四档。
+       筛的是参数那一截，补出去的是「命令 + 参数」整串。 */
+    const head = typed.slice(0, cut);
+    const rest = typed.slice(cut + 1);
+    if (rest.includes(" ")) return hidePalette();      // 参数超过一个词就不猜了
+    palItems = (cmdArgs[head] || [])
+      .filter((a) => a.startsWith(rest))
+      .map((a) => ({ text: head + " " + a, name: a, about: head.slice(1), whole: true }));
+    palItems.sort((a, b) => (b.name === rest) - (a.name === rest));
+  }
   if (!palItems.length) return hidePalette();
   palIndex = Math.min(palIndex, palItems.length - 1);
   paletteEl.replaceChildren(...palItems.map((c, n) => {
@@ -1230,6 +1390,10 @@ function showPalette() {
     return el;
   }));
   paletteEl.hidden = false;
+  /* **选中那条要滚进视野。** 菜单最高 16rem，命令有十几条，
+     按 ↑↓ 走到第八条之后高亮就跑到看不见的地方去了（用户拿截图来问过）。
+     `block: "nearest"` —— 用 "center" 的话每按一下整个列表都在跳。 */
+  paletteEl.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
 }
 
 function hidePalette() {
@@ -1242,10 +1406,13 @@ function hidePalette() {
 function pick(n) {
   const chosen = palItems[n];
   if (!chosen) return;
-  inputEl.value = chosen.name + " ";
+  // 补参数时 text 已经是「命令 + 参数」整串，后面不再加空格 —— 那一条打完了
+  inputEl.value = chosen.whole ? chosen.text : chosen.text + " ";
   hidePalette();
   inputEl.focus();
   grow();
+  // 补完命令名接着把参数菜单打开，省一次回车
+  if (!chosen.whole) showPalette();
 }
 
 inputEl.addEventListener("input", () => {
@@ -1276,6 +1443,17 @@ inputEl.addEventListener("keydown", (e) => {
     }
   }
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+});
+
+/* shift+tab 循环切权限模式，跟终端同一个键。
+   **两边调的是同一个 agent.cycle_mode()**（终端那边是 prompt_toolkit 的键位，
+   也不是斜杠命令），不各写一套模式顺序。
+   挂在输入框上：Tab 在别处是移焦点，别抢。 */
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && e.shiftKey && paletteEl.hidden) {
+    e.preventDefault();
+    send({ op: "cycle_mode" });
+  }
 });
 
 // esc 中断，跟终端一个键。菜单开着时上面那段会把事件截住。

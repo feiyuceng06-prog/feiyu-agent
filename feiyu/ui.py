@@ -339,9 +339,11 @@ def tool_progress(name: str, partial: str) -> str:
     return text
 
 
-def tool_call(name: str, args: dict) -> str:
+def tool_call(name: str, args: dict, *, cid: str = "") -> str:
+    """cid 是这次调用的 id **并行时一批四条一起开，结果也一起回来**，
+    没有 id 的话前端只能按到达顺序猜，四条结果会全挂到最后那条的标题下面 """
     events.emit("tool_start", name=name, label=tool_label(name), args=args,
-                target=tool_target(name, args))
+                target=tool_target(name, args), id=cid)
     label = tool_label(name)
     key = _headline_key(name, args)
     head = args.get(key, "") if key else ""
@@ -361,9 +363,10 @@ def tool_preview(rows: list[tuple[str, str]]) -> str:
 
 
 def tool_result(summary: str, detail: list[tuple[str, str]], *, is_error: bool,
-                shows: str = "") -> str:
-    """detail 是 (kind, text)，kind 为 '-' / '+' / '' shows 是一张要画给人看的图 """
-    events.emit("tool_result", summary=summary, is_error=is_error, shows=shows,
+                shows: str = "", cid: str = "") -> str:
+    """detail 是 (kind, text)，kind 为 '-' / '+' / '' shows 是一张要画给人看的图
+    cid 是这次调用的 id，前端靠它把结果挂回对应那条调用上 """
+    events.emit("tool_result", summary=summary, is_error=is_error, shows=shows, id=cid,
                 detail=[{"kind": k, "text": t} for k, t in detail])
     tint = "red" if is_error else "grey"
     lines = ["  " + paint(tint, f"{ELBOW}  {clip(summary, width() - 6)}")]
@@ -1233,6 +1236,7 @@ SLASH = {
     "/mcp": "看接入了哪些 MCP 服务器和它们的工具",
     "/undo": "退掉它最近一次写文件的改动，可以连着退",
     "/skills": "看有哪些技能和自定义命令；/skills <名字> 开关一份",
+    "/profile": "配置档案（人格）：看有哪些、换一份",
     "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",

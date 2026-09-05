@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import ui
 from . import history, hooks as hooks_mod
+from . import profiles as profiles_mod
 from . import progress as progress_mod
 from . import enabled, keys, memory, permissions, schema as schema_mod
 from . import skills as skills_mod
@@ -395,6 +396,8 @@ class Feiyu:
         # 这一轮存到哪一份会话里 由入口层（__main__ / serve）定：接着上次就沿用
         # 那一份的 id，从头开始就新起一个。存盘和「新对话」都看它
         self.session_id: str | None = None
+        # 当前用哪份配置档案（人格） 空串就是不套任何人格
+        self.profile: str = profiles_mod.current()
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
@@ -442,6 +445,8 @@ class Feiyu:
             return
         text = (SYSTEM_PROMPT + IDENTITY.format(model=self.model, name=self.name)
                 + self.env + STYLES[self.style][1])
+        # 人格设定排在风格之后：风格管"话说多长"，档案管"你是谁"，后者更具体
+        text += profiles_mod.as_prompt(self.profile)
         if self.mode == "plan":
             text += PLAN_PROMPT
         live_mcp = {n: srv for n, srv in self.toolbox.mcp.servers.items()
@@ -684,6 +689,25 @@ class Feiyu:
         keys.set_last(name)
         self._refresh_system()
         return True
+
+    def set_profile(self, name: str) -> str:
+        """换一份人格 档案里写了 model 的话连模型一起换
+
+        **一律走这里**，别直接赋值 `self.profile` —— 人格是拼进系统提示的，
+        不重拼等于切了没切（跟 `set_mode` 一个道理）。
+        """
+        found = profiles_mod.get(name) if name else None
+        if name and found is None:
+            return ""
+        self.profile = found.name if found else ""
+        profiles_mod.set_current(self.profile)
+        # use_model 自己会重拼系统提示，没换模型的话这儿补一次
+        if found is not None and found.model and found.model != self.name:
+            if not self.use_model(found.model):
+                self._refresh_system()
+        else:
+            self._refresh_system()
+        return self.profile
 
     def cycle_mode(self) -> str:
         return self.set_mode(MODE_ORDER[(MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)])
@@ -1166,9 +1190,17 @@ class Feiyu:
         输出会交叉成一团看不懂的东西
         """
         approved = []
+        allow_all = False
         for call in calls:
-            print(ui.tool_call(call.name, call.input), flush=True)
-            blocked = self._pre_tool(call) or self._deny_reason(call)
+            print(ui.tool_call(call.name, call.input, cid=call.id), flush=True)
+            blocked = self._pre_tool(call)
+            if not blocked:
+                # **「本轮都允许」在这一批里也得算数。** 不带 allow_all 的话，
+                # 四条 web_fetch 你在第一条上按了「都允许」，后三条照样问、
+                # 照样被拒 —— 用户拿截图来问过。
+                ok, always, _, reason = self._gate(call, allow_all)
+                allow_all = allow_all or always
+                blocked = "" if ok else reason
             approved.append((call, blocked))
 
         began = time.monotonic()
@@ -1183,7 +1215,7 @@ class Feiyu:
                     target = ui.tool_target(call.name, call.input)
                     print(ui.tool_result(
                         "%s — 没有执行" % ui.clip(target, 40) if target else "没有执行",
-                        [], is_error=True))
+                        [], is_error=True, cid=call.id))
                     print()
                     outputs.append(ToolOutput(id=call.id, content=blocked, is_error=True))
                     continue
@@ -1193,7 +1225,7 @@ class Feiyu:
                 target = ui.tool_target(call.name, call.input)
                 shown = "%s — %s" % (ui.clip(target, 40), summary) if target else summary
                 print(ui.tool_result(shown, result.detail, is_error=result.is_error,
-                                     shows=result.shows))
+                                     shows=result.shows, cid=call.id))
                 print()
                 self.trace.write("tool", name=call.name, args=call.input,
                                  ok=not result.is_error, summary=summary, parallel=True)
@@ -1202,32 +1234,27 @@ class Feiyu:
         self.trace.write("parallel", count=len(calls),
                          ms=round((time.monotonic() - began) * 1000))
 
-    def _deny_reason(self, call) -> str:
-        """并行那条路上的权限判定 只读工具没有"本轮都允许"可言，所以不带 allow_all """
-        ok, _, _, reason = self._gate(call, False)
-        return "" if ok else reason
-
     def _run_serial(self, calls, outputs: list[ToolOutput]):
         allow_all = False
         changed = None
         for call in calls:
-            print(ui.tool_call(call.name, call.input), flush=True)
+            print(ui.tool_call(call.name, call.input, cid=call.id), flush=True)
             if call.error:
-                print(ui.tool_result("参数没解析出来", [], is_error=True))
+                print(ui.tool_result("参数没解析出来", [], is_error=True, cid=call.id))
                 print()
                 self.trace.write("tool", name=call.name, ok=False, why="参数没解析出来")
                 outputs.append(ToolOutput(id=call.id, content=call.error, is_error=True))
                 continue
             veto = self._pre_tool(call)
             if veto:
-                print(ui.tool_result("钩子拦下", [], is_error=True))
+                print(ui.tool_result("钩子拦下", [], is_error=True, cid=call.id))
                 print()
                 outputs.append(ToolOutput(id=call.id, content=veto, is_error=True))
                 continue
             ok, always, label, reason = self._gate(call, allow_all)
             allow_all = allow_all or always
             if not ok:
-                print(ui.tool_result(label, [], is_error=True))
+                print(ui.tool_result(label, [], is_error=True, cid=call.id))
                 print()
                 self.trace.write("tool", name=call.name, args=call.input,
                                  ok=False, why=label)
@@ -1241,7 +1268,7 @@ class Feiyu:
             # 确认前已经把 diff 画过一遍，结果里再画就是同一段出现两次
             detail = [] if call.id in self._previewed and not result.is_error else result.detail
             print(ui.tool_result(summary, detail, is_error=result.is_error,
-                                 shows=result.shows))
+                                 shows=result.shows, cid=call.id))
             print()
             self.trace.write("tool", name=call.name, args=call.input,
                              ok=not result.is_error, summary=summary,

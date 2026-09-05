@@ -8,7 +8,8 @@ from . import hooks as hooks_mod
 from . import mcp as mcp_mod
 from . import serve as serve_mod
 from . import skills as skills_mod
-from . import enabled, keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
+from . import enabled, keys, memory, permissions, pricing, profiles, progress
+from . import sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import CONTEXT_FILES, MODE_ORDER, MODES, STYLES, Feiyu, find_score
@@ -289,6 +290,8 @@ def main() -> int:
                 print(_hooks(agent))
             elif cmd == "/sandbox":
                 print(_sandbox(arg))
+            elif cmd == "/profile":
+                print(_profile(agent, arg))
             elif cmd == "/helper":
                 print(_helper(agent, arg))
             elif cmd == "/jobs":
@@ -352,6 +355,34 @@ def _helper(agent: Feiyu, arg: str) -> str:
     if not agent.helper:
         return ui.notice("旁活现在用主模型 /helper <名字> 换一条便宜的，/helper off 改回来")
     return ui.notice(f"旁活用 {agent.helper} /helper off 改回主模型")
+
+
+def _profile(agent: Feiyu, arg: str) -> str:
+    """`/profile` 看有哪些人格，`/profile <名字>` 换一份，`/profile off` 摘掉 """
+    found = profiles.load()
+    if arg in ("off", "none", "无"):
+        agent.set_profile("")
+        return ui.notice("已摘掉人格设定")
+    if arg:
+        if not agent.set_profile(arg):
+            return ui.error("没有叫 %s 的配置档案 现有：%s"
+                            % (arg, "、".join(p.name for p in found) or "（一份都没有）"))
+        one = profiles.get(arg)
+        return ui.notice("已换成「%s」%s" % (arg, "，模型跟着换成 " + one.model if one.model else ""))
+    if not found:
+        return ui.notice(
+            "还没有配置档案 一份档案就是一个 .md，放 %s/ 下："
+            "开头写 --- name / description / model ---，正文就是人格设定（每一轮都会发，别写太长）"
+            % profiles.DIR)
+    rows = []
+    for one in found:
+        tick = ui.paint("brown", " ●") if one.name == agent.profile else "  "
+        name = ui.pad(one.name, 16)
+        label = ui.bold(name) if one.name == agent.profile else ui.paint("grey", name)
+        note = one.description + (" · " + one.model if one.model else "")
+        rows.append("   " + tick + " " + label + ui.paint("grey", note))
+    rows += ["", ui.notice("/profile <名字> 换一份，/profile off 摘掉")]
+    return "\n".join(rows)
 
 
 def _mode(agent: Feiyu, arg: str) -> str:

@@ -183,6 +183,22 @@ const SHOT = [
   { kind: "turn_end" },
 ];
 
+/* 并行那一批：四条 tool_start 全来完，四条 tool_result 才开始来。
+   没有调用 id 的话前端只能按到达顺序猜，后三条结果会全挂到最后那条标题下面。 */
+const PARALLEL = [
+  { kind: "turn_start", text: "抓四个新闻站看看今天有什么" },
+  ...["https://apnews.com/", "https://www.reuters.com/world/",
+      "https://www.bbc.com/news/world", "https://top.baidu.com/board"]
+    .map((u, n) => ({ kind: "tool_start", id: "p" + n, name: "web_fetch", label: "Fetch",
+                      args: { url: u }, target: u })),
+  ...["https://apnews.com/", "https://www.reuters.com/world/",
+      "https://www.bbc.com/news/world", "https://top.baidu.com/board"]
+    .map((u, n) => ({ kind: "tool_result", id: "p" + n, is_error: n === 3,
+                      summary: n === 3 ? u + " — HTTP 403" : u + " — 读了 2140 字",
+                      detail: [] })),
+  { kind: "turn_end" },
+];
+
 const ASK = [
   { kind: "preview", rows: [
     { kind: "-", text: "  47  -  rx = re.compile(args[\"regex\"])" },
@@ -263,6 +279,31 @@ if (rows.length !== 1 || rows[0].failed || rows[0].w < 64 || rows[0].h < 64) {
   console.log(`出图 ${rows[0].w}×${rows[0].h}，正文里重述的那次没画第二遍`);
 }
 
+/* 并行那批：**每一块的标题必须各是各的**。用一个槽位的话会变成
+   四行一样的标题配四个不同的结果 —— 用户拿截图来问过。 */
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await feed(PARALLEL);
+await sleep(700);
+console.log("拍了", await cdp.shot("9_parallel", { width: 1280, height: 900 }));
+/* 只看这一批灌进去的那四条。**屏幕上可能还有别的** —— 夹具连的是一个真 agent，
+   上一轮 input.mjs 起的活会把自己的工具行推过来（真被这个绊过一次）。 */
+const pairs = JSON.parse(await cdp.eval(`JSON.stringify(
+  [...document.querySelectorAll(".block--tool .tool")].map((t) => ({
+    head: (t.querySelector(".tool__head") || t).textContent.trim().slice(0, 60),
+    note: (t.querySelector(".tool__note") || {}).textContent || "",
+  })).filter((r) => r.head.startsWith("Fetch(")))`));
+const heads = new Set(pairs.map((p) => p.head));
+if (pairs.length !== 4 || heads.size !== 4) {
+  console.error("并行那批的标题没有各归各（该四块四个标题）：", JSON.stringify(pairs));
+  process.exitCode = 1;
+} else if (!pairs.every((p) => p.head.includes(p.note.split(" —")[0].trim()))) {
+  console.error("结果挂错了块：", JSON.stringify(pairs));
+  process.exitCode = 1;
+} else {
+  console.log("并行四条各归各");
+}
+
 /* 技能与工具那一屏。**不灌合成事件** —— 面板一打开就向服务端要 catalog，
    合成的会被真推送盖掉（CLAUDE.md 里记过这个坑）。所以这里靠夹具跑在一份
    备好技能的 XDG_CONFIG_HOME 上，拍的就是真数据。 */
@@ -281,6 +322,21 @@ for (let n = 0; n < 60; n++) {
 await cdp.eval(`showShelf(true); true`);
 await sleep(900);
 console.log("拍了", await cdp.shot("6_shelf", { width: 1280, height: 900 }));
+
+/* 工作台那一行不能被 bidi 重排。`direction: rtl` 那个"从左边裁"的老套路会把
+   开头的 `~/` 挪到视觉末尾，`~/feiyuwork` 显示成 `feiyuwork/~` —— 用户拿截图来问过。
+   量的是渲染顺序，不是 textContent（那个是对的，坏的只是显示）。 */
+const deskShown = await cdp.eval(`(() => {
+  const el = document.getElementById("desk-path");
+  el.textContent = "~/feiyuwork";
+  return getComputedStyle(el).direction + "|" + el.textContent;
+})()`);
+if (!deskShown.startsWith("ltr|")) {
+  console.error("工作台那一行的书写方向不对（会把 ~/ 甩到末尾）：", deskShown);
+  process.exitCode = 1;
+} else {
+  console.log("工作台路径按 ltr 排");
+}
 
 const shelfRows = await cdp.eval(`JSON.stringify({
   tabs: [...document.querySelectorAll("#shelf-tabs .tab")].map((t) => t.textContent),
@@ -331,6 +387,25 @@ if (swBox.w < 20 || swBox.h < 12 || !swBox.locked || !swBox.off.length) {
 await cdp.eval(`document.querySelector('[data-tab="mcp"]').click(); true`);
 await sleep(400);
 console.log("拍了", await cdp.shot("8_shelf_mcp", { width: 1280, height: 900 }));
+
+// 档案那一页：清单不给开关（那是单选不是双态），详情栏能改能存
+await cdp.eval(`document.querySelector('[data-tab="profiles"]').click(); true`);
+await sleep(600);
+console.log("拍了", await cdp.shot("10_profiles", { width: 1280, height: 900 }));
+const souls = JSON.parse(await cdp.eval(`JSON.stringify({
+  rows: [...document.querySelectorAll("#shelf-list .shelf__row")]
+          .map((r) => r.querySelector(".shelf__name").textContent),
+  switches: document.querySelectorAll("#shelf-list .sw").length,
+  soul: (document.querySelector(".soul") || {}).value || "",
+  acts: [...document.querySelectorAll(".acts .act")].map((b) => b.textContent),
+})`));
+if (souls.rows.length < 3 || souls.switches !== 0 || !souls.soul || souls.acts.length !== 3) {
+  console.error("档案那一页不对（该有清单+新建行、没有开关、有正文和三个按钮）：",
+                JSON.stringify(souls));
+  process.exitCode = 1;
+} else {
+  console.log(`档案 ${souls.rows.length - 1} 份，正文取回来了，按钮 ${souls.acts.join("/")}`);
+}
 
 // esc 退回对话 —— 面板开着时它不该是"打断这一轮"
 await cdp.eval(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true`);

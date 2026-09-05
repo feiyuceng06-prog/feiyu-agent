@@ -107,6 +107,7 @@ Type `/` for command completion:
 | `/style` | Reply style: `default` / `concise` / `explanatory` / `teaching` |
 | `/theme` | UI theme: `default` / `swiss` |
 | `/skills` | List the available skills and custom commands; `/skills <name>` toggles one |
+| `/profile` | Profiles (personas): list them, switch, `/profile off` to drop one |
 | `/clear` | Clear the conversation and its save file |
 | `/exit` | Quit |
 
@@ -280,6 +281,22 @@ The sidebar holds new-session and skills-and-tools, with past conversations belo
 **Skills and tools** (`Ctrl K`) is three tabs: skills, tools, MCP. Every entry has a switch, and whatever you switch off neither enters its context nor can be called — a skill drops out of the catalog in the system prompt, a tool is not attached to the request, and an MCP server's tools are not exposed. Changes take effect immediately and are recorded in `~/.config/feiyu/enabled.json`, which lists only what is *off*, so a skill you install later is on from the start. `/skills <name>` toggles one from the terminal too.
 
 `exit_plan` cannot be switched off: it is the only way out of plan mode. Switching off an MCP server only stops its tools being attached — the process still starts, since whether it starts is written in `mcp.json` and needs a restart to change.
+
+The fourth tab is **profiles**: one profile is one persona. Its body goes straight into the
+system prompt, editable in place in the panel or as `~/.config/feiyu/profiles/<name>.md`:
+
+```markdown
+---
+name: harsh-review
+description: Only finds fault, never praises
+model: deepseek-v4-pro
+---
+You are a caustic but accurate code reviewer. Lead with the worst thing. No warm-up, no praise.
+```
+
+`model` is optional; when set, switching profile switches the model too. **A persona is
+resent on every single turn**, so the cap is 4000 characters (a skill gets 12000 — that one
+is only sent on the turn it is used). `/profile` lists and switches from the terminal.
 
 The `＋` left of the composer uploads files; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
 

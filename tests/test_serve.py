@@ -392,6 +392,7 @@ class TestCatalog(unittest.TestCase):
             self.agent = agent
             self.inbox = queue.Queue()
             self.busy = False
+            self.commands = {}
             self.proto = serve.Protocol(out)
 
         def push_status(self):
@@ -472,3 +473,39 @@ class TestCatalog(unittest.TestCase):
             json.dump({"base_url": "https://x/v1", "key": "k"}, f)
         self.server.push_catalog()
         self.assertIn("image_generate", [t["name"] for t in self.events("catalog")[-1]["tools"]])
+
+
+class TestApproveWords(unittest.TestCase):
+    """界面上按的那几个键要翻译成 agent 认的词
+
+    `_gate` 只认 yes / always / remember。桌面端原来把按钮值 `all` / `save`
+    直接交上去，两个都落到「用户拒绝」那句 —— 按了「都允许」反而全被拒。
+    用户拿截图来问过：一批 web_fetch 全是「没有执行」。
+    """
+
+    class Box(serve.Server):
+        def __init__(self, answer):
+            self.answer = answer
+            self.proto = self
+
+        def request(self, kind, **payload):
+            return self.answer
+
+    def answered(self, said):
+        return self.Box(said).approve("web_fetch", {"url": "https://x"})
+
+    def test_四个按钮各自翻译对(self):
+        self.assertEqual(self.answered("yes"), "yes")
+        self.assertEqual(self.answered("no"), "no")
+        self.assertEqual(self.answered("all"), "always")
+        self.assertEqual(self.answered("save"), "remember")
+
+    def test_翻译出来的词_gate_全认得(self):
+        """这条是真正的不变量：翻译表的值必须落在 _gate 的分支里 """
+        known = {"yes", "no", "always", "remember"}
+        self.assertTrue(set(serve.Server._ANSWERS.values()) <= known,
+                        serve.Server._ANSWERS)
+
+    def test_没回话按拒绝(self):
+        for bad in (None, "", "什么", 1, ["yes"]):
+            self.assertEqual(self.Box(bad).approve("bash", {"command": "ls"}), "no")

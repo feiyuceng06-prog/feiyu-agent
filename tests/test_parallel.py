@@ -211,3 +211,57 @@ class TestInterrupt(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAllowAll(Base):
+    """「本轮都允许」在并行那一批里也得算数
+
+    原来并行走的是 `_deny_reason`，那里 allow_all 写死是 False：四条 web_fetch
+    你在第一条上按了「都允许」，后三条照样问、照样被拒。用户拿截图来问过 ——
+    一屏红字「没有执行」，而他明明点了允许。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.agent.mode = "default"
+        self.asked = []
+        self.agent.toolbox.run = lambda n, a: ToolResult("ok", summary="ok")
+
+    def fetches(self, n=4):
+        return [call("c%d" % i, "web_fetch", url="https://x%d.com" % i) for i in range(n)]
+
+    def answer(self, said):
+        def approve(name, args):
+            self.asked.append(args.get("url"))
+            return said if len(self.asked) == 1 else "no"   # 只在第一条上答应
+        self.agent.approve = approve
+
+    def ran(self, backend):
+        return [m["content"] for m in backend.messages if m["role"] == "tool"]
+
+    def test_第一条答都允许_后面几条不再问也不被拒(self):
+        self.answer("always")
+        b = self.use(self.fetches())
+        quiet(self.agent.send, "抓四个")
+        self.assertEqual(len(self.asked), 1, self.asked)      # 只问了一次
+        self.assertEqual(self.ran(b), ["ok"] * 4)
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_第一条答只这次_后面几条照旧要问(self):
+        self.answer("yes")
+        b = self.use(self.fetches())
+        quiet(self.agent.send, "抓四个")
+        self.assertEqual(len(self.asked), 4)
+        # 第一条跑了，后三条被拒
+        self.assertEqual(self.ran(b)[0], "ok")
+        self.assertTrue(all("拒绝" in r for r in self.ran(b)[1:]), self.ran(b))
+
+    def test_记住那条会写进规则(self):
+        from feiyu import permissions
+        import os
+        permissions.STORE = os.path.join(self.tmp.name, "permissions.json")
+        self.answer("remember")
+        b = self.use(self.fetches(2))
+        quiet(self.agent.send, "抓两个")
+        self.assertIn("Fetch(*)", permissions.load()["allow"])
+        self.assertEqual(self.ran(b), ["ok", "ok"])

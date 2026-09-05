@@ -24,6 +24,7 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 | `feiyu/hooks.py` | 钩子：四个时机跑外部命令，含项目钩子的信任机制 |
 | `feiyu/skills.py` | 技能（模型按需读）与自定义斜杠命令（用户敲），含项目技能的信任机制 |
 | `feiyu/enabled.py` | 哪些技能 / 工具 / MCP 服务器是开着的（只存关掉的那些） |
+| `feiyu/profiles.py` | 配置档案（人格）：一份 .md 一套人格，拼进系统提示 |
 | `feiyu/events.py` | 结构化事件的 sink：ui 除了画终端，还能把同一件事报给别的前端 |
 | `feiyu/serve.py` | `--serve`：把 agent 挂在 stdio 上说行 JSON，给网页端用 |
 | `desktop/src/main.rs` | feiyu-desktop：Tauri 窗口，监管一个 `feiyu --serve`，走 invoke / emit |
@@ -1816,3 +1817,86 @@ Mermaid + CodeMirror）。真正值钱的是它那份 360 行的 `DESIGN.md`—�
   在 classic script 里落在 script scope 上，CDP 的 eval 按裸名字取不到，会抛 ReferenceError）。
 - 出图那一屏不再依赖"夹具跑在仓库根上"：走 `/upload` 把 logo 传进工作区，
   拿回来的相对路径正好就是 agent 出图时给的那种，顺带也验了一次上传。
+
+## 0.56.1 / 0.57.0：四个用户拿截图来问的 bug，和配置档案
+
+### `legacy` 既是别名又是文件名 → 一行删不掉的会话
+
+`session.LEGACY` 本来只是"读 0.51.0 之前那个位置"的别名。但 `save()` 会把
+`agent.session_id` 直接当文件名写，而 `--resume` / `open_session` 会把 id 设成
+`legacy` —— 于是新目录里出现 `legacy.json`。`listing()` 从目录里扫出来给它的 id
+还是 `legacy`，`drop()` 见到这个 id 却去删**旧位置**那份，`os.remove` 的 OSError
+被咽掉。表现：点多少次「删掉」都回一句「删掉了一段对话」，那行永远在。
+
+两处一起改：`save()` 见到 `legacy` 写回旧位置（这个 id 永远只对应那一个文件），
+`drop()` 碰到它两个位置一起删（修已经产生的那份）。
+**教训：一个值同时当"别名"和"真名"用，读写删三条路早晚对不齐。**
+
+### 桌面端按了「都允许」反而全被拒
+
+`serve.Server.approve()` 返回 `yes/no/all/save`，而 `Feiyu._gate` 只认
+`yes/always/remember` —— `all` 和 `save` 两个都落到最后那句 `return 用户拒绝`。
+它的 docstring 还写着"语义跟 ui.confirm 一致"，其实不一致，所以一直没人发现。
+现在有一张 `_ANSWERS` 翻译表，**并且有一条用例断言表里的值全落在 `_gate` 的分支上**。
+
+顺带：`dict.get(answer)` 在对面回一个列表时会抛 unhashable，而这行跑在一轮中途。
+先判 `isinstance(str)`。
+
+### 并行那批把「本轮都允许」丢了
+
+`_run_parallel` 走的是 `_deny_reason`，那里 `allow_all` 写死 False。四条 web_fetch
+你在第一条上按了「都允许」，后三条照样问、照样拒。现在跟串行同一套：
+在批内累加 `allow_all`。`_deny_reason` 删掉了。
+**顺带把界面上那句「本次会话都允许」改成「本轮都允许」** —— 它是 `_run_tools`
+那一批的局部标志，下一轮照样问，原来的说法是假话。
+
+### 并行的结果挂错了块
+
+事件里没有调用 id，前端只能按到达顺序猜。而并行是「四条 tool_start 全来完，
+四条 tool_result 才开始来」，于是后三条结果全挂到最后那条的标题下面 ——
+屏幕上是四行一模一样的 `Fetch(同一个地址)` 配着四个不同的结果。
+`ui.tool_call` / `ui.tool_result` 加了 `cid=`，前端按 id 存块（`toolBlocks`）
+和存标题（`toolSeen`）。确认卡插进来时**把所有开着的块一起摘掉**，
+不是只摘一条 —— 并行那批是先问完再跑。
+
+### 命令补全两处
+
+- **↑↓ 走到看不见的地方**：菜单最高 16rem，命令十几条。
+  `scrollIntoView({block:"nearest"})`，**不要 "center"** —— 那样每按一下整个列表都在跳。
+- **`/命令 空格` 之后没有子选项**：原来一见空格就 `hidePalette()`。现在接着补参数，
+  参数清单由服务端随 `help` 事件给（`push_help`）—— 模型清单、档案、技能都会变，
+  写死在前端迟早对不上。命令名补完顺手把参数菜单打开，省一次回车。
+
+### shift+tab 在桌面端没反应
+
+终端那边是 prompt_toolkit 的键位，直接调 `agent.cycle_mode()`。桌面端补了一个
+`cycle_mode` op，**两边调的是同一个方法**，不各写一套模式顺序。
+挂在输入框上而不是 document 上：Tab 在别处是移焦点，别抢。
+
+### 配置档案（0.57.0）
+
+`feiyu/profiles.py`，`~/.config/feiyu/profiles/<名字>.md`，frontmatter 认
+`name` / `description` / `model`，正文直接拼进系统提示。
+
+- **位置在风格之后、项目约定之前**：风格管"话说多长"，档案管"你是谁"，
+  项目约定最具体。同一句话，项目里写的赢。
+- **`MAX_BODY` 只有 4000**，比 `skills.MAX_BODY`（12000）小一个数量级 ——
+  技能是"用上那次才发"，人格是**每一轮都发**。
+- **名字以文件名为准，不认 frontmatter 里的 `name`**：切换、保存、删除全按文件找，
+  两个来源不一致就会出现"切得过去但存不回来"。
+- **一律走 `agent.set_profile()`**，别直接赋值 —— 要重拼系统提示（跟 `set_mode` 同理）。
+  档案里写了 `model` 就连模型一起换。
+- 面板里是第四个页签。**档案那一栏不给开关**：它是"用哪一份"不是"开不开"，
+  单选套上双态开关的皮，人会以为可以两份一起开。当前那份用 ● 标，换用在详情栏按。
+- 新建走**就地的一行输入**，不用 `window.prompt` —— 那在 webview 里是模态框，
+  一弹起来整个界面就不响应了。
+- **没保存的稿子要留住**（`shelf.draft`）：点开另一份再点回来、或者服务端推了新清单
+  重画，都不该把你打的字冲掉。
+
+### 夹具两条
+
+- **`case "catalog"` 不能整个赋值 `shelf.data`** —— 档案是另一条事件推的，
+  整个赋值会把它抹成 undefined，下一次 `drawShelf` 就在 `.length` 上抛。
+  这个是 `input.mjs` 报"页面 JS 报错"抓出来的，画面上看不出来。
+- **并行那条断言要只看自己灌进去的那几块**：夹具连的是一个真 agent，
+  上一轮 `input.mjs` 起的活会把自己的工具行推过来。

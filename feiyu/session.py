@@ -116,7 +116,12 @@ def save(workspace, agent, sid: str | None = None) -> None:
     try:
         here = folder(workspace)
         files.private_dir(here)
-        path = _path(workspace, sid) if sid else _legacy_path(workspace)
+        # **`legacy` 是个读旧位置的别名，不能变成写出去的文件名。**
+        # 写成 folder/legacy.json 的话，listing 从目录里扫出来给它的 id 还是
+        # `legacy`，而 drop 见到这个 id 会去删**旧位置**那份 —— 删不掉，
+        # 于是那一行永远赖在侧栏上，点多少次「删掉」都只是回一句「删掉了」。
+        path = (_legacy_path(workspace) if not sid or sid == LEGACY
+                else _path(workspace, sid))
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
@@ -204,14 +209,18 @@ def drop(workspace, sid: str | None = None) -> None:
         sid = latest_id(workspace)
         if sid is None:
             return
-    path = _legacy_path(workspace) if sid == LEGACY else (
-        _path(workspace, sid) if _ID_OK.match(sid) else None)
-    if not path:
+    if not _ID_OK.match(sid):
         return
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+    # legacy 两个位置都删：新位置那份是 0.55.0 以前的 save 留下的，
+    # 只删旧位置的话侧栏上那一行删不掉（用户拿截图来问过）
+    where = [_path(workspace, sid)]
+    if sid == LEGACY:
+        where.append(_legacy_path(workspace))
+    for path in where:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def describe(data: dict) -> str:

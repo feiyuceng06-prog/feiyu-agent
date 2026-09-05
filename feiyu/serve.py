@@ -35,7 +35,9 @@ import sys
 import threading
 import _thread
 
-from . import enabled, events, keys, permissions, session as session_mod
+from . import agent as agent_mod
+from . import enabled, events, keys, permissions, profiles as profiles_mod
+from . import session as session_mod
 from . import skills as skills_mod, tools as tools_mod, ui
 from . import __version__
 
@@ -126,15 +128,21 @@ class Server:
 
     # ---- agent 要问人的三条回调 ----
 
+    # 界面上那几个按钮的值 → agent 认的那几个词。
+    # **这张表不能省。** `_gate` 只认 yes / always / remember，而这边原来直接把
+    # `all` / `save` 交上去，两个都落到最后那句 return，于是按了「都允许」
+    # 反而**全被当成拒绝**（用户拿截图来问过：一批 web_fetch 全是「没有执行」）。
+    # 加新按钮时先回去看 `Feiyu._gate` 认哪几个词。
+    _ANSWERS = {"yes": "yes", "no": "no", "all": "always", "save": "remember"}
+
     def approve(self, name: str, args: dict) -> str:
-        """返回 yes / no / all / save，语义跟 ui.confirm 一致 """
         answer = self.proto.request(
             "ask", type="approve", tool=name, label=ui.tool_label(name),
             target=ui.tool_target(name, args), args=args,
             rule=permissions.suggest(name, args))
-        if answer not in ("yes", "no", "all", "save"):
-            return "no"                         # 没人回话按拒绝，跟非交互场景一致
-        return answer
+        # 没回话按拒绝，跟非交互场景一致 **先判类型**：对面回一个列表的话
+        # dict.get 会抛 unhashable，而这行跑在一轮的中途，抛出去就把这轮带走了
+        return self._ANSWERS.get(answer, "no") if isinstance(answer, str) else "no"
 
     def approve_plan(self, plan: str) -> bool:
         return self.proto.request("ask", type="plan", plan=plan or "") == "yes"
@@ -154,8 +162,8 @@ class Server:
     def status(self) -> dict:
         agent = self.agent
         out = {"ready": agent.ready, "mode": agent.mode, "style": agent.style,
-               "workspace": str(self.workspace), "version": __version__,
-               "busy": self.busy}
+               "profile": agent.profile, "workspace": str(self.workspace),
+               "version": __version__, "busy": self.busy}
         if agent.ready:
             out.update(model=agent.model, name=agent.name,
                        tokens=agent.tokens, cost=round(agent.cost, 6),
@@ -261,7 +269,12 @@ class Server:
         self.proto.send("catalog", skills=skills, tools=tools, mcp=servers)
 
     def push_detail(self, kind: str, name: str) -> None:
-        """点开一项时才要的正文 现在只有技能有正文 """
+        """点开一项时才要的正文 技能和档案有正文，工具和 MCP 没有 """
+        if kind == "profile":
+            one = profiles_mod.get(name)
+            self.proto.send("detail", what="profile", name=name,
+                            body=one.body if one else "")
+            return
         if kind != "skill":
             return
         found = self.agent.toolbox.skills.get(name)
@@ -279,6 +292,69 @@ class Server:
         # 写盘之后当场重挂工具表、重拼系统提示 —— 少这一步就是"按了没反应"
         self.agent.apply_toggles()
         self.push_catalog()
+        self.push_status()
+        self.push_help()
+
+    # ---- 命令补全 ----
+
+    def push_help(self) -> None:
+        """命令清单 + **每条命令的参数有哪些**
+
+        只给命令名的话，`/mode ` 之后补全就没了，得自己记住有哪四档
+        （用户拿截图来问过）。参数是会变的（模型清单、档案、技能），
+        所以每次这些东西一变就重推一遍，别让界面拿着一份过期的。
+
+        只列网页端真能跑的：TERMINAL_ONLY 那几条剔掉 ——
+        **不该在补全里提供一个点了就报错的东西**。
+        """
+        from . import sandbox as sandbox_mod
+
+        rows = {**ui.SLASH, **{"/" + n: c.description for n, c in self.commands.items()}}
+        models = list(keys.load())
+        args = {
+            "/mode": list(agent_mod.MODE_ORDER),
+            "/style": list(agent_mod.STYLES),
+            "/model": models,
+            "/helper": models + ["off"],
+            "/profile": [p.name for p in profiles_mod.load()] + ["off"],
+            "/skills": sorted(self.agent.toolbox.skills),
+            "/sandbox": list(sandbox_mod.LEVELS),
+        }
+        self.proto.send("help",
+                        commands=[{"name": n, "about": d} for n, d in rows.items()
+                                  if n not in TERMINAL_ONLY],
+                        args={k: v for k, v in args.items() if v and k not in TERMINAL_ONLY})
+
+    # ---- 配置档案 ----
+
+    def push_profiles(self) -> None:
+        now = self.agent.profile
+        self.proto.send("profiles", rows=[p.row(now) for p in profiles_mod.load()],
+                        current=now)
+
+    def profile(self, action: str, name: str, body: str, description: str) -> None:
+        """面板上那几个动作 一律做完就把清单重推一遍，界面不自己猜结果 """
+        if action == "use":
+            self.agent.set_profile(name)
+        elif action == "off":
+            self.agent.set_profile("")
+        elif action == "save":
+            if profiles_mod.write(name, body, description=description):
+                # 存的正好是正在用的那份就要重拼系统提示 —— 不然编辑完这一轮还是旧人格
+                if name == self.agent.profile:
+                    self.agent.set_profile(name)
+            else:
+                self.proto.send("note", level="error",
+                                text="存不下这份档案（名字只能是字母数字下划线连字符或中文，40 字以内）")
+                return
+        elif action == "delete":
+            profiles_mod.remove(name)
+            if name == self.agent.profile:
+                self.agent.set_profile("")
+        else:
+            return
+        self.push_profiles()
+        self.push_help()
         self.push_status()
 
     # ---- 命令 ----
@@ -310,6 +386,9 @@ class Server:
             self.proto.send("cleared")
             self.push_sessions()
             self.proto.send("note", level="notice", text="对话历史已清空，存盘也删了")
+        elif head == "/profile":
+            self.proto.send("note", level="notice", text=_plain(cli._profile(agent, rest)))
+            self.push_catalog()
         elif head == "/mode":
             self.proto.send("note", level="notice", text=_plain(cli._mode(agent, rest)))
         elif head == "/model":
@@ -354,12 +433,7 @@ class Server:
         elif head == "/sandbox":
             self.proto.send("note", level="notice", text=_plain(cli._sandbox(rest)))
         elif head == "/help":
-            # 只列网页端真能跑的：TERMINAL_ONLY 那几条剔掉。
-            # **不该在补全里提供一个点了就报错的东西** —— 用户拿截图来问过 /key。
-            rows = {**ui.SLASH, **{"/" + n: c.description for n, c in self.commands.items()}}
-            self.proto.send("help", commands=[{"name": n, "about": d}
-                                              for n, d in rows.items()
-                                              if n not in TERMINAL_ONLY])
+            self.push_help()
         else:
             self.proto.send("note", level="error", text="未知命令 " + head)
 
@@ -442,6 +516,17 @@ class Server:
             self.push_catalog()
         elif op == "detail":
             self.push_detail(str(msg.get("kind") or ""), str(msg.get("name") or ""))
+        elif op == "cycle_mode":
+            # shift+tab 桌面端跟终端走**同一个** agent.cycle_mode()，
+            # 不各写一套（终端那边是 prompt_toolkit 的键位，也不是斜杠命令）
+            self.inbox.put(("cycle_mode", " "))
+        elif op == "profiles":
+            self.push_profiles()
+        elif op == "profile":
+            self.inbox.put(("profile", json.dumps({
+                "action": msg.get("action"), "name": msg.get("name"),
+                "body": str(msg.get("body") or "")[:MAX_TEXT],
+                "description": msg.get("description")})))
         elif op == "toggle":
             # 改的是工具表和系统提示，跟跑一轮是同一份状态 —— 放主线程做
             self.inbox.put(("toggle", json.dumps(
@@ -472,6 +557,15 @@ class Server:
                     self.open_session(text)
                 elif op == "delete":
                     self.delete_session(text)
+                elif op == "cycle_mode":
+                    self.proto.send("note", level="notice",
+                                    text="已切到「%s」" % agent_mod.MODES[
+                                        self.agent.cycle_mode()][0])
+                    self.push_status()
+                elif op == "profile":
+                    row = json.loads(text)
+                    self.profile(str(row.get("action") or ""), str(row.get("name") or ""),
+                                 str(row.get("body") or ""), str(row.get("description") or ""))
                 elif op == "toggle":
                     row = json.loads(text)
                     self.toggle(str(row.get("kind") or ""), str(row.get("name") or ""),
