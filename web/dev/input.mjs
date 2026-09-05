@@ -215,6 +215,53 @@ for (let i = 0; i < 5; i++) await key("Backspace");
 s = await state();
 check("退格回到 / 时菜单重新出现", s.palette && s.items.length > 3, s);
 
+// 9b. **不该在补全里提供一个点了就报错的东西**
+await reset();
+await type("/");
+s = await state();
+check("/key 不在补全里（网页端不给）", !s.items.includes("/key"), s.items);
+check("/theme 不在补全里", !s.items.includes("/theme"), s.items);
+check("/verify /review /helper 都在",
+      ["/verify", "/review", "/helper"].every((n) => s.items.includes(n)), s.items);
+
+// 9c. /help 要真的画出来一块
+await reset();
+await ev(`stream.replaceChildren(); true`);
+await type("/help");
+await key("Enter");
+await sleep(900);
+const helped = await ev(`(() => {
+  const b = [...document.querySelectorAll(".block")].find(
+    (x) => x.querySelector(".block__label").textContent === "命令");
+  return b ? b.querySelectorAll("tbody tr").length : 0;
+})()`);
+check("/help 画出命令表", helped > 8, { rows: helped });
+
+// 9d. 硬打 /key 要给人话，不是「未知命令」
+await reset();
+await type("/key");
+await key("Enter");
+await sleep(900);
+const keyNote = await ev(`(() => {
+  const n = [...document.querySelectorAll(".note")].map(e => e.textContent).join(" | ");
+  return n.slice(-160);
+})()`);
+check("/key 给的是解释不是「未知命令」",
+      keyNote.includes("只在终端") && !keyNote.includes("未知命令"), keyNote);
+
+// 9e. 启动那条 MCP 说明不该占正文流，也不该顶掉空态提示
+await ev(`stream.replaceChildren(); empty.hidden = false;
+  handle({kind:"boot", what:"mcp", level:"notice", text:"MCP：fin（29 个工具）"}); true`);
+const bootState = JSON.parse(await ev(`JSON.stringify({
+  blocks: document.querySelectorAll(".block").length,
+  bootShown: !document.getElementById("boot").hidden,
+  bootText: document.getElementById("boot").textContent,
+  emptyShown: !empty.hidden,
+})`));
+check("启动说明不进正文流", bootState.blocks === 0, bootState);
+check("启动说明摆在刊头里", bootState.bootShown && bootState.bootText.includes("MCP"), bootState);
+check("空态提示还在", bootState.emptyShown, bootState);
+
 // 10. 普通一句话不该弹菜单
 await reset();
 await type("把 a.py 改一下");

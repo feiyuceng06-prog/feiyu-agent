@@ -25,6 +25,9 @@ let saying = null;
 let sayingText = "";
 let commands = [];
 let seenAsk = new Set();
+/* 这次的 help 事件要不要画出来。连上时我们自己发一次去取补全清单，
+   那次只填数据、不画；用户敲 /help 那次才画。 */
+let wantHelp = false;
 
 /* ── 小工具 ─────────────────────────────────────────────────── */
 
@@ -261,6 +264,19 @@ function handle(ev) {
       break;
     }
 
+    case "boot": {
+      // 环境说明，不是对话：摆进刊头那条带里，**不碰正文流、不动空态提示**
+      const list = $("boot");
+      const old = list.querySelector(`[data-what="${ev.what}"]`);
+      const li = old || document.createElement("li");
+      li.dataset.what = ev.what;
+      li.dataset.level = ev.level || "notice";
+      li.textContent = ev.text;
+      if (!old) list.append(li);
+      list.hidden = false;
+      break;
+    }
+
     case "hook": {
       const body = block("钩子");
       body.innerHTML = `<p class="note" data-level="${ev.ok ? "notice" : "error"}">${esc(ev.text)}</p>`;
@@ -309,12 +325,22 @@ function handle(ev) {
       break;
 
     case "cleared":
+      // 只清对话。刊头那条启动信息说的是环境，跟聊了什么无关，留着
       streamEl.replaceChildren();
       emptyEl.hidden = false;
       break;
 
     case "help":
       commands = ev.commands || [];
+      // 连上时会自己发一次 /help 去取补全清单 —— **那一次不该画出来**，
+      // 不然每次开页面都白白多一块。只有用户自己敲的那次才画。
+      if (wantHelp) {
+        wantHelp = false;
+        const rows = commands.map((c) =>
+          `<tr><td><code>${esc(c.name)}</code></td><td>${esc(c.about)}</td></tr>`).join("");
+        block("命令").innerHTML =
+          `<div class="prose"><table><tbody>${rows}</tbody></table></div>`;
+      }
       break;
 
     case "gone":
@@ -466,6 +492,7 @@ function grow() {
 function submit() {
   const text = inputEl.value.trim();
   if (!text) return;
+  if (text === "/help") wantHelp = true;
   send(text.startsWith("/") ? { op: "command", text } : { op: "prompt", text });
   inputEl.value = "";
   grow();

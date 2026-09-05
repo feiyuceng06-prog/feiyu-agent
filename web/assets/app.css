@@ -181,6 +181,23 @@ body {
    一条长路径把它挤成两行的话，刊头就开始上下跳 */
 #m-workspace { white-space: nowrap; }
 
+/* 启动时说一声接了什么（MCP、项目钩子、项目技能）。
+   **这不是对话**，所以它待在刊头里、跟元信息一档，不进正文流。 */
+.boot {
+  grid-column: 2;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-4);
+  font-size: var(--text-2xs);
+  color: var(--faint);
+  line-height: 1.6;
+}
+
+.boot li[data-level="warn"] { color: var(--alert); }
+
 /* ── 正文流 ────────────────────────────────────────────────── */
 
 .sheet {

@@ -43,6 +43,16 @@ REPLY_TIMEOUT = 600.0
 # 一条消息最多这么长 正常的一句话几百字，几十万字的只可能是坏掉的客户端
 MAX_TEXT = 200_000
 
+# 终端有、网页端**刻意不给**的命令，连同理由 —— 这份表同时用来
+# 1) 从补全菜单里剔掉它们（不该提供你不打算执行的东西）
+# 2) 用户硬打进来时给一句人话，而不是一句「未知命令」
+TERMINAL_ONLY = {
+    "/key": "密钥的增删只在终端做 网页端连读都不给，免得它成为一条把密钥捞出去的路 "
+            "要改就回终端敲 feiyu，再 /key add ",
+    "/theme": "主题换的是终端的配色和记号，网页端用的是自己那套样式，切了没有意义 ",
+    "/exit": "关掉这个标签页就行 要停掉服务回终端按 ctrl-c ",
+}
+
 
 class Protocol:
     """一行一个 JSON 出去，一行一个 JSON 进来 """
@@ -209,13 +219,25 @@ class Server:
             self.proto.send("note", level="notice", text=_plain(cli._hooks(agent)))
         elif head == "/mcp":
             self.proto.send("note", level="notice", text=_plain(cli._mcp(agent)))
+        elif head == "/verify":
+            self.proto.send("note", level="notice", text=_plain(cli._verify(agent, rest)))
+        elif head == "/helper":
+            self.proto.send("note", level="notice", text=_plain(cli._helper(agent, rest)))
+        elif head == "/review":
+            # 要多花一次 API 调用，所以跟终端一样是手动触发的
+            self.proto.send("note", level="notice", text=_plain(cli._review(agent, rest)))
+        elif head in TERMINAL_ONLY:
+            self.proto.send("note", level="warn",
+                            text="%s 只在终端里有：%s" % (head, TERMINAL_ONLY[head]))
         elif head == "/sandbox":
             self.proto.send("note", level="notice", text=_plain(cli._sandbox(rest)))
         elif head == "/help":
-            self.proto.send("help", commands=[
-                {"name": n, "about": d} for n, d in
-                {**ui.SLASH, **{"/" + n: c.description for n, c in self.commands.items()}}.items()
-                if n != "/exit"])
+            # 只列网页端真能跑的：TERMINAL_ONLY 那几条剔掉。
+            # **不该在补全里提供一个点了就报错的东西** —— 用户拿截图来问过 /key。
+            rows = {**ui.SLASH, **{"/" + n: c.description for n, c in self.commands.items()}}
+            self.proto.send("help", commands=[{"name": n, "about": d}
+                                              for n, d in rows.items()
+                                              if n not in TERMINAL_ONLY])
         else:
             self.proto.send("note", level="error", text="未知命令 " + head)
 
@@ -335,15 +357,18 @@ def serve(agent, workspace, tracer, resume: bool = False) -> int:
     events.install(lambda kind, payload: proto.send(kind, **payload))
     # 人看的那些 ANSI 全挪到 stderr，stdout 只剩协议 —— 跟 --json-schema 同一个做法
     with contextlib.redirect_stdout(sys.stderr):
-        note = agent.load_hooks()
-        if note:
-            proto.send("note", level="notice", text=note)
-        mcp_note = agent.load_mcp()
-        if mcp_note:
-            proto.send("note", level="notice", text=mcp_note)
-        skills_note = agent.load_skills()
-        if skills_note:
-            proto.send("note", level="notice", text=skills_note)
+        # 启动时这三句是**环境说明**，不是对话。单独一种事件，让前端摆在别处 ——
+        # 当成 note 发的话它会在正文流里占一整块，看着像 agent 开口说了句什么，
+        # 还会把「把要做的事写在下面」那条空态提示顶掉（用户拿截图来问过）。
+        # 规矩照 0.26.1：常态不占位置，异常才出现。
+        for kind, text in (("hooks", agent.load_hooks()),
+                           ("mcp", agent.load_mcp()),
+                           ("skills", agent.load_skills())):
+            if text:
+                # 「未启用 / 没跑起来」这类要显眼，其余只是说一声接了什么
+                bad = any(w in text for w in ("未启用", "失败", "没起来", "出错"))
+                proto.send("boot", what=kind, level="warn" if bad else "notice",
+                           text=text)
         if resume:
             saved = session_mod.load(workspace)
             if saved and agent.restore(saved):
