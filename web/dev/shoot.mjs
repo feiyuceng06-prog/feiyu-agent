@@ -137,6 +137,22 @@ const FLOW = [
     context: 29100, context_limit: 128000 },
 ];
 
+/* 纯对话：没有工具调用、没有 diff，只有一问一答。
+   这是最常见的一屏，也是最容易做丑的一屏 —— 排版全靠字号和留白撑着。 */
+const TALK = [
+  { kind: "turn_start", text: "你好" },
+  { kind: "text", delta: "你好！我是 Feiyu，很高兴见到你 👋\n\n" },
+  { kind: "text", delta: "我可以帮你在这个工作区里写代码、调试、重构、跑测试、查文档，" },
+  { kind: "text", delta: "也能帮你看看 fin 那边接入的持仓、行情和回测数据。\n\n有什么想做的，直接说就行。" },
+  { kind: "turn_end" },
+  { kind: "turn_start", text: "你是哪个模型" },
+  { kind: "text", delta: "我当前使用的模型是 **qwen/qwen3.8-flash**（配置名 qwen3.8-flash）。" },
+  { kind: "turn_end" },
+  { kind: "turn_start", text: "把 scripts/build.mjs 里读 frontmatter 那段抽成一个函数，两处调用点都换过去，然后跑一遍构建确认产物没变" },
+  { kind: "text", delta: "好，我先看一下那两处怎么写的。" },
+  { kind: "turn_end" },
+];
+
 const ASK = [
   { kind: "preview", rows: [
     { kind: "-", text: "  47  -  rx = re.compile(args[\"regex\"])" },
@@ -180,6 +196,14 @@ await cdp.call("Page.navigate", { url });
 await sleep(1200);
 await feed(FLOW.slice(0, 8));
 console.log("拍了", await cdp.shot("3_narrow", { width: 390, height: 1200 }));
+
+// 纯对话那一屏单独拍一张 —— 它跟有工具调用的那屏排版重点完全不同
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await feed(TALK);
+console.log("拍了", await cdp.shot("4_talk", { width: 1280, height: 900 }));
 
 /* 量一遍网格：每块的大写标签必须跟正文第一行顶对齐。
    靠眼睛看差 2px 是看不出来的，但十几块堆起来整条 rail 就是歪的。

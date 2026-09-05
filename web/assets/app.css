@@ -209,6 +209,21 @@ body {
 .stream {
   max-width: var(--content);
   margin: 0 auto;
+  position: relative;
+}
+
+/* meta-rail 的竖线**整条贯通**，不是每块各画一段。
+   逐块画的话块与块之间那点内边距会把它切成一节一节，看着是毛的；
+   整条画才成立 —— 这条线是整页的纵向骨架，它得是一条线。 */
+@media (min-width: 40.001rem) {
+  .stream::before {
+    content: "";
+    position: absolute;
+    left: var(--rail);
+    top: 0;
+    bottom: 0;
+    border-left: 1px solid var(--line);
+  }
 }
 
 /* 一块内容 = 左边一列大写标签 + 右边正文。整个页面的骨架就是这一条网格。 */
@@ -234,14 +249,9 @@ body {
 
 .block__body { min-width: 0; }
 
-/* 窄屏下 rail 收成 0，这条竖线跟着撤 —— 见文件末尾的 media query */
+/* 竖线现在画在 .stream 上（整条贯通），标签这边只留右边距 */
 @media (min-width: 40.001rem) {
-  .block__label {
-    border-right: 1px solid var(--line);
-    padding-right: var(--space-4);
-    margin-right: calc(var(--space-4) * -1);
-    align-self: stretch;
-  }
+  .block__label { padding-right: var(--space-4); margin-right: calc(var(--space-4) * -1); }
 }
 
 @keyframes rise {
@@ -253,18 +263,34 @@ body {
   .block { animation: none; }
 }
 
-/* 人说的话：加粗、左边一条蓝线。全站唯一一处「面」，蓝在这儿是线不是字。 */
-.block--you { border-top-color: var(--line-strong); }
+/* 人说的话 = 一段对话的**小标题**。
+ *
+ * 原来是「加粗 + 左边一条蓝线」，三个毛病：
+ *   1. 蓝线正好挨着 meta-rail 那条竖线，两条竖线隔几个像素并排，看着像画错了；
+ *   2. 标签「你」已经说明是谁在说话了，再加一条线加一次加粗，同一件事说了三遍；
+ *   3. 短句子加粗等于在喊。
+ * 改成靠**字号和位置**分层，不靠装饰 —— 这是这套系统一贯的做法：
+ * 用户那句是节的开头（大一档、常规字重、上面一条重线），它说的是正文。
+ */
+.block--you {
+  border-top-color: var(--line-strong);
+  padding-top: var(--space-5);
+}
 
 .block--you .block__label { color: var(--accent); }
 
 .block--you .block__body {
-  border-left: 2px solid var(--accent);
-  padding-left: var(--space-3);
-  font-weight: var(--w-bold);
+  font-size: var(--text-lg);
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* 标签跟着正文的第一行走：正文大了一档，行高不一样，不调的话标签会浮在上面 */
+.block--you .block__label { line-height: calc(var(--text-lg) * 1.5); }
+
+/* 一段对话里，它说的话跟上面那句问话是一体的，之间不再画线 */
+.block--you + .block { border-top-color: transparent; }
 
 /* 工具调用 */
 .tool {
@@ -399,7 +425,8 @@ body {
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
 
-.prose p { margin: 0 0 var(--space-3); }
+.prose p { margin: 0 0 var(--space-4); }
+.prose > p:last-child { margin-bottom: 0; }
 
 .prose h1, .prose h2, .prose h3 {
   margin: var(--space-5) 0 var(--space-2);
