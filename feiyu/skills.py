@@ -34,6 +34,8 @@ import hashlib
 import os
 import re
 
+from . import files
+
 _DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "feiyu"
 )
@@ -162,7 +164,7 @@ def trust(workspace, fingerprint: str) -> None:
     data = _trusted()
     data[str(workspace)] = fingerprint
     try:
-        os.makedirs(_DIR, exist_ok=True)
+        files.private_dir(_DIR)
         fd = os.open(TRUST, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)

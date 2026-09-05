@@ -431,8 +431,13 @@ function send(msg) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
 }
 
+/* 令牌在页面地址里（服务端只认带令牌的连接）。
+   WebSocket **不受同源策略保护**，随便一个网站都能连本机端口，所以服务端那边
+   还有 Origin / Host 校验；这份令牌是给「同机上别的进程」准备的那道门。 */
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+
 function connect() {
-  socket = new WebSocket(`ws://${location.host}/ws`);
+  socket = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(TOKEN)}`);
   socket.onopen = () => {
     stateEl.textContent = "就绪";
     stateEl.dataset.alert = "0";

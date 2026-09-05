@@ -15,6 +15,8 @@ import os
 import time
 import uuid
 
+from . import files
+
 DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
     "feiyu",
@@ -55,7 +57,7 @@ class Trace:
         }
         row.update({k: _short(v) for k, v in fields.items() if v is not None})
         try:
-            os.makedirs(DIR, exist_ok=True)
+            files.private_dir(DIR)
             path = today_path()
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as f:

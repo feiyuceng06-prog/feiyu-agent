@@ -9,6 +9,8 @@ import json
 import os
 import time
 
+from . import files
+
 from .providers import without_images
 
 DIR = os.path.join(
@@ -55,7 +57,7 @@ def save(workspace, agent) -> None:
         "saved_at": time.time(),
     }
     try:
-        os.makedirs(DIR, exist_ok=True)
+        files.private_dir(DIR)
         path = _path(workspace)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:

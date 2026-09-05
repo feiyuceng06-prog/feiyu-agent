@@ -40,6 +40,8 @@ from . import __version__
 
 # 等一个回话最多等这么久 网页关掉了、用户走开了，不能让 agent 永远挂在那儿
 REPLY_TIMEOUT = 600.0
+# 一条消息最多这么长 正常的一句话几百字，几十万字的只可能是坏掉的客户端
+MAX_TEXT = 200_000
 
 
 class Protocol:
@@ -242,31 +244,47 @@ class Server:
 
     def reader(self) -> None:
         for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
             try:
-                msg = json.loads(line)
-            except ValueError:
+                if not self._dispatch_in(line.strip()):
+                    break
+            except Exception:
+                # **一条坏消息不能把这条线程弄死。** 死了之后 stdin 再也没人读，
+                # 页面上看起来是「不响应了」，而 stderr 上那条 traceback 没人看得到。
+                # 实测过：`{"op":"reply","id":"不是数字"}` 就足够（int() 抛 ValueError）。
                 continue
-            op = msg.get("op")
-            if op == "reply":
-                self.proto.reply(int(msg.get("id") or 0), msg.get("value"))
-            elif op == "interrupt":
-                # 跟 esc 落在同一处，0.12.0 那套补历史的机制原样生效
-                if self.busy:
-                    _thread.interrupt_main()
-            elif op == "prompt":
-                self.inbox.put(("prompt", str(msg.get("text") or "")))
-            elif op == "command":
-                self.inbox.put(("command", str(msg.get("text") or "")))
-            elif op == "status":
-                self.push_status()
-            elif op == "stop":
-                break
         self.stopped = True
         self.proto.fail_all()
         self.inbox.put(("stop", ""))
+
+    def _dispatch_in(self, line: str) -> bool:
+        """处理一条进来的消息 返回 False 表示对面要停了 """
+        if not line:
+            return True
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            return True
+        if not isinstance(msg, dict):
+            return True
+        op = msg.get("op")
+        if op == "stop":
+            return False
+        if op == "reply":
+            try:
+                rid = int(msg.get("id"))
+            except (TypeError, ValueError):
+                return True
+            self.proto.reply(rid, msg.get("value"))
+        elif op == "interrupt":
+            # 跟 esc 落在同一处，0.12.0 那套补历史的机制原样生效
+            if self.busy:
+                _thread.interrupt_main()
+        elif op in ("prompt", "command"):
+            text = str(msg.get("text") or "")[:MAX_TEXT]
+            self.inbox.put((op, text))
+        elif op == "status":
+            self.push_status()
+        return True
 
     def run(self) -> int:
         threading.Thread(target=self.reader, daemon=True).start()
@@ -277,10 +295,20 @@ class Server:
                 return 0
             if not text.strip():
                 continue
-            if op == "command" or text.startswith("/"):
-                self.run_command(text if text.startswith("/") else "/" + text)
-            else:
-                self.handle_prompt(text)
+            try:
+                if op == "command" or text.startswith("/"):
+                    self.run_command(text if text.startswith("/") else "/" + text)
+                else:
+                    self.handle_prompt(text)
+            except KeyboardInterrupt:
+                # 中断是从 reader 线程用 interrupt_main() 扔过来的，它按 self.busy
+                # 判断该不该扔，而 busy 是在 handle_prompt 的 finally 里清的 ——
+                # 中间有个窗口，这一下会落在收尾代码或者下面的 inbox.get() 上。
+                # 不接住的话整个服务就没了，而用户只是按了一下中断。
+                self.busy = False
+                self.proto.send("note", level="warn", text="已中断")
+                self.proto.send("turn_end")
+                self.push_status()
 
 
 def serve(agent, workspace, tracer, resume: bool = False) -> int:

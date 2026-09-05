@@ -9,6 +9,8 @@
 import json
 import os
 
+from . import files
+
 _DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "feiyu"
 )
@@ -19,7 +21,7 @@ FIELDS = ("kind", "base_url", "model", "key", "price", "vision", "max_tokens", "
 
 
 def _write(path: str, data) -> None:
-    os.makedirs(_DIR, exist_ok=True)
+    files.private_dir(_DIR)
     # 先按 600 建好再写，别让密钥有一瞬间是 644
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:

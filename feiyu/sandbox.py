@@ -29,6 +29,8 @@ import os
 import shutil
 import subprocess
 
+from . import files
+
 LEVELS = ("off", "workspace", "strict")
 DEFAULT = "workspace"
 
@@ -91,7 +93,7 @@ def level() -> str:
 
 def set_level(name: str) -> None:
     try:
-        os.makedirs(_DIR, exist_ok=True)
+        files.private_dir(_DIR)
         fd = os.open(STORE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"level": name}, f)

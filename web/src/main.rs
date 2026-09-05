@@ -11,11 +11,22 @@
 //! prompt_toolkit），而网页端要 HTTP、WebSocket、静态资源和并发连接。放在这儿，
 //! Python 侧一个依赖都不用加，同时用户拿到的是一个不用装运行时的可执行文件。
 //!
-//! # 只听 127.0.0.1
+//! # 谁能连上来
 //!
-//! **这一条不要改成可配置的。** 连上这个端口的人可以让 agent 在这台机器上写文件、
-//! 跑命令。它没有登录、没有令牌，唯一的边界就是「只有本机能连」。要从别的机器用，
-//! 开一条 ssh 隧道（`ssh -L 7777:127.0.0.1:7777 这台机器`），那样认证是 ssh 的事。
+//! 连上这个端口的人可以让 agent 在这台机器上写文件、跑命令，所以这里有三道门，
+//! **三道都是必要的，别删任何一道**：
+//!
+//! 1. **只听 127.0.0.1**。不要改成可配置的；要从别的机器用就开 ssh 隧道
+//!    （`ssh -L 7777:127.0.0.1:7777 这台机器`），那样认证是 ssh 的事。
+//! 2. **一次性令牌**。每次启动随机生成，只出现在开浏览器的那个地址里。
+//!    光靠「只听回环」不够：这台机器上**任何一个进程、任何一个用户**都能连回环地址。
+//! 3. **Origin 和 Host 校验**。这一条治的是最要命的那种：
+//!    **WebSocket 不受同源策略保护** —— 你在浏览器里随便打开一个网站，那个网站的
+//!    脚本就能 `new WebSocket("ws://127.0.0.1:7777/ws")` 连上来，浏览器照连不误，
+//!    也不会有 CORS 预检。实测过：这样连上之后可以 `/mode auto` 关掉确认、
+//!    让 agent 读任意文件并把内容通过同一条连接送出去、跑任意命令。
+//!    换句话说，**没有这道门，「访问一个网页」就等于「在你机器上执行任意代码」**。
+//!    Host 校验另外挡 DNS rebinding（把 evil.com 解析到 127.0.0.1 绕开 Origin）。
 //!
 //! # 一个进程，多个标签页
 //!
@@ -28,8 +39,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::extract::{RawQuery, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -47,6 +58,9 @@ const APP_JS: &str = include_str!("../assets/app.js");
 /// 的几千条工具事件全堆给它。
 const REPLAY: usize = 400;
 
+/// 一条 WebSocket 消息封顶多大。Python 那边另有一道 `MAX_TEXT`，两道都要。
+const MAX_MESSAGE: usize = 1 << 20; // 1 MiB
+
 struct App {
     /// 发给所有浏览器的事件。
     events: broadcast::Sender<String>,
@@ -54,6 +68,10 @@ struct App {
     to_agent: mpsc::UnboundedSender<String>,
     /// 最近的事件，给新连上的标签页回放。
     replay: Mutex<VecDeque<String>>,
+    /// 这一次启动的令牌，见文件头第 2 道门。
+    token: String,
+    /// 监听的端口，用来核 Origin / Host。
+    port: u16,
 }
 
 impl App {
@@ -63,6 +81,82 @@ impl App {
             log.pop_front();
         }
         log.push_back(line.to_string());
+    }
+
+    fn token_ok(&self, query: Option<&str>) -> bool {
+        token_ok(&self.token, query)
+    }
+
+    /// Origin 和 Host 都必须是「本机上的我们自己」。
+    ///
+    /// Origin 治的是「随便打开的网页连过来」：浏览器发 WebSocket 时**一定**会带
+    /// Origin，而同源策略管不住 WebSocket，所以只能在服务端自己核。
+    /// 没有 Origin 的一律拒——浏览器不会不带，不带的是脚本，而脚本没有正当理由连这里。
+    ///
+    /// Host 治的是 DNS rebinding：攻击者把自己的域名解析到 127.0.0.1，
+    /// 这时 Origin 是他的域名（已经被上面拦了），Host 也是他的域名（被这里拦）。
+    fn origin_ok(&self, headers: &HeaderMap) -> bool {
+        origin_ok(
+            self.port,
+            headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+            headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        )
+    }
+}
+
+/// 令牌对不对。定时比较，不要写成 `a == b`——虽然这里的时间差基本没法利用，
+/// 但按常数时间写不花什么力气。
+fn token_ok(expected: &str, query: Option<&str>) -> bool {
+    let Some(given) = query.and_then(param) else {
+        return false;
+    };
+    let (expected, given) = (expected.as_bytes(), given.as_bytes());
+    if given.len() != expected.len() || expected.is_empty() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in expected.iter().zip(given) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Origin 和 Host 都必须是「本机上的我们自己」。见 `App::origin_ok` 上面那段。
+fn origin_ok(port: u16, origin: Option<&str>, host: Option<&str>) -> bool {
+    let allowed = [
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+        format!("http://[::1]:{port}"),
+    ];
+    let Some(origin) = origin else { return false };
+    if !allowed.iter().any(|ok| ok == origin) {
+        return false;
+    }
+    let Some(host) = host else { return false };
+    matches!(host.rsplit_once(':'), Some((name, given))
+        if given == port.to_string()
+            && (name == "127.0.0.1" || name == "localhost" || name == "[::1]"))
+}
+
+/// 从 `t=xxx&…` 里取出令牌。够用就好，不为这一个参数引 url 解析库。
+fn param(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("t="))
+}
+
+/// 一次性令牌。走 `/dev/urandom`，不为一个随机数引 rand（这个程序本来就只跑 POSIX）。
+fn make_token() -> String {
+    let mut raw = [0u8; 16];
+    match std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut raw))
+    {
+        Ok(()) => raw.iter().map(|b| format!("{b:02x}")).collect(),
+        // 读不到熵就不要退而求其次编一个假随机 —— 那等于没有这道门。
+        Err(err) => {
+            eprintln!("读不了 /dev/urandom（{err}），没法生成令牌，不启动。");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -178,8 +272,71 @@ async fn pump_stdin(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
     }
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> Response {
-    ws.on_upgrade(move |socket| client(socket, app))
+fn denied(why: &str) -> Response {
+    (StatusCode::FORBIDDEN, format!("{why}\n")).into_response()
+}
+
+async fn ws_handler(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // 三道门都要过。顺序无所谓，但**一道都不能少**，理由见文件头。
+    if !app.origin_ok(&headers) {
+        eprintln!("挡下一条来路不明的 WebSocket（Origin/Host 不对）");
+        return denied("origin not allowed");
+    }
+    if !app.token_ok(query.as_deref()) {
+        eprintln!("挡下一条没有令牌的 WebSocket");
+        return denied("bad token");
+    }
+    // 一条消息封个顶。协议里最大的一条就是用户打的一段话，几十 KB 顶天了；
+    // 不封顶的话一个坏掉的客户端可以拿一条巨帧把内存吃光。
+    ws.max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .on_upgrade(move |socket| client(socket, app))
+}
+
+async fn serve_index(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> Response {
+    if !app.token_ok(query.as_deref()) {
+        return no_token();
+    }
+    // 页面里两个资源地址也得带令牌，而令牌是启动时才有的，所以在这儿填。
+    // 只有 index 需要填，app.css / app.js 里没有占位符。
+    let page = INDEX_HTML.replace("__TOKEN__", &app.token);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        page,
+    )
+        .into_response()
+}
+
+fn no_token() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "地址里少了令牌。回到起 feiyu-web 的那个终端，用它印出来的完整地址打开。\n",
+    )
+        .into_response()
+}
+
+async fn serve_asset(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+    body: &'static str,
+    mime: &'static str,
+) -> Response {
+    // 静态资源也要令牌：拿不到页面就拿不到里面那份 app.js，
+    // 也就少一条「先摸清楚协议长什么样」的路。
+    if !app.token_ok(query.as_deref()) {
+        return no_token();
+    }
+    asset(body, mime)
 }
 
 async fn client(socket: WebSocket, app: Arc<App>) {
@@ -262,6 +419,8 @@ async fn main() {
         events: events.clone(),
         to_agent,
         replay: Mutex::new(VecDeque::with_capacity(REPLAY)),
+        token: make_token(),
+        port: args.port,
     });
 
     tokio::spawn(pump_stdin(stdin, from_web));
@@ -286,14 +445,11 @@ async fn main() {
     });
 
     let router = Router::new()
-        .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
-        .route("/app.css", get(|| async { asset(APP_CSS, "text/css; charset=utf-8") }))
-        .route(
-            "/app.js",
-            get(|| async { asset(APP_JS, "text/javascript; charset=utf-8") }),
-        )
+        .route("/", get(serve_index))
+        .route("/app.css", get(|s, q| serve_asset(s, q, APP_CSS, "text/css; charset=utf-8")))
+        .route("/app.js", get(|s, q| serve_asset(s, q, APP_JS, "text/javascript; charset=utf-8")))
         .route("/ws", get(ws_handler))
-        .with_state(app);
+        .with_state(app.clone());
 
     // 只听回环地址。理由见文件头，别改成可配置的。
     let addr = format!("127.0.0.1:{}", args.port);
@@ -306,10 +462,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let url = format!("http://{addr}/");
+    // 令牌在地址里。**别把它另外印一遍**，一份就够，多印一份多一处泄露。
+    let url = format!("http://{addr}/?t={}", app.token);
     eprintln!("feiyu-web  {url}");
     eprintln!("工作目录   {}", workspace.display());
-    eprintln!("停下来按 ctrl-c。");
+    eprintln!("地址里的令牌每次启动都不一样，别分享这个链接。停下来按 ctrl-c。");
     if args.open {
         let _ = Command::new("xdg-open").arg(&url).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     }
@@ -318,4 +475,58 @@ async fn main() {
         eprintln!("服务停了：{err}");
     }
     let _ = child.kill().await;
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn 令牌只认一模一样的() {
+        assert!(token_ok(T, Some(&format!("t={T}"))));
+        assert!(token_ok(T, Some(&format!("x=1&t={T}"))));
+        assert!(!token_ok(T, Some("t=")));
+        assert!(!token_ok(T, Some(&format!("t={}", &T[..31]))));   // 短一位
+        assert!(!token_ok(T, Some(&format!("t={T}0"))));           // 长一位
+        assert!(!token_ok(T, Some("nope=1")));
+        assert!(!token_ok(T, None));
+        // 令牌本身是空的时候一律不放行，别让「没生成」变成「谁都能进」
+        assert!(!token_ok("", Some("t=")));
+    }
+
+    #[test]
+    fn 随便一个网站连不上来() {
+        // 这一条是整个服务最要紧的检查：WebSocket 不受同源策略保护
+        let host = Some("127.0.0.1:7777");
+        assert!(!origin_ok(7777, Some("https://evil.example"), host));
+        assert!(!origin_ok(7777, Some("null"), host));
+        assert!(!origin_ok(7777, None, host));
+        assert!(!origin_ok(7777, Some("http://127.0.0.1:9999"), host));   // 别的端口
+    }
+
+    #[test]
+    fn dns_rebinding_被_host_挡住() {
+        let origin = Some("http://127.0.0.1:7777");
+        assert!(!origin_ok(7777, origin, Some("evil.example:7777")));
+        assert!(!origin_ok(7777, origin, Some("127.0.0.1:9999")));
+        assert!(!origin_ok(7777, origin, None));
+    }
+
+    #[test]
+    fn 自己的页面放行() {
+        for name in ["127.0.0.1", "localhost", "[::1]"] {
+            assert!(origin_ok(7777, Some(&format!("http://{name}:7777")),
+                              Some(&format!("{name}:7777"))), "{name}");
+        }
+    }
+
+    #[test]
+    fn 令牌是随机的而且够长() {
+        let (a, b) = (make_token(), make_token());
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b);
+    }
 }

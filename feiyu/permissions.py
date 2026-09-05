@@ -14,6 +14,8 @@ import json
 import os
 import re
 
+from . import files
+
 _DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "feiyu"
 )
@@ -138,7 +140,7 @@ def load() -> dict:
 
 def save(rules: dict) -> None:
     try:
-        os.makedirs(_DIR, exist_ok=True)
+        files.private_dir(_DIR)
         # 跟 feiyu 其他配置一样 0600：这份列的是哪些命令不用问就能跑，
         # 别人读得到就等于知道从哪儿下手
         fd = os.open(STORE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

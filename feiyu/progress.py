@@ -21,6 +21,8 @@ import json
 import os
 import time
 
+from . import files
+
 DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
     "feiyu",
@@ -67,7 +69,7 @@ def save(workspace, task: str, items: list) -> None:
                   for i in rows][:MAX_ITEMS],
     }
     try:
-        os.makedirs(DIR, exist_ok=True)
+        files.private_dir(DIR)
         fd = os.open(path_for(workspace), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)

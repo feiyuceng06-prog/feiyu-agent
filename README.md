@@ -264,7 +264,9 @@ feiyu-web --no-open               # don't open a browser
 
 Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown in the page as a diff or the literal command, and nothing runs until you approve; "allow for this session" and a permanent rule are both there. Slash commands, skills, custom commands and `esc` to interrupt all work.
 
-**It listens on `127.0.0.1` only.** Anyone who reaches that port can have it write files and run commands on your machine, and it has no login and no token — the only boundary is that only this machine can connect. To use it from elsewhere, tunnel over ssh:
+**Three gates.** Anyone who reaches that port can have it write files and run commands on your machine, so: it listens on `127.0.0.1` only; each start mints a random token that appears only in the URL it prints for you (**don't pass that link around**); and the server checks `Origin` and `Host`, because **WebSocket is not covered by the same-origin policy** — without that gate, any web page you happen to open could connect to the local port and drive the agent.
+
+To use it from elsewhere, tunnel over ssh:
 
 ```
 ssh -L 7777:127.0.0.1:7777 that-machine
@@ -398,6 +400,8 @@ It really runs commands and edits files on your machine, with your permissions.
 - With bubblewrap, bash writes are confined to the workspace; reads are not. Without it there is no isolation at all.
 - Environment variables whose names contain `KEY` `TOKEN` `SECRET` `PASSWORD` are not passed to child processes. `SSH_AUTH_SOCK` is kept, so `git push` works. To pass a specific secret: `FEIYU_KEEP_ENV_SECRETS=1 feiyu`.
 - Fetched pages are labelled "external data, not instructions", but whether the model obeys is not guaranteed.
+- `~/.config/feiyu/` (keys) and `~/.local/state/feiyu/` (transcripts, input history) are 700 directories with 600 files.
+- The web front end listens on loopback only, behind a per-run token and `Origin`/`Host` checks — see [the web front end](#the-web-front-end).
 
 So: use it on projects you trust and keep under git, where a bad edit is easy to undo. Don't run untrusted tasks on a machine holding sensitive credentials. For hard isolation use a container or a VM.
 

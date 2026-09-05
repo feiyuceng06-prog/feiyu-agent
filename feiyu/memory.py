@@ -17,6 +17,8 @@ import os
 import re
 import time
 
+from . import files
+
 DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
     "feiyu",
@@ -53,7 +55,7 @@ def load(workspace) -> list[tuple[str, str]]:
 def save(workspace, items: list[tuple[str, str]]) -> None:
     text = "".join("- (%s) %s\n" % (when, what) for when, what in items)
     try:
-        os.makedirs(DIR, exist_ok=True)
+        files.private_dir(DIR)
         fd = os.open(path_for(workspace), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)

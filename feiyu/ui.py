@@ -14,7 +14,7 @@ import time
 
 from prompt_toolkit.utils import get_cwidth
 
-from . import events
+from . import events, files
 
 # 黑灰打底，其余四色刻意压暗，浅底深底都读得清
 _RGB = {
@@ -1246,10 +1246,23 @@ MODEL_NAMES = lambda: []
 
 
 def _history_file() -> str:
+    """输入历史存哪儿
+
+    **这个文件要 0600。** 它是用户在输入框里打过的每一行原文 —— 跟对话存盘同一
+    性质的东西，只是没人会想到它。prompt_toolkit 的 FileHistory 是按默认 umask
+    建的（多半 0644），所以这里先把它建出来并收紧，再交给它去追加。
+    （0.50.1 之前它一直是 0644 的。）
+    """
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     folder = os.path.join(base, "feiyu")
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, "history")
+    files.private_dir(folder)
+    path = os.path.join(folder, "history")
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_APPEND, 0o600))
+        os.chmod(path, 0o600)      # 已经存在的那份是老权限，也要收
+    except OSError:
+        pass
+    return path
 
 
 class InputBox:

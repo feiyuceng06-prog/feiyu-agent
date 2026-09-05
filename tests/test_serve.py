@@ -154,6 +154,105 @@ class TestProtocol(unittest.TestCase):
         self.proto.send("note", text="对面没了")    # 不该抛
 
 
+class TestReaderHardening(unittest.TestCase):
+    """一条坏消息不能把读 stdin 的线程弄死
+
+    死了之后 stdin 再也没人读，页面上看起来是「不响应了」，
+    而 stderr 上那条 traceback 谁也看不到。0.50.1 之前真的是这样。
+    """
+
+    class Box(serve.Server):
+        def __init__(self):
+            self.inbox = __import__("queue").Queue()
+            self.busy = False
+            self.pushed = 0
+            self.proto = serve.Protocol(io.StringIO())
+
+        def push_status(self):
+            self.pushed += 1
+
+    def setUp(self):
+        self.server = self.Box()
+
+    def feed(self, line):
+        return self.server._dispatch_in(line)
+
+    def test_畸形的_reply_id_不抛(self):
+        for bad in ('{"op":"reply","id":"不是数字"}', '{"op":"reply"}',
+                    '{"op":"reply","id":null}', '{"op":"reply","id":[1]}'):
+            self.assertTrue(self.feed(bad), bad)
+
+    def test_不是_json_不抛(self):
+        for bad in ("これはJSONではない", "[1,2,3]", '"字符串"', "null", "{"):
+            self.assertTrue(self.feed(bad), bad)
+
+    def test_不认识的_op_忽略掉(self):
+        self.assertTrue(self.feed('{"op":"没这个"}'))
+        self.assertTrue(self.feed("{}"))
+
+    def test_坏消息之后照样收得下正常消息(self):
+        self.feed('{"op":"reply","id":"不是数字"}')
+        self.feed('{"op":"command","text":"/mode"}')
+        self.assertEqual(self.server.inbox.get_nowait(), ("command", "/mode"))
+
+    def test_超长的正文要截(self):
+        self.feed(json.dumps({"op": "prompt", "text": "x" * (serve.MAX_TEXT + 5000)}))
+        op, text = self.server.inbox.get_nowait()
+        self.assertEqual(op, "prompt")
+        self.assertEqual(len(text), serve.MAX_TEXT)
+
+    def test_stop_要让读线程停下来(self):
+        self.assertFalse(self.feed('{"op":"stop"}'))
+
+    def test_不忙的时候不该扔中断(self):
+        # busy 是 False，扔了会落在没人接的地方，把整个服务带走
+        self.server.busy = False
+        self.assertTrue(self.feed('{"op":"interrupt"}'))
+
+
+class TestPrivateDirs(unittest.TestCase):
+    """密钥、对话原文、长期记忆都在这几个目录下，别让同机的别人列得到 """
+
+    def test_目录建出来是_700(self):
+        import os
+        import tempfile
+
+        from feiyu import files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "feiyu", "sessions")
+            files.private_dir(target)
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+            # 中间那层叫 feiyu 的也要收紧，不然只收末一层等于没收
+            self.assertEqual(os.stat(os.path.join(tmp, "feiyu")).st_mode & 0o777, 0o700)
+
+    def test_已经存在的老目录也收紧(self):
+        import os
+        import tempfile
+
+        from feiyu import files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "feiyu", "logs")
+            os.makedirs(target)
+            os.chmod(target, 0o755)
+            files.private_dir(target)
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+
+    def test_输入历史是_600(self):
+        """里面是用户打过的每一行原文，跟对话存盘同一性质 """
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["XDG_STATE_HOME"] = tmp
+            try:
+                path = ui._history_file()
+            finally:
+                del os.environ["XDG_STATE_HOME"]
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
 class TestPlain(unittest.TestCase):
     def test_剥掉_ANSI(self):
         painted = ui.paint("red", "危险") if ui._COLOR else "\033[31m危险\033[0m"
