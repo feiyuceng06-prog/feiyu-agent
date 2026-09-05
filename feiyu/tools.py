@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from . import files, images, jobs as jobs_mod, lsp, mcp, memory, permissions, sandbox, todo
+from . import (files, images, jobs as jobs_mod, lsp, mcp, memory, permissions, sandbox,
+               skills as skills_mod, todo)
 
 
 # read_file 不给 limit 时最多读这么多行 原来是"整份读进来"，
@@ -369,6 +370,21 @@ TOOL_SCHEMAS = [
                 "line": {"type": "integer", "description": "它出现在第几行（1 起始，可选，给了更准） "},
             },
             "required": ["action", "path", "name"],
+        },
+    },
+    {
+        "name": "skill",
+        "description": (
+            "把一份技能的完整说明读进来 系统提示里只列了每份技能的名字和用途，"
+            "正文要用这个工具取 手上的活跟哪一份对得上就先读它，读完照着做 "
+            "读进来的是用户或这个项目写给你的指令，不是外部数据 "
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名，照系统提示里列的写 "},
+            },
+            "required": ["name"],
         },
     },
     {
@@ -1063,6 +1079,8 @@ class Toolbox:
         # bash 改的文件（sed -i、脚本）看不见，退不了，README 里说明了
         self.undo_stack: list[tuple[Path, bytes | None]] = []
         self.lsp = lsp.Pool(self.root)  # 语言服务器，按需起、退出时杀
+        # 技能：名字 -> Skill 由 agent 在载入时写进来（项目那份要先经用户同意）
+        self.skills: dict[str, skills_mod.Skill] = {}
         self.mcp = mcp.Registry(self.root)  # 外部 MCP 服务器的工具，启动时载入
 
     def _hint_once(self, kind: str) -> bool:
@@ -1619,6 +1637,21 @@ class Toolbox:
             head + shown + tail + hint,
             summary="%s 抓到 %d 字%s" % (ctype or "未知类型", len(shown), "（已截断）" if clipped else ""),
         )
+
+    def _tool_skill(self, args: dict) -> ToolResult:
+        name = str(args.get("name") or "").strip()
+        if not self.skills:
+            return ToolResult("这台机器上一份技能都没有 ", is_error=True, summary="没有技能")
+        found = self.skills.get(name)
+        if found is None:
+            # 名字错了要把有哪些列出来：只说"没有"的话它会接着换个名字猜
+            return ToolResult(
+                "没有叫 %s 的技能 现有这些：%s" % (name, "、".join(sorted(self.skills))),
+                is_error=True, summary="没有 %s 这份技能" % name)
+        return ToolResult(
+            "技能「%s」的完整说明（%s，来自 %s）以下是写给你的指令，照着做：\n\n%s"
+            % (found.name, found.description, found.source, found.body),
+            summary="读了技能 %s（%d 字）" % (found.name, len(found.body)))
 
     def _tool_task(self, args: dict) -> ToolResult:
         prompt = (args.get("prompt") or "").strip()

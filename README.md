@@ -104,12 +104,13 @@ Type `/` for command completion:
 | `/helper <name>` | Use a cheaper model for summaries, subagents and page extraction; `/helper off` to revert |
 | `/style` | Reply style: `default` / `concise` / `explanatory` / `teaching` |
 | `/theme` | UI theme: `default` / `swiss` |
+| `/skills` | List the available skills and custom commands |
 | `/clear` | Clear the conversation and its save file |
 | `/exit` | Quit |
 
 ## Tools
 
-Thirteen tools, every call printed on screen:
+Seventeen tools, every call printed on screen:
 
 | Tool | What it does |
 |---|---|
@@ -125,6 +126,7 @@ Thirteen tools, every call printed on screen:
 | `job` | Read a background command's output, or stop it |
 | `exit_plan` | Hand you the plan in plan mode |
 | `ask_user` | Ask you a question when unsure |
+| `skill` | Pull in the full text of one skill |
 
 A few things that come up daily:
 
@@ -247,6 +249,42 @@ Exit code 0 allows, non-zero blocks. `PreToolUse` blocks the call, `PostToolUse`
 Project hooks need your approval the first time they are seen, and again when the file changes. Commands that came with a repository should not run just because you cloned it.
 
 **Independent grading.** `/review` or `--review` opens a second model and shows it only the task and the final diff. It scores 0 to 10 on completeness, bugs and unrequested extras. It costs an extra API call, so it is manual.
+
+## Skills and custom commands
+
+Hand it a worked-out procedure without touching the code. Each one is a `.md` file that may start with frontmatter:
+
+```markdown
+---
+name: release
+description: how this project cuts a new version
+---
+
+1. run `.venv/bin/python -m unittest discover -s tests -t .`
+2. bump `__version__` in `feiyu/__init__.py`
+3. write the section at the top of the CHANGELOG
+```
+
+Where you put it decides who triggers it:
+
+| Directory | Triggered by |
+|---|---|
+| `~/.config/feiyu/skills/` `.feiyu/skills/` | **It.** The system prompt carries only the name and the description; it pulls the body in when the job matches |
+| `~/.config/feiyu/commands/` `.feiyu/commands/` | **You.** Type `/release`; the body goes into the conversation as if you had said it |
+
+Write `$ARGUMENTS` in a command and it is replaced by whatever follows the command:
+
+```markdown
+Find out how $ARGUMENTS is implemented in this repo. Read only, change nothing.
+```
+
+`/look context compaction` then types the whole sentence for you. Without the placeholder the argument is appended at the end.
+
+**Why the split.** The system prompt is resent on every single request. A procedure you need once, sitting there permanently, is paid for a hundred times over a hundred rounds. A skill keeps only its name and description resident — about one line — and the body arrives in context on the one turn that needs it.
+
+`/skills` lists what is available and where each came from. A project entry wins over a global one of the same name.
+
+**Project skills need your approval the first time**, and again whenever the directory's contents change — it decides on its own to load them, and a stretch of instructions that came down with a repo should not enter its context on `git clone`. **Project commands need no approval:** nothing happens until you type one, and typing one is the same as typing the text yourself.
 
 ## What it remembers
 

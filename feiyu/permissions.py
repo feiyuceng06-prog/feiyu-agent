@@ -37,6 +37,7 @@ RULE_NAME = {
     "ask_user": "Ask",
     "git": "Git",
     "symbol": "Symbol",
+    "skill": "Skill",
 }
 # MCP 工具的名字是 mcp_<服务器>_<工具>，规则一律写 Mcp(...)
 # 匹配文本是"服务器 工具"，由 Registry 在载入时填进来（服务器名里可能带下划线，从工具名上切不准）
@@ -81,6 +82,8 @@ DEFAULT_ALLOW = [
     "Git(log:*)",
     # 只读，走语言服务器
     "Symbol(*)",
+    # 只是把一份本地的说明书读进来，而且项目那份在载入时已经经过用户同意
+    "Skill(*)",
 ]
 
 # 出厂拦截的：碰这些路径的命令一律不放行，deny 优先所以 allow 里写了也没用

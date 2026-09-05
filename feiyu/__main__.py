@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import hooks as hooks_mod
 from . import mcp as mcp_mod
+from . import skills as skills_mod
 from . import keys, memory, permissions, pricing, progress, sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
@@ -103,10 +104,22 @@ def main() -> int:
     agent.approve_mcp = lambda path, names: ui.ask_yes_no(
         "%s 里配置了 MCP 服务器 %s，它们会在这台机器上启动 要启用吗？" % (
             mcp_mod.PROJECT, "、".join(names)))
+    # 项目技能是仓库里带下来的指令，而且是模型自己决定加载的：跟钩子同一类注入通道
+    agent.approve_skills = lambda folder, names: ui.ask_yes_no(
+        "%s 里有 %d 份项目技能（%s），它们会进它的上下文 要启用吗？" % (
+            skills_mod.PROJECT_SKILLS, len(names), "、".join(names[:6])
+            + ("…" if len(names) > 6 else "")))
     note = agent.load_hooks()
     mcp_note = agent.load_mcp()
     if mcp_note:
         print(ui.notice(mcp_note), file=sys.stderr)
+    skills_note = agent.load_skills()
+    if skills_note:
+        print(ui.notice(skills_note), file=sys.stderr)
+    # 自定义命令不用同意：用户不敲就不会生效，敲了等于他自己把那段字打了一遍
+    commands = {c.name: c for c in skills_mod.load_commands(workspace)}
+    ui.EXTRA_SLASH.clear()
+    ui.EXTRA_SLASH.update({"/" + n: c.description for n, c in commands.items()})
     # 带了上次的半截进度就说一声 不说的话下次开工它突然提起一件旧事，
     # 用户不知道这话是哪来的
     if progress.as_prompt(agent.resumed):
@@ -202,7 +215,19 @@ def main() -> int:
             return _finish(agent, tracer, 0)
         if not text:
             continue
+        expanded = ""
         if text.startswith("/"):
+            head, _, rest = text.partition(" ")
+            # 内置命令优先：同名的自定义命令不能把 /clear 顶掉
+            custom = commands.get(head[1:]) if head not in ui.SLASH else None
+            if custom is not None:
+                expanded = skills_mod.expand(custom, rest.strip())
+                print(ui.notice("%s → %s（%s）" % (head, custom.description, custom.source)))
+                print()
+        if expanded:
+            # 展开完就是用户自己说的那段话，往下按普通输入走
+            text = expanded
+        elif text.startswith("/"):
             cmd, _, arg = text.partition(" ")
             arg = arg.strip()
             if cmd == "/exit":
@@ -250,6 +275,8 @@ def main() -> int:
                 print(_jobs(agent, arg))
             elif cmd == "/mcp":
                 print(_mcp(agent))
+            elif cmd == "/skills":
+                print(_skills(agent, commands))
             elif cmd == "/undo":
                 said = agent.undo()
                 print(ui.notice(said + "（下一句话时会告诉它）") if said
@@ -562,11 +589,39 @@ def _theme(arg: str) -> str:
     return "\n".join(rows)
 
 
+def _skills(agent: Feiyu, commands: dict) -> str:
+    found = sorted(agent.toolbox.skills.values(), key=lambda s: s.name)
+    if not found and not commands:
+        return ui.notice(
+            "还没有技能和自定义命令 一份技能就是一个 .md：全局放 %s/，"
+            "项目放 %s/；开头可以写 --- name / description ---，正文是给它的指令 "
+            "命令换成 %s/，敲 /名字 触发，正文里的 $ARGUMENTS 换成你跟在后面的话 "
+            % (skills_mod.GLOBAL_SKILLS, skills_mod.PROJECT_SKILLS, skills_mod.PROJECT_COMMANDS))
+    rows = []
+    if found:
+        rows.append(ui.notice("技能（它自己按需读，用 skill 工具）"))
+        for one in found:
+            rows.append("    " + ui.bold(ui.pad(one.name, 16))
+                        + ui.paint("grey", "%s · %s" % (one.description, one.source)))
+    if commands:
+        if rows:
+            rows.append("")
+        rows.append(ui.notice("命令（你敲 /名字 触发）"))
+        for name in sorted(commands):
+            one = commands[name]
+            rows.append("    " + ui.bold(ui.pad("/" + name, 16))
+                        + ui.paint("grey", "%s · %s" % (one.description, one.source)))
+    if agent.skills_note:
+        rows.append("")
+        rows.append(ui.warn(agent.skills_note))
+    return "\n".join(rows)
+
+
 def _help() -> str:
     rows = [ui.notice("命令")]
-    for cmd, desc in ui.SLASH.items():
+    for cmd, desc in {**ui.SLASH, **ui.EXTRA_SLASH}.items():
         # 最长的命令 /compact / /context 正好 8 个字符，ljust(8) 会让名字和说明贴在一起
-        rows.append("    " + ui.bold(cmd.ljust(10)) + ui.paint("grey", desc))
+        rows.append("    " + ui.bold(ui.pad(cmd, 10)) + ui.paint("grey", desc))
     rows.append("")
     rows.append(ui.notice("按键    ⏎ 发送 · \\⏎ 换行 · shift+tab 切模式 · esc 中断当前回答 · ctrl-d 退出"))
     rows.append(ui.notice("版本    feiyu " + __version__))

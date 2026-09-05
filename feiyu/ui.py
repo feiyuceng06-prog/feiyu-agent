@@ -108,6 +108,13 @@ def clip(text: str, limit: int) -> str:
     return "".join(kept) + "…"
 
 
+def pad(text: str, limit: int) -> str:
+    """按显示宽度右补空格 `ljust` 数的是字符数，CJK 一个字占两格，
+    技能和自定义命令的名字可以是中文，用 ljust 会对不齐
+    """
+    return text + " " * max(0, limit - visible(text))
+
+
 def clip_path(path: str, limit: int) -> str:
     """路径要从左边裁 裁右边的话看到的全是 /tmp/xxx/yyy/…，恰好不知道在哪个项目 """
     if visible(path) <= limit or limit <= 4:
@@ -262,6 +269,7 @@ _LABEL = {
     "ask_user": "Ask",
     "git": "Git",
     "symbol": "Symbol",
+    "skill": "Skill",
 }
 _HEADLINE_ARG = {
     "bash": "command",
@@ -278,6 +286,7 @@ _HEADLINE_ARG = {
     "job": "action",
     "git": "action",
     "symbol": "name",
+    "skill": "name",
     # 问句本身就是这次调用的全部内容，不显出来那行就只剩一个 Ask
     "ask_user": "question",
 }
@@ -1193,12 +1202,16 @@ SLASH = {
     "/jobs": "看 / 停掉挂在后台跑的命令",
     "/mcp": "看接入了哪些 MCP 服务器和它们的工具",
     "/undo": "退掉它最近一次写文件的改动，可以连着退",
+    "/skills": "看有哪些技能和自定义命令，各自是哪来的",
     "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
     "/clear": "清空对话历史和存盘，重新开始",
     "/exit": "退出",
 }
+# 工作区里的自定义斜杠命令：名字 -> 用途 由 main() 在载入时填进来
+# 单独放一份而不是并进 SLASH：SLASH 是内置命令的清单，被覆盖了不好查
+EXTRA_SLASH: dict[str, str] = {}
 # /style 和 /mode 的取值由 agent 注入，用于补全
 STYLE_NAMES: list[str] = []
 MODE_NAMES: list[str] = []
@@ -1245,7 +1258,7 @@ class InputBox:
                     return
                 cmd, sep, arg = text.partition(" ")
                 if not sep:
-                    for name, desc in SLASH.items():
+                    for name, desc in {**SLASH, **EXTRA_SLASH}.items():
                         if name.startswith(text):
                             yield Completion(name, start_position=-len(text), display_meta=desc)
                 elif cmd in ("/style", "/mode", "/theme") and " " not in arg:

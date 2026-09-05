@@ -71,6 +71,18 @@ class TestTokens(unittest.TestCase):
         self.assertEqual(ui.tokens(2000), "2k")
 
 
+class TestPad(unittest.TestCase):
+    def test_按显示宽度补齐_不是字符数(self):
+        # ljust 数字符数，CJK 一个字占两格，技能名可以是中文
+        self.assertEqual(ui.visible(ui.pad("发版", 10)), 10)
+        self.assertEqual(ui.visible(ui.pad("deploy", 10)), 10)
+        self.assertEqual(ui.visible(ui.pad("/查", 10)), 10)
+
+    def test_超出宽度不截断(self):
+        long = "一二三四五六"
+        self.assertEqual(ui.pad(long, 4), long)
+
+
 class TestLabels(unittest.TestCase):
     def test_工具名有中文标签(self):
         from feiyu.tools import TOOL_SCHEMAS

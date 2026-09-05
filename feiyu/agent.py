@@ -12,6 +12,7 @@ from . import ui
 from . import history, hooks as hooks_mod
 from . import progress as progress_mod
 from . import keys, memory, permissions, schema as schema_mod
+from . import skills as skills_mod
 from . import subagent as subagent_mod
 from . import todo as todo_mod
 from . import tools as tools_mod
@@ -264,7 +265,8 @@ VERIFY_AFTER = {"write_file", "edit_file"}
 # bash 不在里面——它共享 self.cwd，两条并发的 cd 会互相盖掉；
 # 写类工具不在里面——同一批里改同一个文件就是竞态；
 # todo / exit_plan / remember 都改 agent 自己的状态，也不能并发
-PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "web_search", "task", "symbol"}
+PARALLEL_SAFE = {"read_file", "list_files", "search", "web_fetch", "web_search", "task", "symbol",
+                 "skill"}
 # 上限拦一下：一批十个 web_fetch 同时打同一个站点不礼貌，线程也不是免费的
 MAX_PARALLEL = 4
 
@@ -387,6 +389,8 @@ class Feiyu:
         self.hooks_note = ""
         self.approve_hooks = None    # 交互层塞进来：(路径, 条数) -> bool
         self.approve_mcp = None      # 交互层塞进来：(路径, 服务器名列表) -> bool
+        self.approve_skills = None   # 交互层塞进来：(目录, 技能名列表) -> bool
+        self.skills_note = ""
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
@@ -443,6 +447,8 @@ class Feiyu:
                          "%s（%s）" % (n, "、".join(t["name"] for t in srv.tools[:12])
                                      + ("…" if len(srv.tools) > 12 else ""))
                          for n, srv in self.toolbox.mcp.servers.items()))
+        # 技能目录：只有名字和用途，正文等它自己调 skill 工具取
+        text += skills_mod.catalog(sorted(self.toolbox.skills.values(), key=lambda s: s.name))
         if self.context_text:
             # 项目约定放最后，比通用指令更具体，冲突时以它为准
             text += "\n\n这个项目在 %s 里写了自己的约定，优先照它来：\n\n%s" % (
@@ -483,6 +489,19 @@ class Feiyu:
         if is_mcp(call.name):
             return call.name not in self.toolbox.mcp.readonly
         return mutates(call)
+
+    def load_skills(self) -> str:
+        """项目技能是从仓库带下来的指令，而且是模型自己决定加载的，要用户点头
+
+        载入完必须重拼系统提示：目录是拼在里面的，不重拼等于没载入
+        （0.47.5 那条「配置写盘了，活着的实例没跟上」的同一个形状）
+        """
+        found, self.skills_note = skills_mod.load_skills(
+            self.toolbox.root, approve=self.approve_skills)
+        self.toolbox.skills = {s.name: s for s in found}
+        self.trace.write("skills", count=len(found) or None, note=self.skills_note or None)
+        self._refresh_system()
+        return self.skills_note
 
     def load_hooks(self) -> str:
         """项目钩子是从仓库带下来的命令，要用户点头才载入 返回给人看的一句话 """
