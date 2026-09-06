@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -473,6 +474,8 @@ def _allow(arg: str) -> str:
 def _compact(agent: Feiyu) -> str:
     if not agent.ready:
         return ui.error("还没有模型")
+    if not any(m.get("role") != "system" for m in agent.backend.messages):
+        return ui.notice("这段对话还是空的，没什么可压缩的")
     before = agent.context
     print(ui.notice("正在把历史压缩成摘要…"))
     summary = agent.compact()
@@ -1018,25 +1021,45 @@ def _piped(agent: Feiyu, workspace) -> int:
 
 
 # 接口报错时给一句能照着做的话 原样甩 JSON 的话用户只能干瞪眼
-_API_HINTS = (
-    ("401", "key 不对或者过期了 /key 看看这条配置，或者 /key add 重新加一条"),
-    ("403", "这个 key 没有访问权限，确认一下它开通了这个模型"),
-    ("404", "接口说没有这个东西 两种可能：模型 id 不对（各家退役很勤，"
-            "去厂商后台看现在叫什么），或者 base_url 多写了一段路径"
-            "（多数接口填到 /v1 就行）/key 看看这条配置"),
-    ("429", "被限流了 等一会儿再试，或者 /model 换一条配置"),
-    ("insufficient", "余额不够了"),
+# 按 HTTP 状态码给的话 **要认状态码本身，不能拿 "401" 去整条消息里搜** ——
+# 接口的报错里带着 request id、余额、时间戳，随便哪个数字串里出现 401
+# 就会告诉用户"key 过期了"，把人往错方向指（0.26.0 说 404 那次就是这个教训）
+_API_CODES = {
+    401: "key 不对或者过期了 /key 看看这条配置，或者 /key add 重新加一条",
+    403: "这个 key 没有访问权限，确认一下它开通了这个模型",
+    404: "接口说没有这个东西 两种可能：模型 id 不对（各家退役很勤，"
+         "去厂商后台看现在叫什么），或者 base_url 多写了一段路径"
+         "（多数接口填到 /v1 就行）/key 看看这条配置",
+    429: "被限流了 等一会儿再试，或者 /model 换一条配置",
+}
+# 这几条本来就是按措辞认的，状态码指望不上（各家把它塞在 400 里）
+_API_WORDS = (
+    ("insufficient", "余额不够了 状态栏那个额度点一下能现查一次"),
+    ("exceed the limit", "这一轮发过去的内容超过了模型的上下文上限 "
+                         "/compact 压一压，或者 /key add 给这条配置填上 limit"),
     ("Connection", "连不上接口 检查网络，或者这条配置的 base_url 写错了"),
     ("Timeout", "接口超时了 网络不稳，或者这次要它做的事太重"),
 )
+_CODE_IN_TEXT = re.compile(r"error code:?\s*(\d{3})", re.I)
+
+
+def _status_of(exc: Exception) -> int | None:
+    """这个报错是几号 优先问 SDK 自己（两种后端的异常都带 status_code）"""
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code
+    found = _CODE_IN_TEXT.search(str(exc))
+    return int(found.group(1)) if found else None
 
 
 def _explain(exc: Exception) -> str:
+    """把接口报错翻成一句能照着做的话 认不出就返回空串，照旧只给原文 """
     text = "%s: %s" % (type(exc).__name__, exc)
-    for probe, hint in _API_HINTS:
+    # 措辞在前：一条 400 里写着"余额不足"，说余额比说"请求有问题"有用得多
+    for probe, hint in _API_WORDS:
         if probe.lower() in text.lower():
             return hint
-    return ""
+    return _API_CODES.get(_status_of(exc), "")
 
 
 def _run_turn(agent: Feiyu, prompt: str) -> None:

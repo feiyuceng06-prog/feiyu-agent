@@ -998,6 +998,33 @@ def _apply_edit(text: str, old: str, new: str, every: bool):
 NEAREST_WINDOW = 6
 
 
+def _missing_note(target, shown: str) -> "ToolResult | None":
+    """文件不在（或者那是个目录）时说清楚，顺便指一下最像的那几个
+
+    只说"没有"的话模型会接着换个名字猜（0.32.0 那条系统提示管的是同一件事）——
+    所以把同一个目录里最像的几个名字列出来，让它一次就能改对。
+    """
+    if target.is_dir():
+        return ToolResult("这是个目录，不是文件 想看里面有什么用 list_files ",
+                          is_error=True, summary="这是目录")
+    if target.exists():
+        return None
+    near = []
+    try:
+        siblings = [x.name for x in target.parent.iterdir() if x.is_file()]
+    except OSError:
+        siblings = []
+    if siblings:
+        near = difflib.get_close_matches(target.name, siblings, n=3, cutoff=0.5)
+    tail = ("；同一个目录里最像的是：" + "、".join(near)) if near else ""
+    if not siblings and not target.parent.exists():
+        tail = "；上一级目录 %s 也不存在" % target.parent.name
+    return ToolResult(
+        "没有 %s 这个文件%s 别照着猜的路径接着试，也别替用户建一个 —— "
+        "先用 list_files 或 search 找到它真正在哪儿 " % (shown, tail),
+        is_error=True, summary="文件不存在")
+
+
 def _nearest(text: str, old: str) -> str:
     """找不到时指一下最像的地方 拿 old 的第一行去比，给出那附近几行带行号的原文
 
@@ -1335,6 +1362,15 @@ class Toolbox:
 
     def _tool_read_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
+
+        # **不存在要在最前面判，而且要说清是"没有这个文件"。**
+        # 原来一个字都没判：文本文件靠 `read_bytes()` 抛出去，报到模型那儿是一句
+        # 裸的 `FileNotFoundError`；图片更糟 —— 走进 `_read_image` 之后被归成
+        # 「图片打不开」，模型读不出"这文件根本不在"，于是换着参数一直试。
+        # 实测日志里同一个不存在的 .png 被读了 **23 次**（read_file 全部失败的 85%）。
+        missing = _missing_note(target, args["path"])
+        if missing is not None:
+            return missing
 
         if images.kind(target):
             return self._read_image(target, args["path"])

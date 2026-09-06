@@ -32,6 +32,7 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 | `desktop/src/devserver.rs` | **只给测试用**的静态服务（Tauri 没 CDP，夹具接不上去），不是产品 |
 | `desktop/ui/` | 前端（index.html / app.css / app.js / logo.svg），无框架无依赖 |
 | `feiyu/todo.py` | 任务清单的状态与校验（渲染在 ui，工具在 tools） |
+| `dev/fuzz_serve.py` | 往 `--serve` 灌畸形消息和垃圾参数，看它活不活得下来 |
 | `feiyu/subagent.py` | 子 agent：独立后端 + 只读工具集，只带结论回来 |
 | `feiyu/sandbox.py` | bash 沙箱（bubblewrap），三档 off / workspace / strict |
 | `feiyu/files.py` | 记住看过的文件版本，写之前对一次，别盖掉没看见的改动 |
@@ -2375,3 +2376,80 @@ localStorage，跟侧栏收放、置顶一样是**这个窗口自己的偏好**�
   两份以上的档案、`enabled.json` 里关掉一个工具 —— 少哪样哪一屏就报"不对"，
   而那不是产品的毛病。`enabled.json` 的形状是 `{"skills": [...], "tools": [...]}`
   （按类分，记的是**关掉**的那些）。
+
+## 0.65.1：一次专门的找 bug + 按证据的优化
+
+用户让"查一下有没有 bug，再优化一下"。查法：拿畸形消息灌协议、把每条斜杠命令
+配五种垃圾参数跑一遍、再翻三十天的 trace（565 轮、544 次工具调用）。
+
+### 1. 一条畸形消息能带走整个进程
+
+`{"op":"bot","do":"save","row":[1,2,3]}` → `{**row.get("row")}` TypeError →
+**整个 agent 没了**，连同后台命令、语言服务器、MCP 进程，用户那边只看到窗口不响应。
+
+0.50.1 把 reader 线程整个包起来过，但 `run()` 那个循环没有 —— 而它跑的才是
+真正干活的那几支。现在循环里除了 `KeyboardInterrupt` 还接 `Exception`：
+报出去、清 `busy`、接着转，理由同 `trace.write` / `events.emit`。
+
+**新加一支 op 时不要指望自己写对**：那道 `except` 才是保证。
+
+### 2. read_file 读不到的文件，说的是别的错（占它全部失败的 85%）
+
+日志里 `read_file` 失败 27 次，其中 **23 次是同一个不存在的 `.png` 被反复读**。
+根因：`_tool_read_file` **一个存在性判断都没有**——
+文本文件靠 `read_bytes()` 抛出去（模型看到一句裸的 `FileNotFoundError`），
+图片更糟，先走进 `_read_image` 才失败，于是被归成「图片打不开」。
+模型读不出"这文件根本不在"，就只会换着参数接着试。
+
+`_missing_note()` 放在最前面：不在就说不在、是目录就说是目录，
+并且**列出同一个目录里最像的几个名字**（`difflib.get_close_matches`）——
+只说"没有"的话它会接着猜（跟 `edit_file` 的 `_nearest` 是同一条）。
+
+**一次白跑的工具调用 = 一个整轮往返**（本仓库中位 4.1 秒 + 整段历史重发）。
+这类修补比任何毫秒级优化都值钱。
+
+### 3. `/compact` 在空对话上照样花钱
+
+`compact()` 不判空，一敲就真发一次请求，**还拿"关于空无一物的摘要"把历史换掉**，
+之后每轮都带着那句废话。现在按**消息**判空（不按 `transcript()` 的渲染结果判——
+thinking 和纯图片那几种块不落字，拿它的空当"没东西"会把真该压的放过去）。
+
+### 4. 接口报错的提示会指错方向
+
+`_API_HINTS` 是拿 `"401" in text` 认的，而报错里带着 request id、余额、时间戳 ——
+`request id: 20260828401547313` 里那个 401 就让它说"key 过期了"。
+改成认状态码本身（先问 SDK 的 `status_code`，再退回 `Error code: (\d{3})`），
+措辞类的（余额不足、超上下文）单独一张表、排在前面。
+
+**顺带：这套提示桌面端一直没有**，`handle_prompt` 的兜底原样甩 JSON。
+0.26.0 只修了终端那一半 —— 加前端时记得问一句：这条路终端有的东西它有吗。
+
+### 优化：量完之后只动了一处
+
+- **每轮的 Python 开销全在毫秒以下**（170 KB 历史上：`transcript()` 0.13ms、
+  `tool_schemas()` 0.012ms、`_refresh_system()` 0.006ms、`without_images()` 0.09ms）。
+  跟 0.50.0 / 0.60.0 两次的结论一样：**这里没有可优化的东西**，别再查第四遍。
+- **启动 60.6ms → 55ms**：`concurrent.futures` 改成用到时才 import（它会把
+  `logging` 一起拉进来）。544 次工具调用里只有 37 次走并行，多数运行一次都用不上。
+- **量过但没动**：`urllib.request` 是剩下最大的一块（9.2ms，`credits` 和 `tools`
+  都要），但 `tools._opener` / `_NoLocalRedirect` 是 SSRF 那道闸、而且测试直接
+  patch 它 —— 为 9ms 把安全代码改成惰性构造、再改一批测试，不划算。
+- 缓存命中 65%（0.60.0 时 61%）。按轮次看：第 0 轮 52%、第 2 轮 87%、第 6 轮往后
+  掉回 53%。掉回去那段**不是折叠造成的**（三十天里 `age` 只触发 11 次、`trim` 3 次），
+  多半是接口那边的缓存 TTL，我们这边没有可动的旋钮。
+
+### 找 bug 的夹具进库了：`dev/fuzz_serve.py`
+
+```bash
+python dev/fuzz_serve.py                 # 两组都灌
+python dev/fuzz_serve.py --only ops      # 只灌畸形 op
+```
+
+两组输入：27 条畸形 op（类型不对、少字段、`../` 路径、半截 JSON），
+以及**每条斜杠命令 × 五种垃圾参数**（空、不存在的名字、`../`、多参数、500 字）共 110 条。
+判据只有一条但很硬：**跑完还答得上 `status`，退出码为 0**。
+回退验证过 —— 把 `serve.py` 那道 `except` 去掉，它立刻报"死在这条上"。
+
+**改协议、加 op 之后跑它一次**，跟改前端跑 `input.mjs` 是同一个位置的事。
+它把 `XDG_CONFIG_HOME` 指到临时目录，所以没有模型配置、`/compact` 和 `/review`
+会早退 —— 别改成连真配置，那两条会**真的调模型**。

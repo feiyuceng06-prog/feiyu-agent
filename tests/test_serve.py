@@ -9,10 +9,12 @@ import contextlib
 import io
 import json
 import os
+import pathlib
 import queue
 import re
 import tempfile
 import threading
+import types
 import unittest
 
 from feiyu import credits as credits_mod
@@ -1028,3 +1030,96 @@ class TestCredits(unittest.TestCase):
         self.assertEqual(seen, [])
         credits_mod.look(one)                 # 后台那次填上缓存
         self.assertIsNotNone(credits_mod.look(one, cached=True)[0])
+
+
+class TestLoopSurvivesBadPayload(unittest.TestCase):
+    """**一条畸形消息不能带走整个进程。**
+
+    reader 线程 0.50.1 就整个包起来了，但 `run()` 那个循环没有 —— 而它跑的是
+    真正干活的那几支。实测 `{"op":"bot","do":"save","row":[1,2,3]}` 一条就让
+    整个 agent 连同后台命令、语言服务器一起没掉，用户那边只看到窗口不响应了。
+    """
+
+    def box(self, out, boom=None):
+        class Box(serve.Server):
+            def __init__(self):
+                self.busy = True
+                self.proto = serve.Protocol(out)
+                self.inbox = queue.Queue()
+                self.agent = None
+                self.commands = {}
+
+            def push_status(self): pass
+            def push_sessions(self): pass
+            def status(self): return {}
+            def reader(self): pass          # 别真去读 stdin
+            def new_session(self):
+                if boom:
+                    raise boom
+        box = Box()
+        box.agent = types.SimpleNamespace(refresh_credits=lambda **k: None)
+        return box
+
+    def kinds(self, out):
+        return [json.loads(l)["kind"] for l in out.getvalue().splitlines() if l.strip()]
+
+    def test_处理器抛异常时循环还活着(self):
+        out = io.StringIO()
+        box = self.box(out, boom=TypeError("'list' object is not a mapping"))
+        box.inbox.put(("new", "x"))
+        box.inbox.put(("stop", ""))
+        self.assertEqual(box.run(), 0)          # 正常退出，不是抛出去
+        said = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+        errs = [e for e in said if e.get("kind") == "note" and e.get("level") == "error"]
+        self.assertTrue(errs, said)             # 而且要说一声，不能默默吞掉
+        self.assertIn("TypeError", errs[0]["text"])
+        self.assertFalse(box.busy)              # 忙标志要清，否则界面一直转
+
+    def test_畸形的_bot_save_不再抛(self):
+        """`row` 是列表时 `{**row}` 会 TypeError —— 这条是真撞出来的 """
+        out = io.StringIO()
+        box = self.box(out)
+        got = []
+        box.bot_write = got.append
+        box.inbox.put(("bot", json.dumps({"do": "save", "name": "甲", "row": [1, 2, 3]})))
+        box.inbox.put(("stop", ""))
+        self.assertEqual(box.run(), 0)
+        self.assertEqual(got, [{"name": "甲"}])   # 认不出的 row 当空的，不带崩
+
+
+class TestApiHints(unittest.TestCase):
+    """接口报错要翻成人话，而且**别翻错** """
+
+    def explain(self, text, code=None):
+        from feiyu import __main__ as cli
+        exc = Exception(text)
+        if code is not None:
+            exc.status_code = code
+        return cli._explain(exc)
+
+    def test_request_id_里恰好有_401_不能说成_key_过期(self):
+        said = self.explain(
+            "Error code: 400 - {'message': 'Provider returned error "
+            "(request id: 20260828401547313053226)'}")
+        self.assertNotIn("key", said)
+
+    def test_按状态码认(self):
+        self.assertIn("key", self.explain("Error code: 401 - bad key"))
+        self.assertIn("限流", self.explain("Error code: 429 - slow down"))
+
+    def test_sdk_自己带的状态码优先(self):
+        self.assertIn("模型 id", self.explain("Not Found", code=404))
+
+    def test_余额不足和超上下文按措辞认(self):
+        self.assertIn("余额", self.explain(
+            "Error code: 400 - {'message': 'credit insufficient balance: balance=1'}"))
+        self.assertIn("上下文", self.explain(
+            "Error code: 400 - {'message': 'Input token exceed the limit'}"))
+
+    def test_认不出就一个字不加(self):
+        self.assertEqual(self.explain("Error code: 400 - something new"), "")
+
+    def test_桌面端也吃这份提示(self):
+        """0.26.0 给终端加过，桌面端这条路一直在原样甩 JSON """
+        src = pathlib.Path("feiyu/serve.py").read_text(encoding="utf-8")
+        self.assertIn("cli._explain(exc)", src)

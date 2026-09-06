@@ -306,12 +306,14 @@ class TestCompact(Base):
         # compact_to 收尾是 assistant，任务没做完还要接着调 run_turn，
         # 不补 user 的话角色不交替
         b = self.use([])
+        b.messages += [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
         b.tokens_context = self.agent.context_limit
         quiet(self.agent._maybe_compact, mid_turn=True)
         self.assertEqual(b.messages[-1]["role"], "user")
 
     def test_收尾压缩不补_user(self):
         b = self.use([])
+        b.messages += [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
         b.tokens_context = self.agent.context_limit
         quiet(self.agent._maybe_compact)
         self.assertEqual(b.messages[-1]["role"], "assistant")
@@ -1104,3 +1106,30 @@ class TestResetWithoutBackend(Base):
         self.agent.backend = None
         self.agent.reset()                  # 不能抛
         self.assertFalse(self.agent.ready)
+
+
+class TestCompactEmpty(Base):
+    """**没东西可压就别发请求。** 空历史照样调一次模型是双份的坏：花了钱，
+    还拿"关于空无一物的摘要"把历史换掉了 —— 之后每一轮都带着那句废话。"""
+
+    def test_空历史不发请求(self):
+        asked = []
+        backend = self.use([])
+        backend.ask = lambda *a, **k: (asked.append(a), "摘要")[1]
+        self.assertEqual(self.agent.compact(), "")
+        self.assertEqual(asked, [])
+
+    def test_有内容才发(self):
+        asked = []
+        backend = self.use([])
+        backend.ask = lambda *a, **k: (asked.append(a), "摘要")[1]
+        backend.messages.append({"role": "user", "content": "帮我改个文件"})
+        self.assertEqual(self.agent.compact(), "摘要")
+        self.assertTrue(asked)
+
+
+class TestModeTables(unittest.TestCase):
+    def test_MODES_和_MODE_ORDER_要对齐(self):
+        """cycle_mode 走的是 MODE_ORDER.index(self.mode)，而 restore / start_bot
+        校验的是 MODES —— 两张表不一致的话，shift+tab 会在某个模式上抛 ValueError """
+        self.assertEqual(set(agent_mod.MODES), set(agent_mod.MODE_ORDER))

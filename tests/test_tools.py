@@ -1317,3 +1317,42 @@ class TestImageGenerate(Base):
             out = self.box.run("image_generate", {"prompt": "一只狗"})
         self.assertTrue(out.is_error)
         self.assertIn("no quota", out.content)
+
+
+class TestMissingFile(Base):
+    """**读不到的文件要说"没有这个文件"，不能归成别的错。**
+
+    原来一个字都没判：文本文件靠 `read_bytes()` 抛出去（模型看到一句裸的
+    FileNotFoundError），图片更糟 —— 走进 `_read_image` 之后被归成「图片打不开」。
+    实测日志里同一个不存在的 .png 被反复读了 **23 次**，占 read_file 全部失败的 85%：
+    模型读不出"这文件根本不在"，就只会换着参数接着试，每一次都是一个整轮往返。
+    """
+
+    def read(self, path):
+        return self.box.run("read_file", {"path": path})
+
+    def test_不存在的图片说的是文件不存在(self):
+        got = self.read("nope.png")
+        self.assertTrue(got.is_error)
+        self.assertEqual(got.summary, "文件不存在")
+
+    def test_不存在的文本文件也一样(self):
+        self.assertEqual(self.read("nope.py").summary, "文件不存在")
+
+    def test_指出最像的那个名字(self):
+        self.write("app.py", "x = 1\n")
+        got = self.read("aap.py")
+        self.assertIn("app.py", got.content)
+
+    def test_上一级目录都不在时说出来(self):
+        self.assertIn("deep", self.read("deep/x.md").content)
+
+    def test_目录不是文件(self):
+        os.mkdir(os.path.join(self.tmp.name, "src"))
+        got = self.read("src")
+        self.assertTrue(got.is_error)
+        self.assertIn("list_files", got.content)
+
+    def test_真在的文件照读不误(self):
+        self.write("app.py", "x = 1\n")
+        self.assertFalse(self.read("app.py").is_error)

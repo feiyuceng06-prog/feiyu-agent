@@ -705,7 +705,14 @@ class Server:
             # 0.12.0 的不变量：历史已经在 send() 的 finally 里补齐了
             self.proto.send("note", level="warn", text="已中断")
         except Exception as exc:              # agent 挂了也不能把服务带走
-            self.proto.send("note", level="error", text="%s: %s" % (type(exc).__name__, exc))
+            # **接口报错要翻成人话，两个前端一视同仁。** 0.26.0 给终端加过
+            # `_API_HINTS`，桌面端这条路一直在原样甩 JSON —— 用户看到的是
+            # 一整坨 `{'error': {'message': ...}}`，照着做不了任何事
+            from . import __main__ as cli      # 循环 import，只能在用到时取
+            hint = cli._explain(exc)
+            self.proto.send("note", level="error",
+                            text=(hint + "\n\n" if hint else "") +
+                                 "%s: %s" % (type(exc).__name__, exc))
         finally:
             self.busy = False
             # 一轮跑完顺手去问一次余额（后台线程，不挡这里）——
@@ -847,7 +854,9 @@ class Server:
                     if what == "start":
                         self.start_bot(who)
                     elif what == "save":
-                        self.bot_write({**row.get("row"), "name": who})
+                        one = row.get("row")
+                        self.bot_write({**(one if isinstance(one, dict) else {}),
+                                        "name": who})
                     elif what == "drop":
                         self.bot_drop(who)
                 elif op == "key":
@@ -873,6 +882,17 @@ class Server:
                 # 不接住的话整个服务就没了，而用户只是按了一下中断。
                 self.busy = False
                 self.proto.send("note", level="warn", text="已中断")
+                self.proto.send("turn_end")
+                self.push_status()
+            except Exception as exc:                       # noqa: BLE001
+                # **一条畸形消息不能带走整个进程。** reader 线程 0.50.1 就包起来了，
+                # 这个循环没有 —— 而它跑的是真正干活那几支：一条
+                # `{"op":"bot","do":"save","row":[1,2,3]}` 就能让整段对话连同
+                # 后台命令、语言服务器一起没掉，用户那边只看到窗口不响应了。
+                # 报出去、清掉忙标志、接着转；理由同 `trace.write` / `events.emit`。
+                self.busy = False
+                self.proto.send("note", level="error",
+                                text="这条没处理成：%s: %s" % (type(exc).__name__, exc))
                 self.proto.send("turn_end")
                 self.push_status()
 

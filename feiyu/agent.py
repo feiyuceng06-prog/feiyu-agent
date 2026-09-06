@@ -1,4 +1,3 @@
-import concurrent.futures
 import datetime
 import difflib
 import json
@@ -1019,12 +1018,23 @@ class Feiyu:
         return True
 
     def compact(self) -> str:
-        """把历史交给模型总结成一段交接说明，替换掉原文 返回摘要，失败返回空串 """
+        """把历史交给模型总结成一段交接说明，替换掉原文 返回摘要，失败返回空串
+
+        **没东西可压就别发请求。** 空历史照样调一次模型是双份的坏：花了钱，
+        还拿"关于空无一物的摘要"把历史换掉了 —— 之后每一轮都带着那句废话。
+        自动压缩那条路不会走到这儿（它是过了阈值才触发的），这条闸是给
+        `/compact` 用的：手一抖在新对话里敲一下不该要钱。
+        """
         if self.backend is None:
+            return ""
+        # **按消息判，不按渲染出来的文本判**：`transcript()` 有几种块是不落字的
+        # （thinking、纯图片），拿它的空当"没东西"会把真该压的那份放过去
+        if not any(m.get("role") != "system" for m in self.backend.messages):
             return ""
         side = self._side_backend()
         try:
-            summary = (side.ask(SUMMARY_PROMPT + "\n\n" + self.backend.transcript()) or "").strip()
+            summary = (side.ask(SUMMARY_PROMPT + "\n\n"
+                                + self.backend.transcript()) or "").strip()
         except Exception:
             summary = ""
         if not summary:
@@ -1307,6 +1317,11 @@ class Feiyu:
             approved.append((call, blocked))
 
         began = time.monotonic()
+        # **用到时才 import。** 它会把 `logging` 一起拉进来，两个加起来 15ms，
+        # 而一次运行里多数轮次根本没有可并行的那一批（实测 544 次工具调用里
+        # 只有 37 次走并行）—— 这跟 0.60.0 把 prompt_toolkit 推迟是同一笔账
+        import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
             futures = [
                 (call, None if blocked else pool.submit(self.toolbox.run, call.name, call.input))

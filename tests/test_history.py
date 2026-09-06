@@ -211,6 +211,7 @@ class TestFoldInAgent(unittest.TestCase):
 
     def test_压缩之后登记要清空(self):
         self.agent.backend = FakeBackend([])
+        self.agent.backend.messages.append({"role": "user", "content": "干点活"})
         self.agent._reads["/x"] = ["a"]
         with contextlib.redirect_stdout(io.StringIO()):
             self.agent.compact()
