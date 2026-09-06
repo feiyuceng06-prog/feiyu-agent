@@ -987,6 +987,93 @@ body[data-side="off"] .side { border-right: 0; }
   color: var(--soft);
 }
 
+/* 设置那一页：清单右边显示当前值，右栏是一组可选项 */
+.shelf__now {
+  font-size: var(--text-2xs);
+  font-family: var(--font-mono);
+  color: var(--muted);
+  text-align: right;
+  overflow-wrap: anywhere;
+  max-width: 9rem;
+}
+
+.opts { display: flex; flex-direction: column; margin-top: var(--space-3); }
+
+.opt {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: baseline;
+  text-align: left;
+  appearance: none;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  padding: var(--space-2) 0;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.opt:last-child { border-bottom: 1px solid var(--line); }
+.opt:hover { background: var(--code-bg); }
+
+/* 选中的那条靠左边一条蓝竖线标 —— 蓝只做线和面 */
+.opt--now {
+  box-shadow: inset 2px 0 0 var(--accent);
+  padding-left: var(--space-3);
+}
+
+.opt__name { font-weight: var(--w-bold); }
+.opt--now .opt__name { color: var(--text); }
+.opt__about { font-size: var(--text-xs); color: var(--muted); }
+
+.line {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line-strong);
+  border-radius: 0;
+  padding: var(--space-1) 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  color: var(--text);
+}
+
+.line:focus { outline: 0; border-bottom-color: var(--accent); }
+
+.rules { margin-top: var(--space-5); }
+
+.rules__head {
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--space-1);
+}
+
+.rules__one {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--line);
+  padding: var(--space-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  color: var(--soft);
+  overflow-wrap: anywhere;
+}
+
+.rules__one--memo { font-family: var(--font-sans); font-size: var(--text-sm); }
+.rules__when { color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); flex: none; }
+.rules__text { flex: 1; }
+.rules__one .act { flex: none; }
+
 .pick-dot {
   color: var(--accent);
   font-size: var(--text-2xs);

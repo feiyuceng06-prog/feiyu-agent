@@ -10,6 +10,7 @@ import io
 import json
 import os
 import queue
+import re
 import tempfile
 import threading
 import unittest
@@ -631,6 +632,7 @@ class TestCommandPushes(unittest.TestCase):
             self.busy = False
             self.commands = {}
             self.pushed = []
+            self._level = None
             self.proto = serve.Protocol(io.StringIO())
             self.agent = None
 
@@ -661,3 +663,124 @@ class TestCommandPushes(unittest.TestCase):
         got = self.pushed_by("/skills", "甲", _skills=lambda a, c, r="": "列表")
         self.assertIn("catalog", got)
         self.assertNotIn("profiles", got)
+
+
+class TestSettingsCommands(unittest.TestCase):
+    """设置那一页按一下 = 发一条斜杠命令，**那条命令服务端得真认**
+
+    这是跨两种语言的契约：前端拼字符串，后端 `_dispatch` 认前缀。
+    两边各自的测试都看不见对方 —— `/memory rm 1` 就这么混过去了
+    （真语法是 `forget`），按钮按下去只回一句"未知用法"，界面上毫无反应。
+
+    所以这条用例直接**从 app.js 里把命令扒出来**，一条条真喂给服务端。
+    加新设置项时不用改这里，扒出来的自动就多一条。
+    """
+
+    APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "desktop", "ui", "app.js")
+    # 每个前缀配一个合法参数，好把命令拼完整
+    ARGS = {
+        "/mode ": "auto", "/style ": "concise", "/model ": "某模型",
+        "/helper ": "off", "/sandbox ": "off", "/verify ": "off",
+        "/allow ": "Bash(ls:*)", "/memory forget ": "1",
+    }
+
+    def commands(self):
+        with open(self.APP, encoding="utf-8") as f:
+            found = re.findall(r'tune\("(/[^"]*)"', f.read())
+        self.assertTrue(found, "app.js 里一条 tune() 都没扒到，正则该改了")
+        return sorted(set(found))
+
+    def test_每条命令服务端都认(self):
+        import feiyu.__main__ as cli
+
+        said = []
+
+        class Box(serve.Server):
+            def __init__(self):
+                self.busy = False
+                self.commands = {}
+                self.agent = None
+                self._level = None
+                self.proto = self
+
+            def send(self, kind, **payload):
+                if kind == "note":
+                    said.append(payload.get("text", ""))
+
+            def push_settings(self): pass
+            def push_status(self): pass
+            def push_catalog(self): pass
+            def push_profiles(self): pass
+
+        box = Box()
+        for prefix in self.commands():
+            self.assertIn(prefix, self.ARGS,
+                          "app.js 里多了一条没登记的命令 %r，补进 ARGS 再跑" % prefix)
+            said.clear()
+            head, _, rest = (prefix + self.ARGS[prefix]).partition(" ")
+            # 只要没落到"未知命令 / 未知用法"就算认得；真跑的效果各自的用例管
+            for fn in ("_mode", "_style", "_model", "_helper", "_sandbox",
+                       "_verify", "_allow", "_memory", "_profile", "_skills"):
+                setattr(cli, fn, getattr(cli, fn))
+            try:
+                box._dispatch(cli, head, rest.strip())
+            except Exception as exc:
+                # agent 是 None，真跑会炸——炸在哪儿不重要，只要不是"没这条命令"
+                self.assertNotIsInstance(exc, KeyError, prefix)
+            joined = " ".join(said)
+            self.assertNotIn("未知命令", joined, prefix)
+            self.assertNotIn("未知用法", joined, "%s：%s" % (prefix, joined))
+
+
+class TestCommandLevel(unittest.TestCase):
+    """斜杠命令报错，桌面端也得看着像报错
+
+    `run_command` 原来把 ui 的事件整个 `paused` 掉，再一律按 notice 发出去 ——
+    于是 `/mode 没这个模式` 跟切换成功长得一模一样。等级本来就报过，只是被扔了。
+    """
+
+    class Box(serve.Server):
+        def __init__(self, out):
+            self.busy = False
+            self.commands = {}
+            self.agent = None
+            self._level = None
+            self.said = []
+            self.proto = serve.Protocol(out)
+
+        def push_status(self): pass
+        def push_settings(self): pass
+
+        def _dispatch(self, cli, head, rest):
+            # 装成一条会报错的命令：跟 __main__ 里那些一样，内部拿 ui.error 拼
+            self._say(ui.error("没有 %s 这个模式" % rest) if rest == "坏的"
+                      else ui.notice("已切到「%s」" % rest))
+
+    def levels(self, out):
+        return [json.loads(l)["level"] for l in out.getvalue().splitlines()
+                if l.strip() and json.loads(l).get("kind") == "note"]
+
+    def test_报错发_error_成功发_notice(self):
+        out = io.StringIO()
+        box = self.Box(out)
+        box.run_command("/mode 坏的")
+        box.run_command("/mode auto")
+        self.assertEqual(self.levels(out), ["error", "notice"])
+
+    def test_一趟里报过错就按最高那一档(self):
+        """命令内部先 notice 再 error 的话，整条要按 error 发 """
+        out = io.StringIO()
+        box = self.Box(out)
+        box._dispatch = lambda cli, head, rest: box._say(
+            ui.notice("先说一句") + ui.error("然后出错") + ui.notice("再说一句"))
+        box.run_command("/x")
+        self.assertEqual(self.levels(out), ["error"])
+
+    def test_跑完要把捕获器摘掉(self):
+        """不摘的话下一轮的 ui 输出会被这个已经过期的收集器接走 """
+        out = io.StringIO()
+        box = self.Box(out)
+        box.run_command("/mode auto")
+        self.assertIsNone(box._level)
+        self.assertFalse(events.active())

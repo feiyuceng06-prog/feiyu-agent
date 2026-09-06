@@ -36,7 +36,7 @@ import threading
 import _thread
 
 from . import agent as agent_mod
-from . import enabled, events, keys, permissions, profiles as profiles_mod
+from . import enabled, events, keys, memory, permissions, profiles as profiles_mod
 from . import session as session_mod
 from . import skills as skills_mod, tools as tools_mod, ui
 from . import __version__
@@ -121,6 +121,7 @@ def _plain(text: str) -> str:
 
 class Server:
     def __init__(self, agent, workspace, tracer, proto: Protocol):
+        self._level = None      # 见 _say：斜杠命令这一趟报过的最高等级
         self.agent = agent
         self.workspace = workspace
         self.trace = tracer
@@ -330,6 +331,40 @@ class Server:
                                   if n not in TERMINAL_ONLY],
                         args={k: v for k, v in args.items() if v and k not in TERMINAL_ONLY})
 
+    # ---- 设置 ----
+
+    def push_settings(self) -> None:
+        """设置那一页要的东西
+
+        **只出当前值和可选项，改动一律回头走斜杠命令**（见 `_dispatch`）——
+        界面上按一下和在终端敲 `/mode auto` 走的是同一条代码，
+        不另写一套"设置怎么保存"。这是 Hermes DESIGN.md 那条
+        「One action, one home」在这儿的落法。
+        """
+        from . import sandbox as sandbox_mod
+
+        agent = self.agent
+        want = sandbox_mod.level()
+        real, why = sandbox_mod.effective()
+        rules = permissions.load()
+        self.proto.send("settings",
+                        mode=agent.mode,
+                        modes=[{"key": k, "label": v[0], "about": v[1]}
+                               for k, v in agent_mod.MODES.items()],
+                        style=agent.style,
+                        styles=[{"key": k, "label": v[0]}
+                                for k, v in agent_mod.STYLES.items()],
+                        helper=agent.helper or "",
+                        models=list(keys.load()),
+                        model=agent.name or "",
+                        sandbox={"want": want, "real": real, "why": why,
+                                 "levels": list(sandbox_mod.LEVELS)},
+                        verify=agent.verify or "",
+                        allow=list(rules.get("allow") or []),
+                        deny=list(rules.get("deny") or []),
+                        memory=[{"when": w, "text": t}
+                                for w, t in memory.load(self.workspace)])
+
     # ---- 配置档案 ----
 
     def push_profiles(self) -> None:
@@ -383,12 +418,21 @@ class Server:
         self.busy = True
         self.push_status()
         try:
-            # 下面这些 cli 函数内部就是拿 ui.notice() 拼的，不挡住会报两遍
-            with events.paused():
+            # 下面这些 cli 函数内部就是拿 ui.notice() 拼的，直接放行会报两遍；
+            # 但整个挡掉的话等级也没了 —— 用 capturing 收下它报过的最高一档，
+            # `_say` 拿它发出去，界面上报错才是红的
+            with events.capturing() as said:
+                self._level = said
                 self._dispatch(cli, head, rest)
         finally:
             self.busy = False
+            self._level = None
         self.push_status()
+
+    def _say(self, text: str) -> None:
+        """把斜杠命令的返回发出去，**等级取它自己报过的那一档** """
+        self.proto.send("note", level=getattr(self._level, "level", None) or "notice",
+                        text=_plain(text))
 
     def _dispatch(self, cli, head: str, rest: str) -> None:
         agent = self.agent
@@ -400,53 +444,59 @@ class Server:
             self.push_sessions()
             self.proto.send("note", level="notice", text="对话历史已清空，存盘也删了")
         elif head == "/profile":
-            self.proto.send("note", level="notice", text=_plain(cli._profile(agent, rest)))
+            self._say(cli._profile(agent, rest))
             # **是 push_profiles 不是 push_catalog** —— 后者推的是技能/工具/MCP，
             # 档案那一页照旧显示切换前的状态（写错过一次）
             self.push_profiles()
         elif head == "/mode":
-            self.proto.send("note", level="notice", text=_plain(cli._mode(agent, rest)))
+            self._say(cli._mode(agent, rest))
+            self.push_settings()
         elif head == "/model":
-            self.proto.send("note", level="notice", text=_plain(cli._model(agent, rest)))
+            self._say(cli._model(agent, rest))
+            self.push_settings()
         elif head == "/style":
-            self.proto.send("note", level="notice", text=_plain(cli._style(agent, rest)))
+            self._say(cli._style(agent, rest))
+            self.push_settings()
         elif head == "/compact":
-            self.proto.send("note", level="notice", text=_plain(cli._compact(agent)))
+            self._say(cli._compact(agent))
         elif head == "/undo":
             said = agent.undo()
             self.proto.send("note", level="notice" if said else "warn",
                             text=said + "（下一句话时会告诉它）" if said else "没有可退的改动")
         elif head == "/skills":
-            self.proto.send("note", level="notice",
-                            text=_plain(cli._skills(agent, self.commands, rest)))
+            self._say(cli._skills(agent, self.commands, rest))
             self.push_catalog()
         elif head == "/cost":
-            self.proto.send("note", level="notice",
-                            text=_plain(cli._cost(agent, self.workspace)))
+            self._say(cli._cost(agent, self.workspace))
         elif head == "/context":
-            self.proto.send("note", level="notice", text=_plain(cli._context(agent)))
+            self._say(cli._context(agent))
         elif head == "/memory":
-            self.proto.send("note", level="notice", text=_plain(cli._memory(agent, rest)))
+            self._say(cli._memory(agent, rest))
+            self.push_settings()
         elif head == "/allow":
-            self.proto.send("note", level="notice", text=_plain(cli._allow(rest)))
+            self._say(cli._allow(rest))
+            self.push_settings()
         elif head == "/jobs":
-            self.proto.send("note", level="notice", text=_plain(cli._jobs(agent, rest)))
+            self._say(cli._jobs(agent, rest))
         elif head == "/hooks":
-            self.proto.send("note", level="notice", text=_plain(cli._hooks(agent)))
+            self._say(cli._hooks(agent))
         elif head == "/mcp":
-            self.proto.send("note", level="notice", text=_plain(cli._mcp(agent)))
+            self._say(cli._mcp(agent))
         elif head == "/verify":
-            self.proto.send("note", level="notice", text=_plain(cli._verify(agent, rest)))
+            self._say(cli._verify(agent, rest))
+            self.push_settings()
         elif head == "/helper":
-            self.proto.send("note", level="notice", text=_plain(cli._helper(agent, rest)))
+            self._say(cli._helper(agent, rest))
+            self.push_settings()
         elif head == "/review":
             # 要多花一次 API 调用，所以跟终端一样是手动触发的
-            self.proto.send("note", level="notice", text=_plain(cli._review(agent, rest)))
+            self._say(cli._review(agent, rest))
         elif head in TERMINAL_ONLY:
             self.proto.send("note", level="warn",
                             text="%s 只在终端里有：%s" % (head, TERMINAL_ONLY[head]))
         elif head == "/sandbox":
-            self.proto.send("note", level="notice", text=_plain(cli._sandbox(rest)))
+            self._say(cli._sandbox(rest))
+            self.push_settings()
         elif head == "/help":
             self.push_help()
         else:
@@ -535,6 +585,8 @@ class Server:
             # shift+tab 桌面端跟终端走**同一个** agent.cycle_mode()，
             # 不各写一套（终端那边是 prompt_toolkit 的键位，也不是斜杠命令）
             self.inbox.put(("cycle_mode", " "))
+        elif op == "settings":
+            self.push_settings()
         elif op == "profiles":
             self.push_profiles()
         elif op == "profile":

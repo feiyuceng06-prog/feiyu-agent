@@ -47,6 +47,38 @@ class paused:
         return False
 
 
+class capturing:
+    """这段里 ui 的输出不往外报，但**等级留下来**
+
+    `paused` 是整个挡掉，而斜杠命令的返回是调用方自己发出去的一条 note ——
+    挡掉的话它就不知道该发 notice 还是 error，于是**所有报错在桌面端
+    都长得像普通提示**（`/mode 没这个模式` 跟切换成功一个样）。
+    这个类把 ui 报过的最高一档留在 `.level` 上。
+    """
+
+    RANK = {"notice": 0, "warn": 1, "error": 2}
+
+    def __init__(self):
+        self.level = "notice"
+
+    def _take(self, kind, payload):
+        if kind != "note":
+            return
+        got = payload.get("level", "notice")
+        if self.RANK.get(got, 0) > self.RANK.get(self.level, 0):
+            self.level = got
+
+    def __enter__(self):
+        global _sink
+        self._saved, _sink = _sink, self._take
+        return self
+
+    def __exit__(self, *exc):
+        global _sink
+        _sink = self._saved
+        return False
+
+
 def emit(kind: str, **payload) -> None:
     """报一件事 **绝不能因为前端出问题把 agent 弄崩**——理由同 trace.write """
     if _sink is None:

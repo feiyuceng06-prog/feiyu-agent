@@ -446,6 +446,12 @@ function handle(ev) {
       if (shelfOpen()) drawShelf();
       break;
 
+    case "settings":
+      conf = ev;
+      shelf.got = true;
+      if (shelfOpen()) drawShelf();
+      break;
+
     case "profiles":
       shelf.data.profiles = ev.rows || [];
       shelf.got = true;
@@ -740,8 +746,8 @@ if (TAURI) {
    **正文是点开才要的**：五十份技能各上万字，一次全推过来几百 KB，
    而这一屏一次只看得见一份。所以 catalog 里没有 body，选中时另发一条 detail。 */
 
-const shelf = { tab: "skills", find: "", pick: {},
-                data: { skills: [], tools: [], mcp: [], profiles: [] },
+const shelf = { tab: "general", find: "", pick: {},
+                data: { general: [], skills: [], tools: [], mcp: [], profiles: [] },
                 bodies: {}, got: false, draft: {} };
 
 function shelfOpen() { return !$("shelf").hidden; }
@@ -756,13 +762,16 @@ function showShelf(on) {
     if (termOn) showTerm(false);
     send({ op: "catalog" });
     send({ op: "profiles" });
+    send({ op: "settings" });
     requestAnimationFrame(() => $("shelf-find").focus());
   }
 }
 
 function shelfRows() {
   const want = shelf.find.trim().toLowerCase();
-  const rows = shelf.data[shelf.tab] || [];
+  const rows = shelf.tab === "general"
+    ? (conf ? SETTINGS.map((r) => ({ name: r.name, description: r.about, on: true })) : [])
+    : (shelf.data[shelf.tab] || []);
   if (!want) return rows;
   return rows.filter((r) =>
     (r.name + " " + (r.description || "") + " " + (r.source || "")).toLowerCase().includes(want));
@@ -774,12 +783,19 @@ function drawShelf() {
   $("n-mcp").textContent = shelf.data.mcp.length || "";
   $("n-profiles").textContent = shelf.data.profiles.length || "";
   // 底下那行说明跟着页签走 —— 档案存的不是开关，说成开关是错的
-  $("shelf-where").textContent = shelf.tab === "profiles"
-    ? "一份档案就是 ~/.config/feiyu/profiles/ 下的一个 .md"
-    : "开关记在 ~/.config/feiyu/enabled.json";
-  $("shelf-hint").textContent = shelf.tab === "profiles"
-    ? "人格设定每一轮都会发给模型，别写太长。换一份立刻生效。"
-    : "关掉的东西既不进它的上下文，也调不出来。改动立刻生效。";
+  // 底下那两行跟着页签走 —— 说错了比不说更糟（"开关记在 enabled.json"
+  // 摆在设置页上是假话，那一页一个开关都没有）
+  const FOOT = {
+    general: ["按一下就生效，跟在终端敲那条斜杠命令是同一回事",
+              "模型的增删和密钥只在终端做（feiyu 里 /key）"],
+    profiles: ["一份档案就是 ~/.config/feiyu/profiles/ 下的一个 .md",
+               "人格设定每一轮都会发给模型，别写太长。换一份立刻生效。"],
+  };
+  const foot = FOOT[shelf.tab]
+    || ["开关记在 ~/.config/feiyu/enabled.json",
+        "关掉的东西既不进它的上下文，也调不出来。改动立刻生效。"];
+  $("shelf-where").textContent = foot[0];
+  $("shelf-hint").textContent = foot[1];
   const list = $("shelf-list");
   list.textContent = "";
   const rows = shelfRows();
@@ -804,7 +820,13 @@ function drawShelf() {
     left.innerHTML = `<div class="shelf__name"></div><div class="shelf__meta"></div>`;
     left.querySelector(".shelf__name").textContent = row.name;
     left.querySelector(".shelf__meta").textContent = rowMeta(row);
-    if (shelf.tab === "profiles") {
+    if (shelf.tab === "general") {
+      const now = document.createElement("span");
+      now.className = "shelf__now";
+      const spec = SETTINGS.find((r) => r.name === row.name);
+      now.textContent = spec && conf ? spec.meta(conf) : "";
+      li.append(left, now);
+    } else if (shelf.tab === "profiles") {
       /* **档案不给开关。** 它是「用哪一份」不是「开不开」—— 单选套上双态开关的皮，
          人会以为可以两份一起开。当前那份靠 ● 标出来，换用在详情栏里按。 */
       const mark = document.createElement("span");
@@ -864,7 +886,182 @@ function newProfileRow() {
 
 const KIND_OF = { skills: "skill", tools: "tool", mcp: "mcp" };
 
+/* ── 设置 ───────────────────────────────────────────────────
+   一行一项，左边清单选哪一项，右边改。**改动一律走斜杠命令** ——
+   界面上按一下和在终端敲 `/mode auto` 是同一条代码，不另写一套保存逻辑。
+   服务端收到命令之后会把 settings 重推一遍，界面不自己猜结果。 */
+let conf = null;
+
+/* 每一项：名字、右边那栏怎么画。顺序就是清单的顺序。 */
+const SETTINGS = [
+  { key: "mode", name: "权限模式", meta: (c) => label(c.modes, c.mode),
+    about: "它动手之前要不要先问你" },
+  { key: "style", name: "回答风格", meta: (c) => label(c.styles, c.style),
+    about: "只影响它怎么说话，不换模型" },
+  { key: "model", name: "模型", meta: (c) => c.model || "没设置",
+    about: "主对话用哪一条配置。增删密钥只在终端做（/key）" },
+  { key: "helper", name: "旁活模型", meta: (c) => c.helper || "跟主模型一样",
+    about: "压缩摘要、子 agent、网页提炼用哪条便宜的。省的是这些看不见的开销" },
+  { key: "sandbox", name: "bash 沙箱", meta: (c) => c.sandbox.real
+      + (c.sandbox.real === c.sandbox.want ? "" : "（想要 " + c.sandbox.want + "）"),
+    about: "写是真隔离（内核的 mount namespace）；读只是挖空了几个目录，别当成读也隔离了" },
+  { key: "verify", name: "校验命令", meta: (c) => c.verify || "没配",
+    about: "它改完文件就自动跑一遍，不过就把报错交给它自己修" },
+  { key: "allow", name: "权限规则", meta: (c) => c.allow.length + " 条放行"
+      + (c.deny.length ? "、" + c.deny.length + " 条拒绝" : ""),
+    about: "命中放行的直接跑不问你。确认时按「永久允许」也会写到这儿" },
+  { key: "memory", name: "长期记忆", meta: (c) => c.memory.length + " 条",
+    about: "它自己记下来的、跨会话带着的事实。只对这个工作台生效" },
+];
+
+function label(rows, key) {
+  const hit = (rows || []).find((r) => r.key === key);
+  return hit ? hit.label : key;
+}
+
+/* 改一项 = 发一条斜杠命令。**不要在这儿自己写盘** */
+function tune(text) {
+  send({ op: "command", text });
+}
+
+function pickRow(now, options, onPick) {
+  const box = document.createElement("div");
+  box.className = "opts";
+  options.forEach((o) => {
+    const one = document.createElement("button");
+    one.type = "button";
+    one.className = "opt" + (o.key === now ? " opt--now" : "");
+    one.innerHTML = `<span class="opt__name"></span><span class="opt__about"></span>`;
+    one.querySelector(".opt__name").textContent = o.label;
+    one.querySelector(".opt__about").textContent = o.about || "";
+    one.onclick = () => onPick(o.key);
+    box.append(one);
+  });
+  return box;
+}
+
+function drawSetting(pane, key) {
+  const c = conf;
+  const spec = SETTINGS.find((r) => r.key === key) || SETTINGS[0];
+  const head = document.createElement("h2");
+  head.textContent = spec.name;
+  const lead = document.createElement("p");
+  lead.className = "lead";
+  lead.textContent = spec.about;
+  pane.append(head, lead);
+
+  if (key === "mode") {
+    pane.append(pickRow(c.mode, c.modes, (k) => tune("/mode " + k)));
+  } else if (key === "style") {
+    pane.append(pickRow(c.style, c.styles, (k) => tune("/style " + k)));
+  } else if (key === "model") {
+    if (!c.models.length) {
+      const none = document.createElement("p");
+      none.className = "note";
+      none.textContent = "清单是空的。回终端敲 feiyu，再 /key add 添加第一条 —— "
+                       + "密钥的增删刻意不给桌面端，免得它成为一条把密钥捞出去的路。";
+      pane.append(none);
+    } else {
+      pane.append(pickRow(c.model, c.models.map((m) => ({ key: m, label: m })),
+                          (k) => tune("/model " + k)));
+    }
+  } else if (key === "helper") {
+    pane.append(pickRow(c.helper || "off",
+      [{ key: "off", label: "跟主模型一样", about: "不额外省，也不多一条配置要管" }]
+        .concat(c.models.map((m) => ({ key: m, label: m }))),
+      (k) => tune("/helper " + k)));
+  } else if (key === "sandbox") {
+    const about = { off: "不隔离，它能写工作区外面的东西",
+                    workspace: "工作区和 /tmp 之外只读", strict: "再加上断网" };
+    pane.append(pickRow(c.sandbox.want,
+      c.sandbox.levels.map((l) => ({ key: l, label: l, about: about[l] || "" })),
+      (k) => tune("/sandbox " + k)));
+    if (c.sandbox.why) {
+      const why = document.createElement("p");
+      why.className = "note";
+      why.dataset.level = "warn";
+      why.textContent = "实际没生效：" + c.sandbox.why;
+      pane.append(why);
+    }
+  } else if (key === "verify") {
+    pane.append(oneLine(c.verify, "比如 npm test 或 .venv/bin/python -m unittest discover",
+                        (v) => tune("/verify " + (v || "off"))));
+  } else if (key === "allow") {
+    pane.append(oneLine("", "加一条，比如 Bash(npm test:*)", (v) => v && tune("/allow " + v)));
+    pane.append(ruleList(c.allow, "放行"), ruleList(c.deny, "拒绝"));
+  } else if (key === "memory") {
+    pane.append(memoryList(c.memory));
+  }
+}
+
+function oneLine(value, hint, onSave) {
+  const wrap = document.createElement("div");
+  wrap.className = "acts";
+  const box = document.createElement("input");
+  box.className = "line";
+  box.value = value || "";
+  box.placeholder = hint;
+  box.spellcheck = false;
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "act";
+  save.textContent = "保存";
+  save.onclick = () => onSave(box.value.trim());
+  box.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); onSave(box.value.trim()); }
+    if (e.key === "Escape") e.stopPropagation();     // 别顺手把面板关了
+  };
+  wrap.append(box, save);
+  return wrap;
+}
+
+function ruleList(rows, what) {
+  const box = document.createElement("div");
+  box.className = "rules";
+  const head = document.createElement("div");
+  head.className = "rules__head";
+  head.textContent = what + "（" + rows.length + "）";
+  box.append(head);
+  rows.forEach((r) => {
+    const one = document.createElement("div");
+    one.className = "rules__one";
+    one.textContent = r;
+    box.append(one);
+  });
+  return box;
+}
+
+function memoryList(rows) {
+  const box = document.createElement("div");
+  box.className = "rules";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "rules__one";
+    empty.textContent = "这个工作台还没记住任何东西。";
+    box.append(empty);
+    return box;
+  }
+  rows.forEach((r, n) => {
+    const one = document.createElement("div");
+    one.className = "rules__one rules__one--memo";
+    one.innerHTML = `<span class="rules__when"></span><span class="rules__text"></span>`;
+    one.querySelector(".rules__when").textContent = r.when;
+    one.querySelector(".rules__text").textContent = r.text;
+    const gone = document.createElement("button");
+    gone.type = "button";
+    gone.className = "act act--gone";
+    gone.textContent = "删掉";
+    // **是 forget 不是 rm**（真敲过一遍才发现，rm 会回一句"未知用法"，
+    // 按钮看着按下去了其实什么也没发生）。序号从 1 起，跟 /memory 里显示的一致。
+    gone.onclick = () => tune("/memory forget " + (n + 1));
+    one.append(gone);
+    box.append(one);
+  });
+  return box;
+}
+
 function emptyWord(tab) {
+  if (tab === "general") return "读取中…";
   if (tab === "skills") return "还没有技能。一份技能就是一个 .md，放 ~/.config/feiyu/skills/ 下。";
   if (tab === "mcp") return "还没接 MCP 服务器。写 ~/.config/feiyu/mcp.json，改完要重启。";
   if (tab === "profiles") return "还没有配置档案。按下面的「新建一份」起一个。";
@@ -872,6 +1069,7 @@ function emptyWord(tab) {
 }
 
 function rowMeta(row) {
+  if (shelf.tab === "general") return "";
   if (shelf.tab === "skills") {
     const pack = (row.extras || []).length;
     return pack ? `${row.source} · 包（${pack} 个附属文件）` : (row.source || "");
@@ -886,6 +1084,11 @@ function drawShelfPane(row) {
   const pane = $("shelf-pane");
   pane.textContent = "";
   if (!row) return;
+  if (shelf.tab === "general") {
+    const spec = SETTINGS.find((r) => r.name === row.name);
+    if (spec && conf) drawSetting(pane, spec.key);
+    return;
+  }
   const head = document.createElement("h2");
   head.textContent = row.name;
   pane.append(head);
@@ -1358,7 +1561,11 @@ function hello() {
   send({ op: "sessions" });
   // 面板开着的时候连上（或断线重连），得把清单重新要一遍 ——
   // 不要的话它会一直空着，而空清单跟"这台机器上没有技能"长得一模一样
-  if (shelfOpen()) { send({ op: "catalog" }); send({ op: "profiles" }); }
+  if (shelfOpen()) {
+    send({ op: "catalog" });
+    send({ op: "profiles" });
+    send({ op: "settings" });
+  }
 }
 
 function inbound(raw) {

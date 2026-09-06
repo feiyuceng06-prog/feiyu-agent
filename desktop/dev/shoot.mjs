@@ -379,6 +379,48 @@ if (!deskShown.startsWith("ltr|")) {
   console.log("工作台路径按 ltr 排");
 }
 
+/* 设置那一页（面板打开时就是它）。改动一律走斜杠命令，所以这里除了看画得对不对，
+   还要**真按一下**，确认发出去的是那条命令。 */
+const conf = JSON.parse(await cdp.eval(`JSON.stringify({
+  tabs: [...document.querySelectorAll("#shelf-tabs .tab")].map((t) => t.textContent.replace(/\\d+$/, "")),
+  rows: [...document.querySelectorAll("#shelf-list .shelf__name")].map((e) => e.textContent),
+  now: [...document.querySelectorAll("#shelf-list .shelf__now")].map((e) => e.textContent),
+  pane: (document.querySelector("#shelf-pane h2") || {}).textContent || "",
+  opts: [...document.querySelectorAll(".opt__name")].map((e) => e.textContent),
+  marked: [...document.querySelectorAll(".opt--now .opt__name")].map((e) => e.textContent),
+})`));
+console.log("拍了", await cdp.shot("11_settings", { width: 1280, height: 900 }));
+if (conf.tabs[0] !== "通用" || conf.rows.length < 8 || conf.pane !== "权限模式"
+    || conf.opts.length !== 4 || conf.marked.length !== 1) {
+  console.error("设置那一页不对：", JSON.stringify(conf));
+  process.exitCode = 1;
+} else {
+  console.log(`设置 ${conf.rows.length} 项，当前是「${conf.marked[0]}」，右边 ${conf.opts.length} 个可选`);
+}
+// 每一项右边都得显示当前值，空的说明 meta() 算错了
+if (conf.now.some((t) => !t.trim())) {
+  console.error("有项目没显示当前值：", JSON.stringify(conf.now));
+  process.exitCode = 1;
+}
+// 真按一下「只读」，看发出去的是不是 /mode readonly
+await cdp.eval(`window.__sent = []; const real = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (d) { window.__sent.push(d); return real.call(this, d); }; true`);
+await cdp.eval(`[...document.querySelectorAll(".opt")]
+  .find((b) => b.textContent.includes("只读")).click(); true`);
+await sleep(600);
+const sent = await cdp.eval(`JSON.stringify(window.__sent)`);
+if (!sent.includes("/mode readonly")) {
+  console.error("点了「只读」没发出 /mode readonly：", sent);
+  process.exitCode = 1;
+} else {
+  console.log("点一下设置项 = 发一条斜杠命令");
+}
+await cdp.eval(`[...document.querySelectorAll(".opt")]
+  .find((b) => b.textContent.includes("默认")).click(); true`);
+await sleep(500);
+
+await cdp.eval(`document.querySelector('[data-tab="skills"]').click(); true`);
+await sleep(500);
 const shelfRows = await cdp.eval(`JSON.stringify({
   tabs: [...document.querySelectorAll("#shelf-tabs .tab")].map((t) => t.textContent),
   rows: [...document.querySelectorAll("#shelf-list .shelf__row")].map((r) => ({

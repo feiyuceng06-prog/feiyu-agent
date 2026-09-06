@@ -536,7 +536,7 @@ const panel = JSON.parse(await ev(`JSON.stringify({
   tabs: [...document.querySelectorAll("#shelf-tabs .tab")].length,
   pressed: document.getElementById("nav-shelf").getAttribute("aria-pressed"),
 })`));
-check("Ctrl K 打开技能与工具", panel.open && panel.tabs === 4, panel);
+check("Ctrl K 打开设置面板", panel.open && panel.tabs === 5, panel);
 check("面板开着时对话那一屏收起来", panel.sheet && panel.composer, panel);
 check("导航项跟着按下", panel.pressed === "true", panel);
 
@@ -548,7 +548,7 @@ const closed = JSON.parse(await ev(`JSON.stringify({
   sheet: document.getElementById("sheet").hidden,
 })`));
 check("esc 退回对话", !closed.open && !closed.sheet, closed);
-check("侧栏就这两项", shell.navs.join("/") === "新建会话/技能与工具", shell.navs);
+check("侧栏就这两项", shell.navs.join("/") === "新建会话/设置", shell.navs);
 check("有搜索框", shell.find, shell);
 check("有「会话」分组", shell.groups.includes("会话"), shell.groups);
 check("有状态栏", shell.status, shell);
