@@ -54,8 +54,10 @@ NO_TEXT_OPS = {"new", "cycle_mode"}
 # 1) 从补全菜单里剔掉它们（不该提供你不打算执行的东西）
 # 2) 用户硬打进来时给一句人话，而不是一句「未知命令」
 TERMINAL_ONLY = {
-    "/key": "密钥的增删只在终端做 网页端连读都不给，免得它成为一条把密钥捞出去的路 "
-            "要改就回终端敲 feiyu，再 /key add ",
+    # 0.63.0 起桌面端的设置面板里能加能改（它不监听端口），但**斜杠命令这条路照旧不给**：
+    # `/key` 是交互式逐项问的，那套 prompt_toolkit 在这儿根本跑不起来
+    "/key": "这条命令要在终端里逐项问你，没法在窗口里跑 "
+            "桌面端请到「设置 → 通用 → 模型」里加和改；终端里敲 /key add ",
     "/theme": "主题换的是终端的配色和记号，网页端用的是自己那套样式，切了没有意义 ",
     "/exit": "关掉这个标签页就行 要停掉服务回终端按 ctrl-c ",
 }
@@ -120,8 +122,12 @@ def _plain(text: str) -> str:
 
 
 class Server:
-    def __init__(self, agent, workspace, tracer, proto: Protocol):
+    def __init__(self, agent, workspace, tracer, proto: Protocol, *, trusted: bool = False):
         self._level = None      # 见 _say：斜杠命令这一趟报过的最高等级
+        # **只有桌面端是 trusted。** 它不监听任何端口，前后端走进程内通道，
+        # 外面够不着；而 devserver 是**听在回环上**的，同机任何进程都能连
+        # （0.50.1 那三道门就是为它设的）。写密钥这种事只给前者。
+        self.trusted = trusted
         self.agent = agent
         self.workspace = workspace
         self.trace = tracer
@@ -330,6 +336,113 @@ class Server:
                         commands=[{"name": n, "about": d} for n, d in rows.items()
                                   if n not in TERMINAL_ONLY],
                         args={k: v for k, v in args.items() if v and k not in TERMINAL_ONLY})
+
+    # ---- 模型配置 ----
+
+    def push_models(self) -> None:
+        """模型清单 **一个 key 都不往外发。**
+
+        这是这块唯一要守住的东西：能加、能删、能看有哪些，但**读不出来**。
+        前端就算被人拿下，也只能看到"这条配了 key"四个字。
+        （0.50.4 那条"密钥的增删只在终端做"针对的是网页端 ——
+        它听在回环上，同机任何进程都能连；桌面端不监听端口，所以放开的是它。）
+        """
+        rows = []
+        for name, one in keys.load().items():
+            rows.append({
+                "name": name, "kind": one.get("kind") or "openai",
+                "base_url": one.get("base_url") or "", "model": one.get("model") or "",
+                "vision": bool(one.get("vision")),
+                "max_tokens": one.get("max_tokens") or "",
+                "limit": one.get("limit") or "",
+                "price": one.get("price") or [],
+                # 只说有没有，绝不给内容
+                "has_key": bool(one.get("key")),
+                "using": name == self.agent.name,
+                "helper": name == self.agent.helper,
+            })
+        self.proto.send("models", rows=rows, trusted=self.trusted)
+
+    def key_write(self, row: dict) -> None:
+        """加一条 / 改一条模型配置 只有桌面端能走这条 """
+        if not self.trusted:
+            self.proto.send("note", level="error",
+                            text="这条路只在桌面端开着 密钥的增删要么在 feiyu 窗口里做，"
+                                 "要么回终端敲 /key add ")
+            return
+        name = str(row.get("name") or "").strip()
+        model = str(row.get("model") or "").strip()
+        key = str(row.get("key") or "").strip()
+        if not name or not model:
+            self.proto.send("note", level="error", text="名称和模型 id 都得填 ")
+            return
+        old = keys.load().get(name) or {}
+        # **key 留空 = 不动原来那条**：服务端从来不把密钥发给前端，
+        # 所以表单根本没法把它原样送回来 —— 改个价格不该要求重打一遍密钥
+        if not key:
+            key = old.get("key") or ""
+        if not key:
+            self.proto.send("note", level="error", text="这是条新配置，API key 不能空 ")
+            return
+
+        def merged(field, cast=None):
+            """**没带这个字段 = 不动原来的**，带了（哪怕是空）才算改
+
+            分不清"没带"和"清空"的话，一个只想改模型 id 的请求会把价格、
+            上限一起抹掉（真这么错过一次）。
+            """
+            if field not in row:
+                return old.get(field)
+            got = row[field]
+            if got in ("", None, []):
+                return None
+            return cast(got) if cast else got
+
+        price = [p for p in (row.get("price") or []) if p not in ("", None)]
+        try:
+            keys.add(name,
+                     base_url=merged("base_url"),
+                     model=model, key=key,
+                     kind="anthropic" if row.get("kind") == "anthropic" else "openai",
+                     price=([float(p) for p in price] if len(price) >= 3
+                            else (None if "price" in row else old.get("price"))),
+                     vision=bool(row.get("vision", old.get("vision"))),
+                     max_tokens=merged("max_tokens"),
+                     limit=merged("limit"))
+        except (TypeError, ValueError) as exc:
+            self.proto.send("note", level="error", text="存不下：%s" % exc)
+            return
+        # **改的是正在用的那条就得重建后端**（0.47.5：配置写盘了，活着的实例没跟上）
+        # 清单原来是空的也要建 —— 加完第一条不该还要再选一次
+        if name == self.agent.name or not self.agent.ready:
+            self.agent.use_model(name)
+        self.proto.send("note", level="notice", text="已保存 " + name)
+        self.push_models()
+        self.push_settings()
+        self.push_help()
+        self.push_status()
+
+    def key_drop(self, name: str) -> None:
+        if not self.trusted:
+            self.proto.send("note", level="error", text="这条路只在桌面端开着 ")
+            return
+        if not keys.remove(str(name or "")):
+            self.proto.send("note", level="error", text="清单里没有这一条 ")
+            return
+        # 删掉的正好是在用的那条：换一条还在的，没有就把后端撤掉
+        # （`ready` 是从 backend 推出来的只读属性，撤后端才是"没模型可用"）
+        if self.agent.name == name:
+            left = list(keys.load())
+            if left:
+                self.agent.use_model(left[0])
+            else:
+                self.agent.backend = None
+                self.agent.name = ""
+        self.proto.send("note", level="notice", text="已删掉 " + name)
+        self.push_models()
+        self.push_settings()
+        self.push_help()
+        self.push_status()
 
     # ---- 设置 ----
 
@@ -587,6 +700,13 @@ class Server:
             self.inbox.put(("cycle_mode", " "))
         elif op == "settings":
             self.push_settings()
+        elif op == "models":
+            self.push_models()
+        elif op == "key":
+            # 动的是模型配置和活着的后端，跟跑一轮是同一份状态 —— 放主线程
+            self.inbox.put(("key", json.dumps(msg.get("row") or {})))
+        elif op == "key_drop":
+            self.inbox.put(("key_drop", str(msg.get("name") or "")))
         elif op == "profiles":
             self.push_profiles()
         elif op == "profile":
@@ -632,6 +752,10 @@ class Server:
                                     text="已切到「%s」" % agent_mod.MODES[
                                         self.agent.cycle_mode()][0])
                     self.push_status()
+                elif op == "key":
+                    self.key_write(json.loads(text))
+                elif op == "key_drop":
+                    self.key_drop(text)
                 elif op == "profile":
                     row = json.loads(text)
                     self.profile(str(row.get("action") or ""), str(row.get("name") or ""),
@@ -655,11 +779,11 @@ class Server:
                 self.push_status()
 
 
-def serve(agent, workspace, tracer, resume: bool = False) -> int:
+def serve(agent, workspace, tracer, resume: bool = False, *, trusted: bool = False) -> int:
     """把 agent 挂到 stdio 上 返回退出码 """
     real_stdout = sys.stdout
     proto = Protocol(real_stdout)
-    server = Server(agent, workspace, tracer, proto)
+    server = Server(agent, workspace, tracer, proto, trusted=trusted)
 
     agent.approve = server.approve
     agent.approve_plan = server.approve_plan

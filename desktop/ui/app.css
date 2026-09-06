@@ -1085,6 +1085,52 @@ body[data-side="off"] .side { border-right: 0; }
 
 .line:focus { outline: 0; border-bottom-color: var(--accent); }
 
+/* 模型配置那张表。照旧「Flat, not boxed」：没有卡片，只有一条上边线分区。 */
+.form {
+  margin-top: var(--space-5);
+  border-top: 1px solid var(--line-strong);
+  padding-top: var(--space-3);
+}
+
+.form__row {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  align-items: baseline;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.form__name { font-size: var(--text-sm); color: var(--soft); }
+
+.form__hint {
+  grid-column: 2;
+  font-size: var(--text-2xs);
+  color: var(--faint);
+}
+
+/* 价格那一行是三个小格并排 */
+.form__row .line--num { max-width: 7rem; }
+.form__row:has(.line--num) { grid-template-columns: 7rem repeat(3, auto) 1fr; }
+.form__row:has(.line--num) .form__hint { grid-column: 2 / -1; }
+
+.form__row input[type="checkbox"] { justify-self: start; accent-color: var(--accent); }
+
+/* 主按钮：跟确认卡那个同一套 —— 一屏里只该有一个实心的 */
+.act--go { border-color: var(--accent); background: var(--accent); color: #fff; }
+.act--go:hover { border-color: var(--text); background: var(--text); }
+
+/* 模型那一行右边的「改」 */
+.opt__edit {
+  grid-column: 3;
+  font-size: var(--text-2xs);
+  color: var(--faint);
+  padding: 0 var(--space-2);
+}
+
+.opt__edit:hover { color: var(--accent); }
+.opt:has(.opt__edit) { grid-template-columns: 7rem minmax(0, 1fr) auto; }
+
 .rules { margin-top: var(--space-5); }
 
 .rules__head {

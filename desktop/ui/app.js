@@ -446,6 +446,11 @@ function handle(ev) {
       if (shelfOpen()) drawShelf();
       break;
 
+    case "models":
+      models = ev;
+      if (shelfOpen()) drawShelf();
+      break;
+
     case "settings":
       conf = ev;
       shelf.got = true;
@@ -789,7 +794,7 @@ function drawShelf() {
   // 摆在设置页上是假话，那一页一个开关都没有）
   const FOOT = {
     general: ["按一下就生效，跟在终端敲那条斜杠命令是同一回事",
-              "模型的增删和密钥只在终端做（feiyu 里 /key）"],
+              "密钥只进不出：存下之后界面再也读不到它"],
     profiles: ["一份档案就是 ~/.config/feiyu/profiles/ 下的一个 .md",
                "人格设定每一轮都会发给模型，别写太长。换一份立刻生效。"],
   };
@@ -932,7 +937,8 @@ const SETTINGS = [
   { key: "style", name: "回答风格", meta: (c) => label(c.styles, c.style),
     about: "只影响它怎么说话，不换模型" },
   { key: "model", name: "模型", meta: (c) => c.model || "没设置",
-    about: "主对话用哪一条配置。增删密钥只在终端做（/key）" },
+    about: "主对话用哪一条配置。可以在这儿加、改、删 —— "
+         + "已经存下的 key 不会发回来，所以改别的时候留空就是不动它" },
   { key: "helper", name: "旁活模型", meta: (c) => c.helper || "跟主模型一样",
     about: "压缩摘要、子 agent、网页提炼用哪条便宜的。省的是这些看不见的开销" },
   { key: "sandbox", name: "bash 沙箱", meta: (c) => c.sandbox.real
@@ -998,16 +1004,7 @@ function drawSetting(pane, key) {
   } else if (key === "style") {
     pane.append(pickRow(c.style, c.styles, (k) => tune("/style " + k)));
   } else if (key === "model") {
-    if (!c.models.length) {
-      const none = document.createElement("p");
-      none.className = "note";
-      none.textContent = "清单是空的。回终端敲 feiyu，再 /key add 添加第一条 —— "
-                       + "密钥的增删刻意不给桌面端，免得它成为一条把密钥捞出去的路。";
-      pane.append(none);
-    } else {
-      pane.append(pickRow(c.model, c.models.map((m) => ({ key: m, label: m })),
-                          (k) => tune("/model " + k)));
-    }
+    drawModels(pane);
   } else if (key === "helper") {
     pane.append(pickRow(c.helper || "off",
       [{ key: "off", label: "跟主模型一样", about: "不额外省，也不多一条配置要管" }]
@@ -1035,6 +1032,189 @@ function drawSetting(pane, key) {
   } else if (key === "memory") {
     pane.append(memoryList(c.memory));
   }
+}
+
+/* ── 模型配置 ───────────────────────────────────────────────
+   能加、能改、能删。**唯一守死的一条：key 只进不出** ——
+   服务端从来不把已经存下的密钥发给前端（`push_models` 只给一个 has_key 布尔），
+   所以前端就算被人拿下也读不走。改价格、改上限时 key 留空就是"不动原来那条"。
+
+   写这条路只在桌面端开着（它不监听端口）；devserver 听在回环上，同机任何进程
+   都能连，所以那边一律拒（`Server.trusted`）。 */
+let models = null;
+let editing = null;      // 正在编辑哪一条；"" 表示在新建
+
+function drawModels(pane) {
+  if (!models) {
+    const wait = document.createElement("p");
+    wait.className = "note";
+    wait.textContent = "读取中…";
+    pane.append(wait);
+    send({ op: "models" });
+    return;
+  }
+  if (!models.trusted) {
+    const why = document.createElement("p");
+    why.className = "note";
+    why.dataset.level = "warn";
+    why.textContent = "这是开发用的浏览器入口，改不了密钥。桌面端窗口里可以改。";
+    pane.append(why);
+  }
+  const list = document.createElement("div");
+  list.className = "opts";
+  models.rows.forEach((row) => {
+    const one = document.createElement("button");
+    one.type = "button";
+    one.className = "opt" + (row.using ? " opt--now" : "");
+    one.innerHTML = `<span class="opt__name"></span><span class="opt__about"></span>`;
+    one.querySelector(".opt__name").textContent = row.name;
+    one.querySelector(".opt__about").textContent =
+      row.model + (row.vision ? " · 认图" : "") + (row.helper ? " · 旁活用它" : "")
+      + (row.has_key ? "" : " · 没有 key");
+    one.onclick = () => tune("/model " + row.name);
+    const edit = document.createElement("span");
+    edit.className = "opt__edit";
+    edit.textContent = "改";
+    edit.onclick = (e) => { e.stopPropagation(); editing = row.name; drawShelf(); };
+    one.append(edit);
+    list.append(one);
+  });
+  pane.append(list);
+
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "act";
+  add.textContent = "＋ 加一条";
+  add.disabled = !models.trusted;
+  add.onclick = () => { editing = ""; drawShelf(); };
+  acts.append(add);
+  pane.append(acts);
+
+  if (editing !== null && models.trusted) pane.append(modelForm());
+}
+
+const KEY_FIELDS = [
+  ["name", "名称", "在 /model 里显示成这个", "text"],
+  ["base_url", "接口地址", "多数接口填到 /v1 就行，留空走官方地址", "text"],
+  ["model", "模型 id", "厂商那边叫什么就填什么", "text"],
+  ["key", "API key", "留空 = 不动原来那条", "password"],
+  ["max_tokens", "单轮输出上限", "不填按 8192；写长文件容易撞", "number"],
+  ["limit", "上下文上限", "不填按 128k，撞过一次它会自己学", "number"],
+];
+
+function modelForm() {
+  const row = models.rows.find((r) => r.name === editing) || {};
+  const box = document.createElement("div");
+  box.className = "form";
+  const head = document.createElement("div");
+  head.className = "rules__head";
+  head.textContent = editing ? "改 " + editing : "加一条";
+  box.append(head);
+
+  const got = {};
+  KEY_FIELDS.forEach(([key, label, hint, type]) => {
+    const line = document.createElement("label");
+    line.className = "form__row";
+    line.innerHTML = `<span class="form__name"></span>`;
+    line.querySelector(".form__name").textContent = label;
+    const input = document.createElement("input");
+    input.className = "line";
+    input.type = type === "password" ? "password" : "text";
+    input.value = key === "key" ? "" : (row[key] ?? "");
+    input.placeholder = key === "key" && row.has_key ? "已设置，留空就不动" : hint;
+    input.spellcheck = false;
+    if (key === "name" && editing) input.readOnly = true;
+    input.onkeydown = (e) => { if (e.key === "Escape") e.stopPropagation(); };
+    got[key] = input;
+    line.append(input);
+    box.append(line);
+  });
+
+  const kind = document.createElement("label");
+  kind.className = "form__row";
+  kind.innerHTML = `<span class="form__name">接口类型</span>`;
+  const pickKind = document.createElement("select");
+  pickKind.className = "line";
+  [["openai", "OpenAI 兼容（多数中转站）"], ["anthropic", "Anthropic 官方"]]
+    .forEach(([v, t]) => {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = t;
+      if ((row.kind || "openai") === v) o.selected = true;
+      pickKind.append(o);
+    });
+  kind.append(pickKind);
+  box.append(kind);
+
+  const sees = document.createElement("label");
+  sees.className = "form__row";
+  sees.innerHTML = `<span class="form__name">能看图</span>`;
+  const seesBox = document.createElement("input");
+  seesBox.type = "checkbox";
+  seesBox.checked = !!row.vision;
+  const seesWhy = document.createElement("span");
+  seesWhy.className = "form__hint";
+  seesWhy.textContent = "没标的模型收到图会直接 400，所以不猜，按你填的来";
+  sees.append(seesBox, seesWhy);
+  box.append(sees);
+
+  const price = document.createElement("label");
+  price.className = "form__row";
+  price.innerHTML = `<span class="form__name">价格</span>`;
+  const cells = ["缓存命中", "输入", "输出"].map((hint, n) => {
+    const one = document.createElement("input");
+    one.className = "line line--num";
+    one.placeholder = hint;
+    one.value = (row.price || [])[n] ?? "";
+    one.spellcheck = false;
+    return one;
+  });
+  const priceWhy = document.createElement("span");
+  priceWhy.className = "form__hint";
+  priceWhy.textContent = "¥ 每百万 token。不填就只显示 token 数，不显示金额";
+  price.append(...cells, priceWhy);
+  box.append(price);
+
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "act act--go";
+  save.textContent = "保存";
+  save.onclick = () => {
+    const out = { kind: pickKind.value, vision: seesBox.checked,
+                  price: cells.map((c) => c.value.trim()) };
+    KEY_FIELDS.forEach(([k]) => { out[k] = got[k].value.trim(); });
+    if (editing) out.name = editing;
+    editing = null;
+    send({ op: "key", row: out });
+  };
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "act";
+  cancel.textContent = "取消";
+  cancel.onclick = () => { editing = null; drawShelf(); };
+  acts.append(save, cancel);
+  if (editing) {
+    const gone = document.createElement("button");
+    gone.type = "button";
+    gone.className = "act act--gone";
+    gone.textContent = "删掉";
+    gone.onclick = () => {
+      if (!gone.dataset.sure) {
+        gone.dataset.sure = "1";
+        gone.textContent = "真的删掉？";
+        return;
+      }
+      const name = editing;
+      editing = null;
+      send({ op: "key_drop", name });
+    };
+    acts.append(gone);
+  }
+  box.append(acts);
+  return box;
 }
 
 function oneLine(value, hint, onSave) {

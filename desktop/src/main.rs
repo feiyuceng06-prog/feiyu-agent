@@ -206,7 +206,10 @@ fn start_agent(
 ) -> Result<(Child, ChildStdin), String> {
     let bin = feiyu_bin();
     let mut cmd = Command::new(&bin);
-    cmd.arg("--serve").arg("-w").arg(workspace);
+    // `--own-window`：**只有这个二进制会传。** 它是"前后端之间没有网络"的凭据 ——
+    // 桌面端走 invoke/emit 的进程内通道，外面够不着；而 devserver 是听在回环上的，
+    // 同机任何进程都能连。写密钥那条路只对前者开（见 serve.Server.trusted）。
+    cmd.arg("--serve").arg("--own-window").arg("-w").arg(workspace);
     if let Some(model) = model {
         cmd.arg("-m").arg(model);
     }

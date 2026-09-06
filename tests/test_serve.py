@@ -784,3 +784,135 @@ class TestCommandLevel(unittest.TestCase):
         box.run_command("/mode auto")
         self.assertIsNone(box._level)
         self.assertFalse(events.active())
+
+
+class TestKeys(unittest.TestCase):
+    """模型配置能在桌面端改，但**密钥只进不出**
+
+    0.50.4 定过"密钥的增删只在终端做"，理由是网页端**听在回环上**——
+    同机任何进程都能连（0.50.1 那三道门就是为它设的）。桌面端不监听端口，
+    走进程内通道，那条理由对它不成立，所以对它放开。
+
+    放开之后要守住的是另一条：**服务端从来不把已经存下的 key 发给前端**，
+    前端就算被人拿下也读不走。
+    """
+
+    class Box(serve.Server):
+        def __init__(self, agent, out, *, trusted):
+            self.agent = agent
+            self.trusted = trusted
+            self.busy = False
+            self.commands = {}
+            self._level = None
+            self.proto = serve.Protocol(out)
+
+        def push_status(self): pass
+        def push_settings(self): pass
+        def push_help(self): pass
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for mod, attr in ((keys, "STORE"), (keys, "STATE"), (permissions, "STORE"),
+                          (enabled, "STORE"), (tools_mod, "IMAGE_CONFIG")):
+            before = getattr(mod, attr)
+            setattr(mod, attr, os.path.join(self.tmp.name, attr.lower() + ".json"))
+            self.addCleanup(setattr, mod, attr, before)
+        self.agent = Feiyu(Path(self.tmp.name))
+        self.out = io.StringIO()
+
+    def box(self, trusted=True):
+        return self.Box(self.agent, self.out, trusted=trusted)
+
+    def rows(self):
+        got = [json.loads(l) for l in self.out.getvalue().splitlines() if l.strip()]
+        last = [r for r in got if r.get("kind") == "models"]
+        return last[-1]["rows"] if last else []
+
+    def add(self, box, **over):
+        row = {"name": "甲", "model": "x/y", "base_url": "https://a/v1",
+               "key": "sk-绝密", "vision": True, "price": ["0.1", "1", "2"]}
+        row.update(over)
+        box.key_write(row)
+
+    def test_加一条然后列出来(self):
+        box = self.box()
+        self.add(box)
+        box.push_models()
+        got = self.rows()
+        self.assertEqual([r["name"] for r in got], ["甲"])
+        self.assertTrue(got[0]["has_key"])
+        self.assertEqual(got[0]["price"], [0.1, 1.0, 2.0])
+
+    def test_密钥绝不出现在发出去的任何一个字节里(self):
+        """这是这块唯一要守死的东西 """
+        box = self.box()
+        self.add(box)
+        box.push_models()
+        box.push_settings = serve.Server.push_settings          # 真跑一遍设置那条
+        self.assertNotIn("sk-绝密", self.out.getvalue())
+        self.assertNotIn("key", {k for r in self.rows() for k in r})
+
+    def test_key_留空就是不动原来那条(self):
+        box = self.box()
+        self.add(box)
+        self.add(box, key="", model="x/y2")
+        self.assertEqual(keys.load()["甲"]["key"], "sk-绝密")
+        self.assertEqual(keys.load()["甲"]["model"], "x/y2")
+
+    def test_没带的字段不动_带了空才清(self):
+        """只想改模型 id 的请求不该把价格和上限一起抹掉 """
+        box = self.box()
+        self.add(box, limit="64000")
+        box.key_write({"name": "甲", "model": "x/y2"})
+        self.assertEqual(keys.load()["甲"]["price"], [0.1, 1.0, 2.0])
+        self.assertEqual(keys.load()["甲"]["limit"], 64000)
+        box.key_write({"name": "甲", "model": "x/y2", "price": [], "limit": ""})
+        self.assertIsNone(keys.load()["甲"]["price"])
+        self.assertIsNone(keys.load()["甲"]["limit"])
+
+    def test_新配置没有_key_就不给存(self):
+        box = self.box()
+        self.add(box, key="")
+        self.assertEqual(keys.load(), {})
+
+    def test_名字或模型_id_空的不给存(self):
+        box = self.box()
+        self.add(box, name="")
+        self.add(box, model="")
+        self.assertEqual(keys.load(), {})
+
+    def test_加完第一条就直接用上(self):
+        """不然加完还要再去 /model 选一次 """
+        box = self.box()
+        self.add(box)
+        self.assertEqual(self.agent.name, "甲")
+
+    def test_删掉在用的那条要换一条还在的(self):
+        box = self.box()
+        self.add(box)
+        self.add(box, name="乙")
+        self.agent.use_model("甲")
+        box.key_drop("甲")
+        self.assertEqual(list(keys.load()), ["乙"])
+        self.assertEqual(self.agent.name, "乙")
+
+    def test_删光了就不再是_ready(self):
+        box = self.box()
+        self.add(box)
+        box.key_drop("甲")
+        self.assertFalse(self.agent.ready)
+
+    def test_听在端口上的那条路一律拒(self):
+        """devserver 听在回环上，同机任何进程都能连 —— 它不该改得了密钥 """
+        box = self.box(trusted=False)
+        self.add(box)
+        self.assertEqual(keys.load(), {})
+        self.add(self.box())            # 先加一条，好验删除
+        box.key_drop("甲")
+        self.assertIn("甲", keys.load())
+
+    def test_删一条不存在的要说一声(self):
+        box = self.box()
+        box.key_drop("没这条")
+        self.assertIn("清单里没有", self.out.getvalue())

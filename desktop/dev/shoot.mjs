@@ -450,6 +450,26 @@ await cdp.eval(`[...document.querySelectorAll(".opt")]
   .find((b) => b.textContent.includes("默认")).click(); true`);
 await sleep(500);
 
+/* 模型那一项：能列、能开表单。**夹具连的是 devserver（听在回环上），
+   所以这儿 trusted 是 false** —— 正好用来验"改不了密钥"那条闸画出来没有。 */
+await cdp.eval(`[...document.querySelectorAll("#shelf-list .shelf__row")]
+  .find((r) => r.textContent.includes("模型")).click(); true`);
+await sleep(600);
+const km = JSON.parse(await cdp.eval(`JSON.stringify({
+  warn: [...document.querySelectorAll("#shelf-pane .note")].map((e) => e.textContent).join(""),
+  addDisabled: [...document.querySelectorAll(".acts .act")]
+    .filter((b) => b.textContent.includes("加一条")).map((b) => b.disabled),
+  // 页面上任何地方都不该出现 key 这个字段 —— 服务端压根没发
+  leaked: JSON.stringify(models || {}).includes('"key"'),
+})`));
+if (!km.warn.includes("改不了密钥") || String(km.addDisabled) !== "true" || km.leaked) {
+  console.error("模型那一项不对（浏览器入口该拦住写密钥、且清单里不该有 key）：",
+                JSON.stringify(km));
+  process.exitCode = 1;
+} else {
+  console.log("模型清单不带 key，浏览器入口改不了密钥");
+}
+
 await cdp.eval(`document.querySelector('[data-tab="skills"]').click(); true`);
 await sleep(500);
 const shelfRows = await cdp.eval(`JSON.stringify({

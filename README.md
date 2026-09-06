@@ -278,7 +278,12 @@ After install it also shows up in your app launcher as **Feiyu**.
 
 The sidebar holds new-session and skills-and-tools, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session. The row at the top is the workspace; click it to switch directories.
 
-**Settings** (`Ctrl K`) is five tabs: general, skills, tools, MCP, profiles. "General" holds the appearance, permission mode, answer style, model, helper model, bash sandbox, verify command, permission rules and long-term memory — clicking one takes effect immediately and runs exactly the slash command you would type in the terminal. The other four tabs: Every entry has a switch, and whatever you switch off neither enters its context nor can be called — a skill drops out of the catalog in the system prompt, a tool is not attached to the request, and an MCP server's tools are not exposed. Changes take effect immediately and are recorded in `~/.config/feiyu/enabled.json`, which lists only what is *off*, so a skill you install later is on from the start. `/skills <name>` toggles one from the terminal too.
+**Settings** (`Ctrl K`) is five tabs: general, skills, tools, MCP, profiles. "General" holds the appearance, permission mode, answer style, model, helper model, bash sandbox, verify command, permission rules and long-term memory — clicking one takes effect immediately and runs exactly the slash command you would type in the terminal. The model entry
+also adds, edits and deletes configurations (base URL, model id, API key, context limit,
+prices). **A stored key is never sent back to the UI**, so leaving that field blank when you
+change something else means "leave it alone". This is open in the desktop window only — the
+development browser entry listens on loopback, where any process on the machine could connect,
+and refuses key writes. The other four tabs: Every entry has a switch, and whatever you switch off neither enters its context nor can be called — a skill drops out of the catalog in the system prompt, a tool is not attached to the request, and an MCP server's tools are not exposed. Changes take effect immediately and are recorded in `~/.config/feiyu/enabled.json`, which lists only what is *off*, so a skill you install later is on from the start. `/skills <name>` toggles one from the terminal too.
 
 `exit_plan` cannot be switched off: it is the only way out of plan mode. Switching off an MCP server only stops its tools being attached — the process still starts, since whether it starts is written in `mcp.json` and needs a restart to change.
 

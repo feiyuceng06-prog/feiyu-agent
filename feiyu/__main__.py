@@ -57,7 +57,12 @@ def main() -> int:
     parser.add_argument(
         "--serve",
         action="store_true",
-        help="挂在 stdio 上说 JSON，给 feiyu-web 用 别手动跑，跑 feiyu-web ",
+        help="挂在 stdio 上说 JSON，给桌面端用 别手动跑，跑 feiyu-desktop ",
+    )
+    parser.add_argument(
+        "--own-window",
+        action="store_true",
+        help=argparse.SUPPRESS,     # 桌面端自己传的，不给人看
     )
     parser.add_argument(
         "prompt",
@@ -98,7 +103,8 @@ def main() -> int:
     if args.serve:
         # 装配全在 serve() 里：它要用自己那套走协议的回调去问人，
         # 而下面这些 ui.confirm 版本在没有终端的地方一律返回"拒绝"
-        return _finish(agent, tracer, serve_mod.serve(agent, workspace, tracer, args.resume))
+        return _finish(agent, tracer, serve_mod.serve(
+            agent, workspace, tracer, args.resume, trusted=args.own_window))
 
     # 一次性任务也要能答应确认 装在早退分支后面的话 approve 一直是 None，
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
