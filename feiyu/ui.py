@@ -63,6 +63,18 @@ THEMES = {
         "glyphs": {"BULLET": "■", "ELBOW": "└", "SPARK": "■", "FRAMES": "▘▝▗▖",
                    "CORNERS": "┌┐└┘", "DOT": "–", "LOGO": False},
     },
+    # 复古：泛黄的纸 + 暖墨 + 赭色 配色取自用户自己那套 Anthropic 暖色，
+    # 不另造一套（终端只能改前景色，纸的颜色是终端自己的事，所以这里
+    # 只把墨色往暖里挪 —— 在浅底终端上就是旧印刷品那个味道）
+    "retro": {
+        "label": "复古",
+        "rgb": {"grey": "146;136;120", "blue": "74;118;110", "red": "179;74;56",
+                "amber": "181;134;54", "brown": "216;119;86"},
+        # 记号挑的都是十有八九装得出来的：双线框是 DOS 那个年代的，
+        # ◆ 和 └ 几乎每个等宽字体都有（⏺ ⎿ 那两个 JetBrains Mono 就没有）
+        "glyphs": {"BULLET": "◆", "ELBOW": "└", "SPARK": "✳", "FRAMES": "◐◓◑◒",
+                   "CORNERS": "╔╗╚╝", "DOT": "·", "LOGO": True},
+    },
 }
 THEME = "default"
 

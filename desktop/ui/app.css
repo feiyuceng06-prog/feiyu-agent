@@ -28,6 +28,11 @@
   --line: rgba(0, 0, 0, 0.1);
   --line-strong: rgba(0, 0, 0, 0.2);
   --accent: #0f62fe;
+  /* diff 新增行的颜色。**单独一个 token，不要直接用 --accent** ——
+     一、`--accent` 那条规矩是"只做线和面，永远不做字"，diff 是字；
+     二、换主题时它必须跟 `--alert`（删除行）分得开，而 accent 未必。
+     复古主题里 accent 是赭色、alert 是砖红，共用的话加号减号一个色。 */
+  --plus: #0f62fe;
   --link-line: #6b93ea;
   --panel: rgba(0, 0, 0, 0.06);
   --code-bg: rgba(0, 0, 0, 0.05);
@@ -79,6 +84,40 @@
   --rise-dur: 500ms;
   --rise-ease: ease-out;
 }
+
+/* ── 复古 ───────────────────────────────────────────────────
+   **主题只换调色板，布局和字体一个不动** —— 这是这套系统对"主题"的定义
+   （终端那边 0.43.0 就是这么定的）。换字体会动到 24px 基线和所有量宽度的地方，
+   那不叫换主题，叫换一套设计。
+
+   泛黄的纸 + 暖墨 + 赭色。配色取自用户自己那套 Anthropic 暖色，不另造一套。
+   墨色照旧只有一个色相构造式（`rgba(43,32,22,α)` 而不是 `rgba(0,0,0,α)`），
+   所以"只有一个色相"那条规矩在这个主题里照样成立。
+
+   `--accent` 换成赭色之后，「只做线和面、永远不做字」那条**照旧管用** ——
+   它约束的是用法不是具体哪个颜色。 */
+:root[data-theme="retro"] {
+  --bg: #fbf6ea;
+  --text: rgba(43, 32, 22, 0.88);
+  --soft: rgba(43, 32, 22, 0.74);
+  --muted: rgba(43, 32, 22, 0.54);
+  --faint: rgba(43, 32, 22, 0.34);
+  --line: rgba(43, 32, 22, 0.13);
+  --line-strong: rgba(43, 32, 22, 0.26);
+  --accent: #c0562c;
+  /* 新增行走墨绿：整页都是暖色，加号再用赭色就跟减号的砖红糊在一起了 */
+  --plus: #3f6b5f;
+  --link-line: #c98a5e;
+  --panel: rgba(43, 32, 22, 0.07);
+  --code-bg: rgba(43, 32, 22, 0.055);
+  --selection: rgba(192, 86, 44, 0.16);
+  /* 第二色要跟 accent 分得开，不然"需要你动手"就淹在整页暖色里了 */
+  --alert: #9e2b16;
+  --alert-wash: rgba(158, 43, 22, 0.06);
+}
+
+/* 白底上那只狗是纯黑剪影，压在泛黄的纸上太硬 —— 调到跟墨色同一档 */
+:root[data-theme="retro"] .bar__mark { opacity: 0.72; filter: sepia(0.35); }
 
 * { box-sizing: border-box; }
 
@@ -562,7 +601,7 @@ body[data-side="off"] .side { border-right: 0; }
 }
 
 .tool__lines li[data-kind="-"] { color: var(--alert); }
-.tool__lines li[data-kind="+"] { color: var(--accent); }
+.tool__lines li[data-kind="+"] { color: var(--plus); }
 .tool__lines li[data-kind="doing"] { color: var(--text); font-weight: var(--w-bold); }
 
 .tool__pending {
@@ -650,7 +689,7 @@ body[data-side="off"] .side { border-right: 0; }
 }
 
 .ask__diff li[data-kind="-"] { color: var(--alert); }
-.ask__diff li[data-kind="+"] { color: var(--accent); }
+.ask__diff li[data-kind="+"] { color: var(--plus); }
 .ask__diff li { color: var(--muted); }
 
 .ask__row { display: flex; flex-wrap: wrap; gap: var(--space-2); }

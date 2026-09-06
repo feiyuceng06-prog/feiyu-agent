@@ -218,6 +218,10 @@ await cdp.call("Page.enable");
 await cdp.call("Runtime.enable");
 await cdp.call("Page.navigate", { url });
 await sleep(1500);
+/* **先把本机偏好清干净。** Chrome 的 profile 目录是跨次保留的，
+   上一轮切成复古主题会留到下一轮，于是"换了主题颜色却没变"——
+   夹具自己骗了我一轮（input.mjs 早就这么做了，这边漏了）。 */
+await cdp.eval(`try { localStorage.clear(); } catch {} setTheme("light"); true`);
 
 const errors = [];
 await cdp.eval(`window.__errs = []; addEventListener("error", (e) => __errs.push(String(e.message)));
@@ -228,6 +232,29 @@ const feed = (events) =>
 
 await feed(FLOW);
 console.log("拍了", await cdp.shot("1_flow"));
+
+/* **每个主题下 diff 的加号减号都得分得开。** 复古那套整页暖色，
+   加号原来直接用 --accent（赭色），跟减号的砖红糊成一片 —— 眼睛看
+   "都是红的"说不清差多少，量 RGB 距离说得清。 */
+for (const t of ["light", "retro"]) {
+  await cdp.eval(`setTheme("${t}"); true`);
+  await sleep(250);
+  const pair = JSON.parse(await cdp.eval(`JSON.stringify({
+    plus: getComputedStyle(document.querySelector('.tool__lines li[data-kind="+"]')).color,
+    minus: getComputedStyle(document.querySelector('.tool__lines li[data-kind="-"]')).color,
+  })`));
+  const rgb = (c) => (c.match(/\d+/g) || [0, 0, 0]).map(Number);
+  const [a, b] = [rgb(pair.plus), rgb(pair.minus)];
+  const far = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  if (far < 90) {
+    console.error(`${t} 主题下 diff 的加减号太像了（距离 ${Math.round(far)}）：`, JSON.stringify(pair));
+    process.exitCode = 1;
+  } else {
+    console.log(`${t} 主题 diff 加减号色距 ${Math.round(far)}`);
+  }
+}
+await cdp.eval(`setTheme("light"); true`);
+
 
 await feed(ASK);
 // 滚的是 .sheet 那个容器，不是 window —— 页面本身不滚，头和尾是钉住的
@@ -381,6 +408,10 @@ if (!deskShown.startsWith("ltr|")) {
 
 /* 设置那一页（面板打开时就是它）。改动一律走斜杠命令，所以这里除了看画得对不对，
    还要**真按一下**，确认发出去的是那条命令。 */
+// 第一项是「外观」（本机偏好），权限模式在它下面 —— 先点过去再量
+await cdp.eval(`[...document.querySelectorAll("#shelf-list .shelf__row")]
+  .find((r) => r.textContent.includes("权限模式")).click(); true`);
+await sleep(300);
 const conf = JSON.parse(await cdp.eval(`JSON.stringify({
   tabs: [...document.querySelectorAll("#shelf-tabs .tab")].map((t) => t.textContent.replace(/\\d+$/, "")),
   rows: [...document.querySelectorAll("#shelf-list .shelf__name")].map((e) => e.textContent),
@@ -390,7 +421,7 @@ const conf = JSON.parse(await cdp.eval(`JSON.stringify({
   marked: [...document.querySelectorAll(".opt--now .opt__name")].map((e) => e.textContent),
 })`));
 console.log("拍了", await cdp.shot("11_settings", { width: 1280, height: 900 }));
-if (conf.tabs[0] !== "通用" || conf.rows.length < 8 || conf.pane !== "权限模式"
+if (conf.tabs[0] !== "通用" || conf.rows.length < 9 || conf.pane !== "权限模式"
     || conf.opts.length !== 4 || conf.marked.length !== 1) {
   console.error("设置那一页不对：", JSON.stringify(conf));
   process.exitCode = 1;
@@ -444,6 +475,37 @@ if (bad.length) {
 } else {
   console.log(`技能面板 ${shelf.rows.length} 份，详情是「${shelf.pane}」，正文取回来了`);
 }
+
+/* 复古主题：**只换配色，排版一个字不动**。所以量两样 ——
+   颜色真的换了，而版面上的坐标一个都没动。 */
+const before = JSON.parse(await cdp.eval(`JSON.stringify({
+  bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
+  accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+  box: (() => { const r = document.querySelector("#shelf-list").getBoundingClientRect();
+    return [Math.round(r.x), Math.round(r.width)]; })(),
+})`));
+await cdp.eval(`setTheme("retro"); drawShelf(); true`);
+await sleep(400);
+const after = JSON.parse(await cdp.eval(`JSON.stringify({
+  bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
+  accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+  box: (() => { const r = document.querySelector("#shelf-list").getBoundingClientRect();
+    return [Math.round(r.x), Math.round(r.width)]; })(),
+})`));
+if (before.bg === after.bg || before.accent === after.accent) {
+  console.error("换了主题颜色却没变：", JSON.stringify([before, after]));
+  process.exitCode = 1;
+} else if (String(before.box) !== String(after.box)) {
+  console.error("主题只该换配色，版面动了：", JSON.stringify([before.box, after.box]));
+  process.exitCode = 1;
+} else {
+  console.log(`复古主题 ${before.bg} → ${after.bg}，版面一格没动`);
+}
+
+await cdp.eval(`document.querySelector('[data-tab="skills"]') && 0; true`);
+console.log("拍了", await cdp.shot("12_retro", { width: 1280, height: 900 }));
+await cdp.eval(`setTheme("light"); drawShelf(); true`);
+await sleep(300);
 
 // 工具集那一页：开关必须是看得见的方块，不是零尺寸
 await cdp.eval(`document.querySelector('[data-tab="tools"]').click(); true`);

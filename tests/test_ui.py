@@ -452,3 +452,45 @@ class TestTheme(unittest.TestCase):
     def test_钩子行挂在工具结果那一级(self):
         line = ui.hook_line(True, "钩子通过：x")
         self.assertTrue(line.startswith("  " + ui.ELBOW))
+
+
+class TestThemes(unittest.TestCase):
+    """主题只换调色板和记号，**每套都得配齐**
+
+    `set_theme` 是 `_RGB.clear()` 之后整份换上去的：少一个键，之后每一次
+    `paint("那个键", …)` 都是 KeyError，而且要等真画到那种东西时才炸。
+    记号同理，少一个就留着上一套的（`globals().update` 不会删）。
+    """
+
+    def setUp(self):
+        self.addCleanup(ui.set_theme, "default")
+
+    def test_每套主题的键都配齐(self):
+        base = ui.THEMES["default"]
+        for name, spec in ui.THEMES.items():
+            self.assertEqual(set(spec["rgb"]), set(base["rgb"]), name)
+            self.assertEqual(set(spec["glyphs"]), set(base["glyphs"]), name)
+            self.assertTrue(spec.get("label"), name)
+
+    def test_切过去每个颜色都画得出来(self):
+        ui._COLOR = True
+        self.addCleanup(setattr, ui, "_COLOR", ui._COLOR)
+        for name in ui.THEMES:
+            self.assertTrue(ui.set_theme(name), name)
+            for key in ui.THEMES["default"]["rgb"]:
+                self.assertIn("\x1b[", ui.paint(key, "字"), "%s/%s" % (name, key))
+
+    def test_没这套主题就回_False_且不改动任何东西(self):
+        ui.set_theme("swiss")
+        before = dict(ui._RGB)
+        self.assertFalse(ui.set_theme("没这套"))
+        self.assertEqual(ui._RGB, before)
+
+    def test_复古的加减号要分得开(self):
+        """整套暖色里，diff 的新增（blue）和删除（red）不能糊成一片 ——
+        桌面端那边同一条不变量由 shoot.mjs 量 RGB 距离盯着 """
+        got = ui.THEMES["retro"]["rgb"]
+        plus = [int(x) for x in got["blue"].split(";")]
+        minus = [int(x) for x in got["red"].split(";")]
+        far = sum((a - b) ** 2 for a, b in zip(plus, minus)) ** 0.5
+        self.assertGreater(far, 90, "%s vs %s" % (plus, minus))

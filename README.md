@@ -278,7 +278,7 @@ After install it also shows up in your app launcher as **Feiyu**.
 
 The sidebar holds new-session and skills-and-tools, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session. The row at the top is the workspace; click it to switch directories.
 
-**Settings** (`Ctrl K`) is five tabs: general, skills, tools, MCP, profiles. "General" holds the permission mode, answer style, model, helper model, bash sandbox, verify command, permission rules and long-term memory — clicking one takes effect immediately and runs exactly the slash command you would type in the terminal. The other four tabs: Every entry has a switch, and whatever you switch off neither enters its context nor can be called — a skill drops out of the catalog in the system prompt, a tool is not attached to the request, and an MCP server's tools are not exposed. Changes take effect immediately and are recorded in `~/.config/feiyu/enabled.json`, which lists only what is *off*, so a skill you install later is on from the start. `/skills <name>` toggles one from the terminal too.
+**Settings** (`Ctrl K`) is five tabs: general, skills, tools, MCP, profiles. "General" holds the appearance, permission mode, answer style, model, helper model, bash sandbox, verify command, permission rules and long-term memory — clicking one takes effect immediately and runs exactly the slash command you would type in the terminal. The other four tabs: Every entry has a switch, and whatever you switch off neither enters its context nor can be called — a skill drops out of the catalog in the system prompt, a tool is not attached to the request, and an MCP server's tools are not exposed. Changes take effect immediately and are recorded in `~/.config/feiyu/enabled.json`, which lists only what is *off*, so a skill you install later is on from the start. `/skills <name>` toggles one from the terminal too.
 
 `exit_plan` cannot be switched off: it is the only way out of plan mode. Switching off an MCP server only stops its tools being attached — the process still starts, since whether it starts is written in `mcp.json` and needs a restart to change.
 
@@ -341,6 +341,11 @@ Find out how $ARGUMENTS is implemented in this repo. Read only, change nothing.
 **Why the split.** The system prompt is resent on every single request. A procedure you need once, sitting there permanently, is paid for a hundred times over a hundred rounds. A skill keeps only its name and description resident — about one line — and the body arrives in context on the one turn that needs it.
 
 `/skills` lists what is available and where each came from. A project entry wins over a global one of the same name.
+
+**Two looks.** The default is white paper with IBM Blue; "retro" is aged paper, warm ink and
+ochre — **a palette swap only, not a single change to the typography or layout**. The terminal
+has its own `/theme` (ANSI colours and glyphs: `default` / `swiss` / `retro`); the two are
+deliberately separate settings.
 
 **A skill can be a package.** One `.md` is one skill, and so is a directory containing a
 `SKILL.md`, which may sit next to companion files:

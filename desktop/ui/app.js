@@ -770,7 +770,9 @@ function showShelf(on) {
 function shelfRows() {
   const want = shelf.find.trim().toLowerCase();
   const rows = shelf.tab === "general"
-    ? (conf ? SETTINGS.map((r) => ({ name: r.name, description: r.about, on: true })) : [])
+    // 服务端还没回话时先只列本机那几项 —— 它们不依赖 conf，没理由一起等
+    ? SETTINGS.filter((r) => conf || r.local)
+        .map((r) => ({ name: r.name, description: r.about, on: true }))
     : (shelf.data[shelf.tab] || []);
   if (!want) return rows;
   return rows.filter((r) =>
@@ -824,7 +826,7 @@ function drawShelf() {
       const now = document.createElement("span");
       now.className = "shelf__now";
       const spec = SETTINGS.find((r) => r.name === row.name);
-      now.textContent = spec && conf ? spec.meta(conf) : "";
+      now.textContent = spec && (conf || spec.local) ? spec.meta(conf) : "";
       li.append(left, now);
     } else if (shelf.tab === "profiles") {
       /* **档案不给开关。** 它是「用哪一份」不是「开不开」—— 单选套上双态开关的皮，
@@ -886,6 +888,33 @@ function newProfileRow() {
 
 const KIND_OF = { skills: "skill", tools: "tool", mcp: "mcp" };
 
+/* ── 外观 ───────────────────────────────────────────────────
+   **主题是这个窗口自己的偏好**，跟侧栏收放、置顶一样存在浏览器里，不进协议。
+   终端那边有自己的 `/theme`（换的是 ANSI 配色和记号），两边刻意不共用一个值 ——
+   同一个名字在两处指的不是同一套东西，共用只会互相踩。 */
+const THEME_KEY = "feiyu.theme";
+const THEMES = [
+  { key: "light", label: "默认", about: "纯白纸、IBM Blue，国际现代主义那套" },
+  { key: "retro", label: "复古", about: "泛黄的纸、暖墨、赭色。只换配色，排版一个字没动" },
+];
+
+function theme() {
+  try { return localStorage.getItem(THEME_KEY) || "light"; } catch { return "light"; }
+}
+
+function setTheme(name) {
+  const want = THEMES.some((t) => t.key === name) ? name : "light";
+  // 默认那套就是裸 :root，不挂属性 —— 常态不占位置
+  if (want === "light") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = want;
+  try { localStorage.setItem(THEME_KEY, want); } catch { /* 无痕窗口 */ }
+  // 终端面板的配色是建的时候拿 CSS 变量算出来的一份快照，**换主题要重算**，
+  // 不然它会顶着上一套配色留在那儿（termTheme() 只是算，不会自己应用）
+  if (term) term.options.theme = termTheme();
+}
+
+setTheme(theme());
+
 /* ── 设置 ───────────────────────────────────────────────────
    一行一项，左边清单选哪一项，右边改。**改动一律走斜杠命令** ——
    界面上按一下和在终端敲 `/mode auto` 是同一条代码，不另写一套保存逻辑。
@@ -894,6 +923,10 @@ let conf = null;
 
 /* 每一项：名字、右边那栏怎么画。顺序就是清单的顺序。 */
 const SETTINGS = [
+  // local: 这一项不经服务端，改的是这个窗口自己的偏好
+  { key: "theme", name: "外观", local: true,
+    meta: () => (THEMES.find((t) => t.key === theme()) || THEMES[0]).label,
+    about: "只换配色，排版和字体一个不动 —— 终端那边的 /theme 是另一套，互不相干" },
   { key: "mode", name: "权限模式", meta: (c) => label(c.modes, c.mode),
     about: "它动手之前要不要先问你" },
   { key: "style", name: "回答风格", meta: (c) => label(c.styles, c.style),
@@ -942,6 +975,16 @@ function pickRow(now, options, onPick) {
 
 function drawSetting(pane, key) {
   const c = conf;
+  if (key === "theme") {
+    const head = document.createElement("h2");
+    head.textContent = "外观";
+    const lead = document.createElement("p");
+    lead.className = "lead";
+    lead.textContent = SETTINGS[0].about;
+    pane.append(head, lead);
+    pane.append(pickRow(theme(), THEMES, (k) => { setTheme(k); drawShelf(); }));
+    return;
+  }
   const spec = SETTINGS.find((r) => r.key === key) || SETTINGS[0];
   const head = document.createElement("h2");
   head.textContent = spec.name;
@@ -1086,7 +1129,7 @@ function drawShelfPane(row) {
   if (!row) return;
   if (shelf.tab === "general") {
     const spec = SETTINGS.find((r) => r.name === row.name);
-    if (spec && conf) drawSetting(pane, spec.key);
+    if (spec && (conf || spec.local)) drawSetting(pane, spec.key);
     return;
   }
   const head = document.createElement("h2");
