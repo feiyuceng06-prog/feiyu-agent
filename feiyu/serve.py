@@ -36,6 +36,7 @@ import threading
 import _thread
 
 from . import agent as agent_mod
+from . import bots as bots_mod
 from . import enabled, events, keys, memory, permissions, profiles as profiles_mod
 from . import session as session_mod
 from . import skills as skills_mod, tools as tools_mod, ui
@@ -173,7 +174,7 @@ class Server:
     def status(self) -> dict:
         agent = self.agent
         out = {"ready": agent.ready, "mode": agent.mode, "style": agent.style,
-               "profile": agent.profile, "workspace": str(self.workspace),
+               "profile": agent.profile, "bot": agent.bot, "workspace": str(self.workspace),
                "version": __version__, "busy": self.busy}
         if agent.ready:
             out.update(model=agent.model, name=agent.name,
@@ -290,6 +291,10 @@ class Server:
 
     def push_detail(self, kind: str, name: str) -> None:
         """点开一项时才要的正文 技能和档案有正文，工具和 MCP 没有 """
+        if kind == "bot":
+            one = bots_mod.get(name)
+            self.proto.send("detail", what="bot", name=name, body=one.body if one else "")
+            return
         if kind == "profile":
             one = profiles_mod.get(name)
             self.proto.send("detail", what="profile", name=name,
@@ -337,6 +342,7 @@ class Server:
             "/model": models,
             "/helper": models + ["off"],
             "/profile": [p.name for p in profiles_mod.load()] + ["off"],
+            "/bot": [b.name for b in bots_mod.load()] + ["off"],
             "/skills": sorted(self.agent.toolbox.skills),
             "/sandbox": list(sandbox_mod.LEVELS),
         }
@@ -344,6 +350,61 @@ class Server:
                         commands=[{"name": n, "about": d} for n, d in rows.items()
                                   if n not in TERMINAL_ONLY],
                         args={k: v for k, v in args.items() if v and k not in TERMINAL_ONLY})
+
+    # ---- 机器人 ----
+
+    def push_bots(self) -> None:
+        self.proto.send("bots", rows=[b.row(self.agent.bot) for b in bots_mod.load()],
+                        current=self.agent.bot)
+
+    def start_bot(self, name: str) -> None:
+        """开一段新对话，套上这个机器人
+
+        **顺序是先开新的、再套上去。** 反过来的话人格先换了、然后 new_session
+        又把它带进旧那段的收尾里，而旧那段是按上一个人格说的。
+        """
+        if name and bots_mod.get(name) is None:
+            self.proto.send("note", level="error", text="没有叫 %s 的机器人 " % name)
+            self.push_bots()
+            return
+        self.new_session()
+        self.agent.start_bot(name)
+        if name:
+            one = bots_mod.get(name)
+            bits = [b for b in (one.model, one.mode and "%s 模式" % one.mode) if b]
+            self.proto.send("note", level="notice",
+                            text="开了一段新对话，用「%s」%s"
+                                 % (name, ("（%s）" % "、".join(bits)) if bits else ""))
+        self.push_bots()
+        self.push_settings()
+        self.push_status()
+
+    def bot_write(self, row: dict) -> None:
+        name = str(row.get("name") or "").strip()
+        if not bots_mod.write(name, str(row.get("body") or ""),
+                              description=str(row.get("description") or ""),
+                              model=str(row.get("model") or ""),
+                              mode=str(row.get("mode") or ""),
+                              style=str(row.get("style") or "")):
+            self.proto.send("note", level="error",
+                            text="存不下（名字只能是字母数字下划线连字符或中文，40 字以内）")
+            return
+        # 改的正好是现在套着的那个：当场重拼系统提示，不然要等下一段对话才生效
+        if name == self.agent.bot:
+            self.agent.start_bot(name)
+        self.proto.send("note", level="notice", text="已保存 " + name)
+        self.push_bots()
+        self.push_status()
+
+    def bot_drop(self, name: str) -> None:
+        if not bots_mod.remove(name):
+            self.proto.send("note", level="error", text="没有这个机器人 ")
+            return
+        if self.agent.bot == name:
+            self.agent.start_bot("")        # 删掉正在用的，就把人格摘了
+        self.proto.send("note", level="notice", text="已删掉 " + name)
+        self.push_bots()
+        self.push_status()
 
     # ---- 模型配置 ----
 
@@ -564,6 +625,13 @@ class Server:
             self.proto.send("cleared")
             self.push_sessions()
             self.proto.send("note", level="notice", text="对话历史已清空，存盘也删了")
+        elif head == "/bot":
+            # `/bot <名字>` 会开一段新对话，所以三份都要重推：会话列表、机器人、状态
+            self._say(cli._bot(agent, self.workspace, rest))
+            self.proto.send("cleared")
+            self.push_sessions()
+            self.push_bots()
+            self.push_settings()
         elif head == "/profile":
             self._say(cli._profile(agent, rest))
             # **是 push_profiles 不是 push_catalog** —— 后者推的是技能/工具/MCP，
@@ -715,6 +783,12 @@ class Server:
             self.agent.refresh_credits(fresh=True, then=self.push_status)
         elif op == "models":
             self.push_models()
+        elif op == "bots":
+            self.push_bots()
+        elif op == "bot":
+            # 开机器人要换会话、换模型、重拼系统提示 —— 跟跑一轮是同一份状态
+            self.inbox.put(("bot", json.dumps(
+                {"do": msg.get("do"), "name": msg.get("name"), "row": msg.get("row") or {}})))
         elif op == "key":
             # 动的是模型配置和活着的后端，跟跑一轮是同一份状态 —— 放主线程
             self.inbox.put(("key", json.dumps(msg.get("row") or {})))
@@ -767,6 +841,15 @@ class Server:
                                     text="已切到「%s」" % agent_mod.MODES[
                                         self.agent.cycle_mode()][0])
                     self.push_status()
+                elif op == "bot":
+                    row = json.loads(text)
+                    what, who = str(row.get("do") or ""), str(row.get("name") or "")
+                    if what == "start":
+                        self.start_bot(who)
+                    elif what == "save":
+                        self.bot_write({**row.get("row"), "name": who})
+                    elif what == "drop":
+                        self.bot_drop(who)
                 elif op == "key":
                     self.key_write(json.loads(text))
                 elif op == "key_drop":

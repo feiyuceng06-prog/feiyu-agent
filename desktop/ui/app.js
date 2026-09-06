@@ -471,9 +471,16 @@ function handle(ev) {
       break;
 
     case "detail":
-      shelf.bodies[ev.what === "profile" ? "档案:" + ev.name : ev.name] =
-        ev.body || (ev.what === "profile" ? "" : "（这份技能没有正文）");
+      shelf.bodies[{ profile: "档案:", bot: "机器人:" }[ev.what]
+        ? { profile: "档案:", bot: "机器人:" }[ev.what] + ev.name : ev.name] =
+        ev.body || (ev.what ? "" : "（这份技能没有正文）");
       if (shelfOpen()) drawShelf();
+      if (botShopOpen()) drawBotShop();
+      break;
+
+    case "bots":
+      bots = { rows: ev.rows || [], current: ev.current || "" };
+      drawBots();
       break;
 
     case "models":
@@ -564,6 +571,7 @@ function handle(ev) {
 
     case "opened":
       showShelf(false);
+      showBotShop(false);
       (ev.history || []).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
         else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
@@ -795,6 +803,7 @@ function showShelf(on) {
   $("nav-shelf").setAttribute("aria-pressed", String(on));
   if (on) {
     if (termOn) showTerm(false);
+    if (botShopOpen()) showBotShop(false);
     send({ op: "catalog" });
     send({ op: "profiles" });
     send({ op: "settings" });
@@ -949,6 +958,216 @@ function setTheme(name) {
 }
 
 setTheme(theme());
+
+/* ── 机器人 ─────────────────────────────────────────────────
+   跟"会话"平级摆在侧栏顶上，**不在设置里**：设置是"现在这段对话怎么跑"，
+   机器人是"开一段什么样的新对话"。点一个 = 新开一段，连人格、模型、
+   权限模式、风格一起带上。
+
+   人格那个位置跟配置档案是**共用**的（agent._persona）——一段对话要么套着
+   机器人、要么套着档案，不会同时套两个。 */
+let bots = { rows: [], current: "" };
+let botPick = null;      // 编辑器里选中哪个；"" 表示在新建
+
+function drawBots() {
+  const list = $("bots");
+  list.textContent = "";
+  bots.rows.forEach((row) => {
+    const li = document.createElement("li");
+    li.className = "talk" + (row.on ? " talk--now" : "");
+    li.innerHTML = `<div class="talk__title"></div><div class="bot__what"></div>`;
+    li.querySelector(".talk__title").textContent = row.name;
+    li.querySelector(".bot__what").textContent =
+      [row.description, row.model, row.mode && row.mode + " 模式"]
+        .filter(Boolean).join(" · ");
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "bot__edit";
+    edit.textContent = "改";
+    // **要 stopPropagation**：不然点「改」的同时把这个机器人也开起来了 ——
+    // 跟侧栏删对话那个叉是同一类错
+    edit.onclick = (e) => { e.stopPropagation(); botPick = row.name; showBotShop(true); };
+    li.append(edit);
+    li.onclick = () => send({ op: "bot", do: "start", name: row.name });
+    list.append(li);
+  });
+
+  const make = document.createElement("li");
+  make.className = "talk talk--new";
+  make.innerHTML = `<div class="talk__title">＋ 新建机器人</div>`
+                 + `<div class="bot__what">人格 + 模型 + 权限模式，一键开一段</div>`;
+  make.onclick = () => { botPick = ""; showBotShop(true); };
+  list.append(make);
+
+  if (bots.current) {
+    const off = document.createElement("li");
+    off.className = "talk";
+    off.innerHTML = `<div class="talk__title">摘掉「${esc(bots.current)}」</div>`
+                  + `<div class="bot__what">开一段不套人格的新对话</div>`;
+    off.onclick = () => send({ op: "bot", do: "start", name: "" });
+    list.append(off);
+  }
+  if (botShopOpen()) drawBotShop();
+}
+
+function setSideTab(which) {
+  $("side-talks").hidden = which !== "talks";
+  $("side-bots").hidden = which !== "bots";
+  $("side-find-wrap").hidden = which !== "talks";
+  [...$("side-tabs").children].forEach((b) =>
+    b.setAttribute("aria-selected", String(b.dataset.side === which)));
+  if (which === "bots") send({ op: "bots" });
+}
+
+$("side-tabs").onclick = (e) => {
+  const tab = e.target.closest(".side__tab");
+  if (tab) setSideTab(tab.dataset.side);
+};
+
+/* 编辑器：跟设置面板占同一格，所以开一个要把另一个收起来 */
+function botShopOpen() { return !$("botshop").hidden; }
+
+function showBotShop(on) {
+  if (on && shelfOpen()) showShelf(false);
+  $("botshop").hidden = !on;
+  $("sheet").hidden = on;
+  $("composer").hidden = on;
+  if (on) { send({ op: "bots" }); drawBotShop(); }
+}
+
+$("bot-close").onclick = () => showBotShop(false);
+$("bot-find").oninput = () => drawBotShop();
+
+const BOT_FIELDS = [
+  ["name", "名字", "侧栏里显示成这个", "text"],
+  ["description", "一句话", "这个机器人是干嘛的", "text"],
+  ["model", "模型", "留空就用当前那条", "pick-model"],
+  ["mode", "权限模式", "留空就不改", "pick-mode"],
+  ["style", "回答风格", "留空就不改", "pick-style"],
+];
+
+function drawBotShop() {
+  const list = $("bot-list");
+  const pane = $("bot-pane");
+  list.textContent = "";
+  pane.textContent = "";
+  const want = $("bot-find").value.trim().toLowerCase();
+  const rows = bots.rows.filter((r) =>
+    !want || (r.name + " " + (r.description || "")).toLowerCase().includes(want));
+  rows.forEach((row) => {
+    const li = document.createElement("li");
+    li.className = "shelf__row";
+    li.setAttribute("aria-current", String(row.name === botPick));
+    li.innerHTML = `<div><div class="shelf__name"></div><div class="shelf__meta"></div></div>`;
+    li.querySelector(".shelf__name").textContent = row.name;
+    li.querySelector(".shelf__meta").textContent =
+      [row.model, row.mode].filter(Boolean).join(" · ") || "跟当前一样";
+    li.onclick = () => { botPick = row.name; drawBotShop(); };
+    list.append(li);
+  });
+  const make = document.createElement("li");
+  make.className = "shelf__row shelf__row--new";
+  make.innerHTML = `<div><div class="shelf__name">＋ 新建一个</div>`
+                 + `<div class="shelf__meta">起一个新机器人</div></div>`;
+  make.onclick = () => { botPick = ""; drawBotShop(); };
+  list.append(make);
+
+  const row = bots.rows.find((r) => r.name === botPick) || {};
+  const head = document.createElement("h2");
+  head.textContent = botPick || "新建一个机器人";
+  const lead = document.createElement("p");
+  lead.className = "lead";
+  lead.textContent = "点侧栏里的它 = 开一段新对话，连模型和权限模式一起带上。"
+                   + "人格设定每一轮都会发给模型，别写太长。";
+  pane.append(head, lead);
+
+  const got = {};
+  const box = document.createElement("div");
+  box.className = "form";
+  BOT_FIELDS.forEach(([key, label, hint, kind]) => {
+    const line = document.createElement("label");
+    line.className = "form__row";
+    line.innerHTML = `<span class="form__name"></span>`;
+    line.querySelector(".form__name").textContent = label;
+    let input;
+    if (kind === "text") {
+      input = document.createElement("input");
+      input.className = "line";
+      input.value = row[key] ?? "";
+      input.placeholder = hint;
+      input.spellcheck = false;
+      if (key === "name" && botPick) input.readOnly = true;
+    } else {
+      input = document.createElement("select");
+      input.className = "line";
+      const opts = kind === "pick-model" ? (conf ? conf.models : [])
+                 : kind === "pick-mode" ? (conf ? conf.modes.map((m) => m.key) : [])
+                 : (conf ? conf.styles.map((m) => m.key) : []);
+      [""].concat(opts).forEach((v) => {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v || "（不改）";
+        if ((row[key] || "") === v) o.selected = true;
+        input.append(o);
+      });
+    }
+    input.onkeydown = (e) => { if (e.key === "Escape") e.stopPropagation(); };
+    got[key] = input;
+    line.append(input);
+    box.append(line);
+  });
+
+  const soul = document.createElement("textarea");
+  soul.className = "soul";
+  soul.spellcheck = false;
+  soul.placeholder = "你是……（在这里写这个机器人的人格：它是谁、怎么说话、什么不做）";
+  const cached = shelf.bodies["机器人:" + botPick];
+  soul.value = botPick ? (cached === undefined ? "读取中…" : cached) : "";
+  if (botPick && cached === undefined) send({ op: "detail", kind: "bot", name: botPick });
+  box.append(soul);
+  pane.append(box);
+
+  const acts = document.createElement("div");
+  acts.className = "acts";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "act act--go";
+  save.textContent = "保存";
+  save.onclick = () => {
+    const name = (got.name.value || "").trim();
+    if (!name) return;
+    const out = { body: soul.value };
+    ["description", "model", "mode", "style"].forEach((k) => { out[k] = got[k].value; });
+    delete shelf.bodies["机器人:" + name];
+    botPick = name;
+    send({ op: "bot", do: "save", name, row: out });
+  };
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "act";
+  go.textContent = "开一段";
+  go.disabled = !botPick;
+  go.onclick = () => { showBotShop(false); send({ op: "bot", do: "start", name: botPick }); };
+  acts.append(save, go);
+  if (botPick) {
+    const gone = document.createElement("button");
+    gone.type = "button";
+    gone.className = "act act--gone";
+    gone.textContent = "删掉";
+    gone.onclick = () => {
+      if (!gone.dataset.sure) {
+        gone.dataset.sure = "1";
+        gone.textContent = "真的删掉？";
+        return;
+      }
+      const name = botPick;
+      botPick = null;
+      send({ op: "bot", do: "drop", name });
+    };
+    acts.append(gone);
+  }
+  pane.append(acts);
+}
 
 /* ── 设置 ───────────────────────────────────────────────────
    一行一项，左边清单选哪一项，右边改。**改动一律走斜杠命令** ——
@@ -1814,6 +2033,7 @@ function hello() {
   send({ op: "sessions" });
   // 面板开着的时候连上（或断线重连），得把清单重新要一遍 ——
   // 不要的话它会一直空着，而空清单跟"这台机器上没有技能"长得一模一样
+  send({ op: "bots" });
   if (shelfOpen()) {
     send({ op: "catalog" });
     send({ op: "profiles" });
@@ -2012,6 +2232,7 @@ inputEl.addEventListener("keydown", (e) => {
 document.addEventListener("keydown", (e) => {
   // 面板开着时 esc 是"退回对话"，不是"打断这一轮" —— 那儿根本没有正在跑的一轮
   if (e.key === "Escape" && shelfOpen()) { e.preventDefault(); showShelf(false); return; }
+  if (e.key === "Escape" && botShopOpen()) { e.preventDefault(); showBotShop(false); return; }
   if (e.key === "Escape" && busy) send({ op: "interrupt" });
   if (e.key === "k" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); showShelf(!shelfOpen()); }
   // 侧栏上写着 Ctrl N，那就得真的能用 —— 写了快捷键不实现比不写更糟

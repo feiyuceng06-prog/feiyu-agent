@@ -998,6 +998,7 @@ class TestCredits(unittest.TestCase):
         class Fake:
             ready = True
             mode = style = profile = "x"
+            bot = ""
             model = name = "m"
             tokens = 1
             cost = 0.0

@@ -59,11 +59,17 @@
     </button>
   </nav>
 
-  <div class="side__find">
+  <!-- 会话和机器人平级 —— 机器人是"开一段什么样的对话"，跟设置不是一回事 -->
+  <div class="side__tabs" id="side-tabs">
+    <button class="side__tab" data-side="talks" aria-selected="true" type="button">会话</button>
+    <button class="side__tab" data-side="bots" aria-selected="false" type="button">机器人</button>
+  </div>
+
+  <div class="side__find" id="side-find-wrap">
     <input id="find" type="search" placeholder="搜索会话…" spellcheck="false" autocomplete="off">
   </div>
 
-  <div class="side__scroll">
+  <div class="side__scroll" id="side-talks">
     <div class="group" id="group-pinned" hidden>
       <div class="group__head">已置顶</div>
       <ul class="talks" id="pinned"></ul>
@@ -72,6 +78,10 @@
       <div class="group__head">会话</div>
       <ul class="talks" id="talks"></ul>
     </div>
+  </div>
+
+  <div class="side__scroll" id="side-bots" hidden>
+    <ul class="talks" id="bots"></ul>
   </div>
 </aside>
 
@@ -100,6 +110,24 @@
   <div class="shelf__foot">
     <span id="shelf-where" class="mono"></span>
     <span class="shelf__hint" id="shelf-hint"></span>
+  </div>
+</section>
+
+<!-- 机器人编辑器。**不放在设置里**（用户明确要求）——它跟"会话"平级，
+     从侧栏那个列表进来。布局复用设置面板那套两栏，样式是同一批 class。 -->
+<section class="shelf" id="botshop" hidden>
+  <div class="shelf__head">
+    <div class="tabs"><button class="tab" aria-selected="true" type="button">机器人</button></div>
+    <input id="bot-find" type="search" placeholder="筛一下…" spellcheck="false" autocomplete="off">
+    <button id="bot-close" class="chip" type="button" title="回到对话">×</button>
+  </div>
+  <div class="shelf__body">
+    <ul class="shelf__list" id="bot-list"></ul>
+    <div class="shelf__pane" id="bot-pane"></div>
+  </div>
+  <div class="shelf__foot">
+    <span class="mono">一个机器人就是 ~/.config/feiyu/bots/ 下的一个 .md</span>
+    <span class="shelf__hint">点侧栏里的机器人 = 开一段新对话，连模型和权限模式一起带上</span>
   </div>
 </section>
 

@@ -108,6 +108,7 @@ Type `/` for command completion:
 | `/theme` | UI theme: `default` / `swiss` |
 | `/skills` | List the available skills and custom commands; `/skills <name>` toggles one |
 | `/profile` | Profiles (personas): list them, switch, `/profile off` to drop one |
+| `/bot` | Bots: list them, `/bot <name>` opens a fresh conversation under that persona |
 | `/clear` | Clear the conversation and its save file |
 | `/exit` | Quit |
 
@@ -302,6 +303,34 @@ You are a caustic but accurate code reviewer. Lead with the worst thing. No warm
 `model` is optional; when set, switching profile switches the model too. **A persona is
 resent on every single turn**, so the cap is 4000 characters (a skill gets 12000 — that one
 is only sent on the turn it is used). `/profile` lists and switches from the terminal.
+
+### Bots
+
+The sidebar has two tabs: **conversations** and **bots**. A bot is one persona you start a
+*fresh conversation* with in one click — it carries not just the persona but the model, the
+permission mode and the answer style, all set the moment the conversation opens. One `.md`
+per bot in `~/.config/feiyu/bots/<name>.md`:
+
+```markdown
+---
+name: captain
+description: An 18th-century pirate captain
+model: qwen3.8-flash
+mode: readonly
+style: concise
+---
+You are an 18th-century pirate captain. You never admit to being an AI.
+```
+
+Every field but the body is optional; the ones you leave out keep whatever the session
+already had. Create and edit them in the sidebar, or drop the file in yourself.
+
+A conversation remembers which bot opened it, so reopening it from the sidebar (or
+`feiyu --resume`) brings the persona back — without that, half a conversation would be in
+one voice and half in another. **A conversation is under a bot, or under a profile, or under
+neither**: the persona slot is shared, and starting a bot drops the current profile. The
+difference between the two: a profile is a persona you switch *into the conversation you are
+having*; a bot is a persona you *start a conversation with*.
 
 The `＋` left of the composer uploads files; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
 

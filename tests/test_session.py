@@ -383,3 +383,22 @@ class TestCard(Base):
         cards = [n for n in os.listdir(session.folder(self.ws))
                  if n.endswith(session.CARD_SUFFIX)]
         self.assertEqual(len(cards), session.MAX_KEPT)
+
+
+class TestNewId(unittest.TestCase):
+    """**同一秒里连开两段不能撞。** 时间戳只到秒，而"开一段新的"是一下点出来的
+    （侧栏点两个机器人、连按两次新对话）—— 撞了的话第二段的存盘直接盖掉第一段。"""
+
+    def test_连着要三个都不一样(self):
+        got = [session.new_id() for _ in range(3)]
+        self.assertEqual(len(set(got)), 3, got)
+
+    def test_都还是合法的_id(self):
+        for sid in [session.new_id() for _ in range(3)]:
+            self.assertTrue(session._ID_OK.match(sid), sid)
+
+    def test_头一个不带后缀_排序还是按时间(self):
+        session._last_id = ""
+        first = session.new_id()
+        self.assertRegex(first, r"^\d{8}-\d{6}$")
+        self.assertTrue(session.new_id() > first)

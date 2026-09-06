@@ -13,6 +13,7 @@ from . import ui
 from . import history, hooks as hooks_mod
 from . import profiles as profiles_mod
 from . import progress as progress_mod
+from . import bots as bots_mod
 from . import credits as credits_mod
 from . import enabled, keys, memory, permissions, schema as schema_mod
 from . import skills as skills_mod
@@ -417,6 +418,8 @@ class Feiyu:
         self.credits_note = ""
         # 当前用哪份配置档案（人格） 空串就是不套任何人格
         self.profile: str = profiles_mod.current()
+        # 这段对话是哪个机器人开的 跟 profile **共用人格那个位置**（见 _persona）
+        self.bot: str = ""
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
@@ -465,7 +468,7 @@ class Feiyu:
         text = (SYSTEM_PROMPT + IDENTITY.format(model=self.model, name=self.name)
                 + self.env + STYLES[self.style][1])
         # 人格设定排在风格之后：风格管"话说多长"，档案管"你是谁"，后者更具体
-        text += profiles_mod.as_prompt(self.profile)
+        text += self._persona()
         if self.mode == "plan":
             text += PLAN_PROMPT
         live_mcp = {n: srv for n, srv in self.toolbox.mcp.servers.items()
@@ -654,7 +657,14 @@ class Feiyu:
                 + (getattr(side, "cost", 0.0) if side is not None else 0.0))
 
     def reset(self) -> None:
-        self.backend.reset()
+        """清空这一段的历史
+
+        **`backend` 允许为 None**（一条模型配置都还没加时），而清空历史这件事
+        不该要求先配好模型 —— `/clear` 和 `/bot` 都会走到这儿，一个还没 `/key add`
+        的新用户敲一下就是 AttributeError。
+        """
+        if self.backend is not None:
+            self.backend.reset()
         self._forget_history()
         self._pending = 0
 
@@ -709,6 +719,39 @@ class Feiyu:
         self._refresh_system()
         return True
 
+    def _persona(self) -> str:
+        """拼进系统提示的那段人格
+
+        **机器人和档案共用这一个位置**：一段对话要么套着机器人、要么套着档案、
+        要么什么都不套。同时套两个人格只会互相打架，而"你是谁"只该有一个答案。
+        """
+        return bots_mod.as_prompt(self.bot) or profiles_mod.as_prompt(self.profile)
+
+    def start_bot(self, name: str) -> str:
+        """套上一个机器人 它带的模型 / 权限模式 / 风格一起换过去
+
+        **只改这一段对话的状态，不写盘**（除了模型那条本来就记在 state.json）——
+        机器人是"开一段什么样的对话"，不是全局偏好。
+        """
+        found = bots_mod.get(name) if name else None
+        if name and found is None:
+            return ""
+        self.bot = found.name if found else ""
+        if found is None:
+            self._refresh_system()
+            return ""
+        # 套上机器人就把档案摘掉：同一个位置，留着只会让人分不清现在听谁的
+        self.profile = ""
+        if found.mode in MODES:
+            self.mode = found.mode
+        if found.style in STYLES:
+            self.style = found.style
+        # use_model 自己会重拼系统提示；没换模型的话下面这句补上
+        if found.model and found.model != self.name and found.model in keys.load():
+            self.use_model(found.model)
+        self._refresh_system()
+        return self.bot
+
     def set_profile(self, name: str) -> str:
         """换一份人格 档案里写了 model 的话连模型一起换
 
@@ -720,6 +763,8 @@ class Feiyu:
             return ""
         self.profile = found.name if found else ""
         profiles_mod.set_current(self.profile)
+        if self.profile:
+            self.bot = ""       # 同一个位置，不能同时套两个人格
         # use_model 自己会重拼系统提示，没换模型的话这儿补一次
         if found is not None and found.model and found.model != self.name:
             if not self.use_model(found.model):
@@ -953,6 +998,11 @@ class Feiyu:
             self.style = data["style"]
         if data.get("mode") in MODES:
             self.mode = data["mode"]
+        # 机器人要跟着一起回来 **在 use_model 之后**：start_bot 会去换模型，
+        # 而存盘里那条模型才是这段对话当时真正在用的
+        self.bot = data.get("bot") or ""
+        if self.bot and bots_mod.get(self.bot) is None:
+            self.bot = ""       # 那个机器人被删了，就当没套
         self.toolbox.todos.restore(data.get("todos"))
         b = self.backend
         b.messages = data["messages"]

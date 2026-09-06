@@ -1286,6 +1286,7 @@ SLASH = {
     "/undo": "退掉它最近一次写文件的改动，可以连着退",
     "/skills": "看有哪些技能和自定义命令；/skills <名字> 开关一份",
     "/profile": "配置档案（人格）：看有哪些、换一份",
+    "/bot": "机器人：用一套人格（带模型和权限模式）开一段新对话",
     "/helper": "旁活（摘要、子 agent、网页提炼）用哪条便宜的配置",
     "/compact": "把历史压缩成一段摘要，省上下文",
     "/context": "查看并重新加载项目约定文件",
@@ -1298,8 +1299,9 @@ EXTRA_SLASH: dict[str, str] = {}
 # /style 和 /mode 的取值由 agent 注入，用于补全
 STYLE_NAMES: list[str] = []
 MODE_NAMES: list[str] = []
-# 模型清单随时会变，用回调取而不是快照
+# 模型清单随时会变，用回调取而不是快照 机器人同理（面板里随时能加）
 MODEL_NAMES = lambda: []
+BOT_NAMES = lambda: []
 
 
 def _history_file() -> str:
@@ -1365,6 +1367,10 @@ class InputBox:
                             yield Completion(name, start_position=-len(arg))
                 elif cmd == "/model" and " " not in arg:
                     for name in MODEL_NAMES():
+                        if name.startswith(arg):
+                            yield Completion(name, start_position=-len(arg))
+                elif cmd == "/bot" and " " not in arg:
+                    for name in BOT_NAMES() + ["off"]:
                         if name.startswith(arg):
                             yield Completion(name, start_position=-len(arg))
                 elif cmd == "/key" and arg.startswith("rm "):

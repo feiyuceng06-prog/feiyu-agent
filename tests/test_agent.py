@@ -1095,3 +1095,12 @@ class TestThinkingWired(Base):
         self.addCleanup(setattr, ui_mod.Stream, "thinking", real)
         quiet(self.agent.send, "想想")
         self.assertEqual(seen, [120, 900, 4000])
+
+
+class TestResetWithoutBackend(Base):
+    """一条模型配置都没加时 `backend` 是 None，而 `/clear` / `/bot` 照样该能用 """
+
+    def test_没有后端也清得动(self):
+        self.agent.backend = None
+        self.agent.reset()                  # 不能抛
+        self.assertFalse(self.agent.ready)

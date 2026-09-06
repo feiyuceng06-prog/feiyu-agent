@@ -8,6 +8,7 @@ from . import hooks as hooks_mod
 from . import mcp as mcp_mod
 from . import serve as serve_mod
 from . import skills as skills_mod
+from . import bots as bots_mod
 from . import credits, enabled, keys, memory, permissions, pricing, profiles, progress
 from . import sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
@@ -180,6 +181,7 @@ def main() -> int:
     ui.STYLE_NAMES[:] = list(STYLES)
     ui.MODE_NAMES[:] = list(MODES)
     ui.MODEL_NAMES = lambda: list(keys.load())
+    ui.BOT_NAMES = lambda: [b.name for b in bots_mod.load()]
     ui.enter_screen()
 
     project = f"{agent.context_file}（{len(agent.context_text)} 字）" if agent.context_text else "无"
@@ -298,6 +300,8 @@ def main() -> int:
                 print(_sandbox(arg))
             elif cmd == "/profile":
                 print(_profile(agent, arg))
+            elif cmd == "/bot":
+                print(_bot(agent, workspace, arg))
             elif cmd == "/helper":
                 print(_helper(agent, arg))
             elif cmd == "/jobs":
@@ -388,6 +392,46 @@ def _profile(agent: Feiyu, arg: str) -> str:
         note = one.description + (" · " + one.model if one.model else "")
         rows.append("   " + tick + " " + label + ui.paint("grey", note))
     rows += ["", ui.notice("/profile <名字> 换一份，/profile off 摘掉")]
+    return "\n".join(rows)
+
+
+def _bot(agent: Feiyu, workspace: Path, arg: str) -> str:
+    """`/bot` 看有哪些，`/bot <名字>` 开一段新对话套上它，`/bot off` 摘掉
+
+    **跟 `/profile` 的区别就在"开一段新的"**：档案是往正在聊的这段里换人格，
+    机器人是拿这套人格从头开一段。所以这里要存旧的、换 id，走的是
+    `serve.new_session` 那条路（旧的留在盘上，不是 `/clear`）。
+    """
+    found = bots_mod.load()
+    if arg and arg not in ("off", "none", "无") and bots_mod.get(arg) is None:
+        return ui.error("没有叫 %s 的机器人 现有：%s"
+                        % (arg, "、".join(b.name for b in found) or "（一个都没有）"))
+    if arg:
+        session.save(workspace, agent, agent.session_id)
+        agent.reset()
+        agent.session_id = session.new_id()
+        agent.start_bot("" if arg in ("off", "none", "无") else arg)
+        if not agent.bot:
+            return ui.notice("已摘掉机器人，开了一段新对话")
+        one = bots_mod.get(agent.bot)
+        bits = [b for b in (one.model, one.mode and "%s 模式" % one.mode) if b]
+        return ui.notice("开了一段新对话，用「%s」%s"
+                         % (agent.bot, ("（%s）" % "、".join(bits)) if bits else ""))
+    if not found:
+        return ui.notice(
+            "还没有机器人 一个机器人就是一个 .md，放 %s/ 下："
+            "开头写 --- name / description / model / mode / style ---，正文是人格设定 "
+            "跟档案的区别：机器人是点一下就用这套人格开一段新对话，还能带上模型和权限模式"
+            % bots_mod.DIR)
+    rows = []
+    for one in found:
+        tick = ui.paint("brown", " ●") if one.name == agent.bot else "  "
+        name = ui.pad(one.name, 16)
+        label = ui.bold(name) if one.name == agent.bot else ui.paint("grey", name)
+        note = " · ".join(x for x in (one.description, one.model,
+                                      one.mode and one.mode + " 模式") if x)
+        rows.append("   " + tick + " " + label + ui.paint("grey", note))
+    rows += ["", ui.notice("/bot <名字> 用它开一段新对话，/bot off 摘掉")]
     return "\n".join(rows)
 
 

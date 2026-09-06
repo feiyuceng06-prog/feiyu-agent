@@ -369,6 +369,73 @@ if (lines.some((w) => w !== "0px")) {
   console.log("代码块没有多余的竖线");
 }
 
+/* 机器人：跟"会话"平级摆在侧栏顶上，**不在设置里**。
+   点一个 = 开一段新对话（发 op:bot do:start），点「改」= 进编辑器那一屏。 */
+/* **先切页签，再灌。** 切过去会向服务端要一次真列表（它盘上是空的），
+   反过来的话那份真推送会把合成数据盖掉 —— CLAUDE.md 里记过这个坑。 */
+await cdp.eval(`document.querySelector('[data-side="bots"]').click(); true`);
+await sleep(600);
+await cdp.eval(`handle({kind:"bots", current:"", rows:[
+  {name:"代码评审", description:"只挑毛病", model:"deepseek-v4-pro", mode:"readonly", on:false},
+  {name:"耐心老师", description:"讲清楚为什么", model:"", mode:"", on:false}]}); true`);
+await sleep(400);
+console.log("拍了", await cdp.shot("14_bots", { width: 1280, height: 900 }));
+const zoo = JSON.parse(await cdp.eval(`JSON.stringify({
+  tabs: [...document.querySelectorAll(".side__tab")].map((t) => t.textContent),
+  rows: [...document.querySelectorAll("#bots .talk__title")].map((e) => e.textContent),
+  talksHidden: document.getElementById("side-talks").hidden,
+  // 会话搜索框在机器人页签下不该还挂着 —— 它搜的是会话
+  findHidden: document.getElementById("side-find-wrap").hidden,
+})`));
+if (zoo.tabs.join("/") !== "会话/机器人" || !zoo.rows.includes("代码评审")
+    || !zoo.rows.some((t) => t.includes("新建")) || !zoo.talksHidden || !zoo.findHidden) {
+  console.error("机器人那一栏不对：", JSON.stringify(zoo));
+  process.exitCode = 1;
+} else {
+  console.log(`机器人 ${zoo.rows.length - 1} 个，会话那栏让开了`);
+}
+
+// 点一个 = 开一段新对话
+await cdp.eval(`window.__sent = []; const real = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (d) { window.__sent.push(d); return real.call(this, d); }; true`);
+await cdp.eval(`[...document.querySelectorAll("#bots .talk")]
+  .find((t) => t.textContent.includes("代码评审")).click(); true`);
+await sleep(400);
+/* **解析出来再断言。** `JSON.stringify(数组)` 出来的字符串里引号是转义的，
+   拿 `'"start"'` 去 includes 永远匹配不上 —— 夹具自己骗了我一轮。 */
+const started = JSON.parse(await cdp.eval(`JSON.stringify(window.__sent)`))
+  .map((x) => { try { return JSON.parse(x); } catch { return {}; } });
+if (!started.some((m) => m.op === "bot" && m.do === "start" && m.name === "代码评审")) {
+  console.error("点机器人没发 op:bot do:start：", JSON.stringify(started));
+  process.exitCode = 1;
+} else {
+  console.log("点一个机器人 = 开一段新对话");
+}
+
+// 「改」进编辑器，而且**不该顺手把这个机器人开起来**
+await cdp.eval(`handle({kind:"bots", current:"", rows:[
+  {name:"代码评审", description:"只挑毛病", model:"m", mode:"readonly", on:false}]});
+  window.__sent = []; true`);
+await sleep(300);
+await cdp.eval(`document.querySelector("#bots .bot__edit").click(); true`);
+await sleep(500);
+const shop = JSON.parse(await cdp.eval(`JSON.stringify({
+  open: !document.getElementById("botshop").hidden,
+  sheet: document.getElementById("sheet").hidden,
+  title: (document.querySelector("#bot-pane h2") || {}).textContent || "",
+  fields: [...document.querySelectorAll("#bot-pane .form__name")].map((e) => e.textContent),
+  started: (window.__sent || []).some((x) => x.includes("start")),
+})`));
+if (!shop.open || !shop.sheet || shop.title !== "代码评审" || shop.fields.length < 5
+    || shop.started) {
+  console.error("机器人编辑器不对（点「改」不该顺手把它开起来）：", JSON.stringify(shop));
+  process.exitCode = 1;
+} else {
+  console.log(`机器人编辑器：${shop.title}，${shop.fields.length} 个字段，没顺手开起来`);
+}
+await cdp.eval(`showBotShop(false); document.querySelector('[data-side="talks"]').click(); true`);
+await sleep(300);
+
 /* 技能与工具那一屏。**不灌合成事件** —— 面板一打开就向服务端要 catalog，
    合成的会被真推送盖掉（CLAUDE.md 里记过这个坑）。所以这里靠夹具跑在一份
    备好技能的 XDG_CONFIG_HOME 上，拍的就是真数据。 */

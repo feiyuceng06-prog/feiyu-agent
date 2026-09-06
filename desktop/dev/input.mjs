@@ -316,8 +316,8 @@ async function side() {
   return JSON.parse(await ev(`JSON.stringify({
     open: document.body.dataset.side !== "off",
     width: Math.round(document.getElementById("side").getBoundingClientRect().width),
-    talks: [...document.querySelectorAll(".talk__title")].map(e => e.textContent),
-    current: [...document.querySelectorAll('.talk[aria-current="true"] .talk__title')]
+    talks: [...document.querySelectorAll("#talks .talk__title")].map(e => e.textContent),
+    current: [...document.querySelectorAll('#talks .talk[aria-current="true"] .talk__title')]
                .map(e => e.textContent)[0] || null,
   })`));
 }
@@ -389,8 +389,8 @@ await ev(`[...document.querySelectorAll(".talk--asking button")]
   .find(b => b.textContent === "取消").click(); true`);
 await sleep(200);
 check("取消回到原样",
-      (await ev(`document.querySelectorAll(".talk--asking").length`)) === 0 &&
-      (await ev(`document.querySelectorAll(".talk").length`)) === 2, null);
+      (await ev(`document.querySelectorAll("#talks .talk--asking").length`)) === 0 &&
+      (await ev(`document.querySelectorAll("#talks .talk").length`)) === 2, null);
 await reset();
 await ev(`document.querySelector(".talk .talk__x").click(); true`);
 await sleep(200);
@@ -565,8 +565,31 @@ await ev(`handle({kind:"sessions", current:"B", rows:[
     box.value = "构建"; box.dispatchEvent(new Event("input")); })(); true`);
 await sleep(200);
 const found = JSON.parse(await ev(`JSON.stringify(
-  [...document.querySelectorAll(".talk__title")].map(e => e.textContent))`));
+  [...document.querySelectorAll("#talks .talk__title")].map(e => e.textContent))`));
 check("搜索筛得动", found.length === 1 && found[0].includes("构建"), found);
+
+// ── 机器人那一栏 ────────────────────────────────────────────
+// 搜索框是「会话」那栏的东西，切到机器人要收起来 —— 它筛的是会话，
+// 留在那儿会让人以为能筛机器人
+await ev(`setSideTab("bots"); true`);
+await sleep(200);
+check("切到机器人：会话列表让开、搜索框收起",
+      (await ev(`document.getElementById("side-talks").hidden`)) === true &&
+      (await ev(`document.getElementById("side-find-wrap").hidden`)) === true, null);
+
+// 点一个机器人 = 开一段新对话（op:bot / do:start），不是 op:open
+await reset();
+await ev(`handle({kind:"bots", current:"", rows:[
+  {name:"代码评审", description:"只挑毛病", model:"m", mode:"readonly", style:"", on:false}]});
+  document.querySelector("#bots .talk").click(); true`);
+await sleep(200);
+const botSent = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("点机器人发 op:bot do:start",
+      botSent.some(m => m.op === "bot" && m.do === "start" && m.name === "代码评审"), botSent);
+check("点机器人不发 op:open", !botSent.some(m => m.op === "open"), botSent);
+
+await ev(`setSideTab("talks"); true`);
+await sleep(150);
 await ev(`(() => { const b = document.getElementById("find");
   b.value = ""; b.dispatchEvent(new Event("input")); })(); true`);
 
