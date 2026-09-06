@@ -680,9 +680,20 @@ body[data-side="off"] .side { border-right: 0; }
 
 .btn:hover { border-color: var(--text); }
 
-.btn--primary { border-color: var(--accent); color: var(--accent); }
-.btn--primary:hover { background: var(--accent); color: #fff; }
+/* 主按钮是**实心**的。两个理由：
+   一、这张卡是"停下来看我"，四个一模一样的线框按钮等于没有主次；
+   二、原来是蓝**字**加蓝边，而这套系统的规矩是「IBM Blue 只做线和面，
+   永远不做字」—— 蓝底白字是面，合规；蓝字不合规。 */
+.btn--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
 
+.btn--primary:hover { border-color: var(--text); background: var(--text); }
+
+/* 红留给**真的会丢东西**的动作（删档案那种）。"拒绝"是最安全的那个选项，
+   染成红的会让人以为按了要出事 —— 它现在走中性线框。 */
 .btn--danger { border-color: var(--alert); color: var(--alert); }
 .btn--danger:hover { background: var(--alert); color: #fff; }
 
@@ -721,10 +732,13 @@ body[data-side="off"] .side { border-right: 0; }
   padding: 0.1em 0.3em;
 }
 
+/* **代码块不画自己的竖线。** meta-rail 那条竖线就在左边 16px 处，
+   再画一条就是两条发丝线并排 —— 0.50.6 给「你」那一块修过同一个毛病，
+   代码块这儿漏了（量出来的：rail 在 416，pre 的边在 432）。
+   留缩进，靠 rail 撑结构，一页只有一条纵线。 */
 .prose pre {
   margin: 0 0 var(--space-3);
   padding: var(--space-3) 0 var(--space-3) var(--space-4);
-  border-left: 1px solid var(--line-strong);
   overflow-x: auto;
 }
 
@@ -1214,6 +1228,19 @@ body[data-side="off"] .side { border-right: 0; }
 .palette__name { font-family: var(--font-mono); color: var(--text); }
 .palette__about { color: var(--muted); }
 
+/* 侧栏浮在内容上面时的遮罩。**没有它内容就在下面被盖住还点得到**，
+   而且没有任何地方能把侧栏关掉 —— 桌面窗口最小 720px，正好落在这一档里，
+   缩到最小就看不见字了（量出来的：正文起点 x=24，而侧栏占 0–240）。 */
+.scrim {
+  position: fixed;
+  inset: var(--bar) 0 var(--bar-s) 0;
+  background: rgba(0, 0, 0, 0.28);
+  z-index: 2;
+}
+
+body:not([data-narrow]) .scrim,
+body[data-side="off"] .scrim { display: none; }
+
 @media (max-width: 46rem) {
   :root { --rail: 0rem; }
   .block { grid-template-columns: minmax(0, 1fr); gap: var(--space-1) 0; }
@@ -1223,4 +1250,9 @@ body[data-side="off"] .side { border-right: 0; }
   body { grid-template-columns: minmax(0, 1fr); }
   .sheet, .composer { grid-column: 1; }
   body[data-side="off"] .side { width: 0; }
+  /* 标签这时候是堆在正文上面的，没有 rail 那一列了 ——
+     再画那条纵线就成了一条贴着左边、什么也不标的边框。 */
+  .stream::before { display: none; }
+  .shelf__body { grid-template-columns: minmax(0, 1fr); }
+  .shelf__list { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40%; }
 }

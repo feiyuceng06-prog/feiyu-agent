@@ -308,6 +308,40 @@ if (pairs.length !== 4 || heads.size !== 4) {
   console.log("并行四条各归各");
 }
 
+/* 窗口缩到最小（桌面端 minWidth 720）时侧栏会浮起来盖住内容。
+   **要自动收起**，不然正文被压在下面而且没有任何地方能关掉 ——
+   量的是侧栏宽度，不是"看着还行"。 */
+for (const [w, want] of [[720, 0], [760, 240]]) {
+  await cdp.call("Emulation.setDeviceMetricsOverride",
+    { width: w, height: 800, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+  const got = JSON.parse(await cdp.eval(`JSON.stringify({
+    side: Math.round(document.getElementById("side").getBoundingClientRect().width),
+    body: Math.round(document.querySelector(".block__body").getBoundingClientRect().x),
+    scrim: !document.getElementById("scrim").hidden,
+  })`));
+  if (got.side !== want || (w === 720 && got.body < 8)) {
+    console.error(`${w}px 下侧栏该是 ${want} 宽：`, JSON.stringify(got));
+    process.exitCode = 1;
+  } else {
+    console.log(`${w}px 侧栏 ${got.side} 宽，正文起点 ${got.body}`);
+  }
+}
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await sleep(300);
+
+/* 一页只该有一条纵线：代码块不许再画自己的左竖线（meta-rail 就在左边 16px）。 */
+const lines = JSON.parse(await cdp.eval(`JSON.stringify(
+  [...document.querySelectorAll(".prose pre")].map((p) =>
+    getComputedStyle(p).borderLeftWidth))`));
+if (lines.some((w) => w !== "0px")) {
+  console.error("代码块又画了自己的竖线，会跟 meta-rail 并排：", JSON.stringify(lines));
+  process.exitCode = 1;
+} else {
+  console.log("代码块没有多余的竖线");
+}
+
 /* 技能与工具那一屏。**不灌合成事件** —— 面板一打开就向服务端要 catalog，
    合成的会被真推送盖掉（CLAUDE.md 里记过这个坑）。所以这里靠夹具跑在一份
    备好技能的 XDG_CONFIG_HOME 上，拍的就是真数据。 */

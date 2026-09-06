@@ -571,7 +571,7 @@ function askCard(ev) {
     question = `要 ${ev.label}${ev.target ? " " + ev.target : ""} 吗？`;
     choices = [
       ["yes", "同意一次", "btn--primary"],
-      ["no", "拒绝", "btn--danger"],
+      ["no", "拒绝", ""],
       // **写「本轮」不是「本次会话」**：它是 _run_tools 那一批的局部标志，
       // 下一轮照样会问。终端那边的键位提示写的也是「[a] 本轮全放」。
       ["all", "本轮都允许", ""],
@@ -579,11 +579,11 @@ function askCard(ev) {
     if (ev.rule) choices.push(["save", "永久允许", "", ev.rule]);
   } else if (ev.type === "plan") {
     question = "按这个方案动手吗？";
-    choices = [["yes", "动手", "btn--primary"], ["no", "还有意见", "btn--danger"]];
+    choices = [["yes", "动手", "btn--primary"], ["no", "还有意见", ""]];
   } else if (ev.type === "trust") {
     const what = { hooks: "项目钩子", mcp: "项目 MCP 服务器", skills: "项目技能" }[ev.what] || ev.what;
     question = `${ev.where} 里有${what}（${(ev.names || []).join("、")}），要启用吗？`;
-    choices = [["yes", "启用", "btn--primary"], ["no", "不启用", "btn--danger"]];
+    choices = [["yes", "启用", "btn--primary"], ["no", "不启用", ""]];
   } else {
     question = ev.question || "";
     choices = (ev.options || []).map((o) => [o, o, ""]);
@@ -1215,17 +1215,47 @@ function wire(li, row) {
   if (del) del.onclick = (e) => { e.stopPropagation(); askDelete(li, row); };
 }
 
-function setSide(on) {
+function setSide(on, remember = true) {
   document.body.dataset.side = on ? "on" : "off";
   $("side-toggle").setAttribute("aria-expanded", on ? "true" : "false");
+  $("scrim").hidden = !on;
+  // 窄屏那次自动收起**不进记忆**：窗口拉回来时该恢复成你原本的选择
+  if (!remember) return;
   try { localStorage.setItem(SIDE_KEY, on ? "on" : "off"); } catch { /* 无痕窗口 */ }
+}
+
+/* 窗口窄到侧栏要浮在内容上面时（跟 CSS 里那个 46rem 断点同一个数），
+   **自动收起来**。不收的话它盖住 240px 正文而且没有任何地方能关掉 ——
+   桌面窗口最小 720px，正好落在这一档里，缩到最小就看不见字了。
+   拉回来时恢复成你原本的选择。 */
+const NARROW = window.matchMedia("(max-width: 46rem)");
+let sideWas = null;
+
+function watchNarrow() {
+  if (NARROW.matches) {
+    document.body.dataset.narrow = "1";
+    if (sideWas === null) {
+      sideWas = document.body.dataset.side;
+      setSide(false, false);
+    }
+  } else {
+    delete document.body.dataset.narrow;
+    if (sideWas !== null) {
+      setSide(sideWas !== "off", false);
+      sideWas = null;
+    }
+  }
 }
 
 let sideOn = "on";
 try { sideOn = localStorage.getItem(SIDE_KEY) || "on"; } catch { sideOn = "on"; }
 setSide(sideOn !== "off");
+watchNarrow();
+NARROW.addEventListener("change", watchNarrow);
 
 $("side-toggle").onclick = () => setSide(document.body.dataset.side === "off");
+// 浮着的时候点旁边就收起来 —— 遮罩平时是 display:none，点不到
+$("scrim").onclick = () => setSide(false);
 $("new-talk").onclick = () => { showShelf(false); send({ op: "new" }); };
 $("find").addEventListener("input", renderTalks);
 
