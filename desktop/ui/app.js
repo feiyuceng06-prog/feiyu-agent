@@ -233,6 +233,35 @@ function md(src) {
    **只有能据以行动的数才上状态栏** —— 上下文给百分比不给绝对 token，
    这条从终端版一路沿用（用户为那个绝对数字抱怨过两次）。 */
 
+/* 接口那边的余额。**跟左边那个 ¥ 不是一回事**：那个是我们按你填的价格估的
+   这一趟花了多少，这个是人家账上还剩多少。查不到就整个不显示 ——
+   摆一个"—"在那儿只会让人以为坏了，而多数厂商本来就没有这个接口。 */
+const LOW = 1;      // 少于这个数就染成 alert 色（单位跟着接口走，不换算）
+
+function drawCredits(got) {
+  const box = $("s-left");
+  const sep = $("s-left-sep");
+  if (!got || !got.shown) {
+    box.hidden = sep.hidden = true;
+    // 查不到的理由留在 title 上，鼠标停上去能看见，但不占地方
+    box.title = (got && got.why) || "";
+    return;
+  }
+  box.hidden = sep.hidden = false;
+  box.textContent = "余 " + got.shown;
+  box.dataset.low = typeof got.left === "number" && got.left < LOW ? "1" : "0";
+  const bits = [];
+  if (typeof got.total === "number") bits.push("充值 " + got.unit + got.total);
+  if (typeof got.used === "number") bits.push("已用 " + got.unit + got.used.toFixed(4));
+  bits.push("点一下现查一次");
+  box.title = bits.join(" · ");
+}
+
+$("s-left").onclick = () => {
+  $("s-left").textContent = "余 …";
+  send({ op: "credits" });
+};
+
 function setDot(state, text) {
   $("dot").dataset.state = state;
   $("s-state").textContent = text;
@@ -308,6 +337,7 @@ function setStatus(s) {
   if (typeof s.cost === "number") {
     $("s-cost").textContent = s.cost ? "¥" + s.cost.toFixed(4) : "¥0";
   }
+  drawCredits(s.credits);
   if (s.version) $("s-ver").textContent = "v" + s.version;
   $("send").hidden = busy;
   $("stop").hidden = !busy;

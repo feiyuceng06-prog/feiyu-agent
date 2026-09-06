@@ -467,6 +467,23 @@ body[data-side="off"] .side { border-right: 0; }
 .status__left { overflow: hidden; }
 .status__sep { color: var(--line-strong); }
 .status .mono { font-family: var(--font-mono); }
+
+/* 余额。**点一下现查一次** —— 它是慢变量，平时按缓存走，
+   想立刻知道就自己点。做成按钮而不是纯文字，是因为"能点"得看得出来。 */
+.status__left-btn {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-family: var(--font-mono);
+  color: inherit;
+  cursor: pointer;
+}
+
+.status__left-btn:hover { color: var(--text); }
+/* 余额见底了要显出来 —— 这是"需要你动手"的一种 */
+.status__left-btn[data-low="1"] { color: var(--alert); }
 #s-cwd { overflow: hidden; text-overflow: ellipsis; }
 
 /* 连接状态那个点。**只有三档**：断了 / 就绪 / 干活中，别再加第四种颜色。 */

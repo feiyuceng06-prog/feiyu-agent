@@ -179,6 +179,14 @@ class Server:
             out.update(model=agent.model, name=agent.name,
                        tokens=agent.tokens, cost=round(agent.cost, 6),
                        context=agent.context, context_limit=agent.context_limit)
+            got = agent.credits
+            if got is not None:
+                # 只出算好的数和币种，**不出接口原文** —— 各家形状不一样，
+                # 让前端去解析等于把这张表抄两份
+                out["credits"] = {"shown": got.shown(), "unit": got.unit,
+                                  "left": got.left, "used": got.used, "total": got.total}
+            elif agent.credits_note:
+                out["credits"] = {"why": agent.credits_note}
         return out
 
     def push_status(self) -> None:
@@ -632,6 +640,9 @@ class Server:
             self.proto.send("note", level="error", text="%s: %s" % (type(exc).__name__, exc))
         finally:
             self.busy = False
+            # 一轮跑完顺手去问一次余额（后台线程，不挡这里）——
+            # 用户要的就是"每次用完能同步"
+            self.agent.refresh_credits(then=self.push_status)
             session_mod.save(self.workspace, self.agent, self.agent.session_id)
             self.proto.send("turn_end")
             self.push_status()
@@ -700,6 +711,8 @@ class Server:
             self.inbox.put(("cycle_mode", " "))
         elif op == "settings":
             self.push_settings()
+        elif op == "credits":
+            self.agent.refresh_credits(fresh=True, then=self.push_status)
         elif op == "models":
             self.push_models()
         elif op == "key":
@@ -723,6 +736,8 @@ class Server:
     def run(self) -> int:
         threading.Thread(target=self.reader, daemon=True).start()
         self.proto.send("hello", **self.status())
+        # 开局就问一次，不然要等第一轮跑完界面上才有数
+        self.agent.refresh_credits(then=self.push_status)
         while True:
             try:
                 op, text = self.inbox.get()

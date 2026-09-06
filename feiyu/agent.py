@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from . import ui
 from . import history, hooks as hooks_mod
 from . import profiles as profiles_mod
 from . import progress as progress_mod
+from . import credits as credits_mod
 from . import enabled, keys, memory, permissions, schema as schema_mod
 from . import skills as skills_mod
 from . import subagent as subagent_mod
@@ -410,6 +412,9 @@ class Feiyu:
         # 这一轮存到哪一份会话里 由入口层（__main__ / serve）定：接着上次就沿用
         # 那一份的 id，从头开始就新起一个。存盘和「新对话」都看它
         self.session_id: str | None = None
+        # 接口那边的余额 跟 self.cost（我们自己按你填的价格估的）不是一回事
+        self.credits = None
+        self.credits_note = ""
         # 当前用哪份配置档案（人格） 空串就是不套任何人格
         self.profile: str = profiles_mod.current()
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
@@ -722,6 +727,33 @@ class Feiyu:
         else:
             self._refresh_system()
         return self.profile
+
+    def refresh_credits(self, *, fresh: bool = False, then=None) -> None:
+        """去接口那边问一次还剩多少额度 **丢后台线程，绝不拖慢一轮对话**
+
+        查不到就当没有（`self.credits` 留 None）——余额是锦上添花的东西，
+        为它多等八秒是本末倒置。
+
+        `then` 是取回来之后叫一声，交互层用它重推一次状态：**不给这个回调的话
+        界面上永远慢一拍** —— 调用方紧接着推的那份状态里还是上一次的数。
+        """
+        entry = keys.load().get(self.name or "")
+        if not entry:
+            return
+
+        def go():
+            try:
+                got, why = credits_mod.look(entry, fresh=fresh)
+            except Exception:
+                return                      # 理由同 trace.write：绝不因此弄崩主流程
+            self.credits, self.credits_note = got, why
+            if then is not None:
+                try:
+                    then()
+                except Exception:
+                    pass
+
+        threading.Thread(target=go, daemon=True).start()
 
     def cycle_mode(self) -> str:
         return self.set_mode(MODE_ORDER[(MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)])

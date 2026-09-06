@@ -405,6 +405,15 @@ the tokens do). The hit rate in `/cost` is what that decision reads.
 
 **Logs.** One JSONL line per event in `~/.local/state/feiyu/logs/<date>.jsonl`: every tool call, its arguments, the permission decision, timing, token usage. To find out why it did something odd, filter by the `run` field. `FEIYU_NO_LOG=1` disables it.
 
+**Credit.** The right of the status bar shows what the API says is left (`余 $9.78`); click it
+to refresh now, and it syncs after every turn. This is not the `¥` on its left — that one is
+our own estimate from the prices you entered, this one is the provider's balance.
+
+Recognised: OpenRouter, DeepSeek, Moonshot, SiliconFlow, and the many relays that copy
+OpenAI's old billing endpoints. **A normal OpenAI or Anthropic key cannot read a balance**
+(that lives in the account dashboard), and in that case nothing is shown at all rather than a
+made-up number. The key is only ever sent to the host in the `base_url` you configured.
+
 **Spend.** `/cost` summarises the last seven days by task:
 
 ```

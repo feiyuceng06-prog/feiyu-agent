@@ -385,6 +385,10 @@ stdout 里只有 JSON，界面和日志全走 stderr。不合 schema 会让它�
 
 **日志。** 每件事一行 JSONL 写到 `~/.local/state/feiyu/logs/<日期>.jsonl`：每次工具调用、参数、权限判定、耗时、token 用量。排查「它为什么干了那件怪事」按 `run` 字段过滤。`FEIYU_NO_LOG=1` 关掉。
 
+**额度。** 状态栏右边显示接口那边还剩多少（`余 $9.78`），点一下现查一次，每轮跑完自动同步。这跟左边那个 `¥` 不是一回事——那个是按你填的价格估的这一趟花了多少，这个是人家账上的余额。
+
+认得出的接口：OpenRouter、DeepSeek、Moonshot、SiliconFlow，以及一堆抄 OpenAI 早年计费接口的中转站。**OpenAI 和 anthropic 的普通 key 查不到余额**（那是账号后台的事），这时候就整个不显示，不会编一个数给你。密钥只会发给你自己填的那个 `base_url` 的 host。
+
 **花费。** `/cost` 按任务汇总最近七天：
 
 ```

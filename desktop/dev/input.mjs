@@ -284,9 +284,12 @@ for (let i = 0; i < 40; i++) {
   await sleep(400);
   if (await ev(`[...document.querySelectorAll(".note")].some(e => e.textContent.includes("只在终端"))`)) break;
 }
+/* **只看最后一条 note。** 把所有 note 拼起来的话，前面用例留下的
+   那句合法的"未知命令 /mod"会把这条断言带挂 —— 它查的是"这条命令有没有
+   给出解释"，不是"屏幕上有没有出现过这四个字"。 */
 const keyNote = await ev(`(() => {
-  const n = [...document.querySelectorAll(".note")].map(e => e.textContent).join(" | ");
-  return n.slice(-160);
+  const n = [...document.querySelectorAll(".note")];
+  return n.length ? n[n.length - 1].textContent : "";
 })()`);
 check("/key 给的是解释不是「未知命令」",
       keyNote.includes("只在终端") && !keyNote.includes("未知命令"), keyNote);
@@ -587,6 +590,40 @@ const pin = JSON.parse(await ev(`JSON.stringify({
   top: [...document.querySelectorAll("#pinned .talk__title")].map(e => e.textContent),
 })`));
 check("shift+点把那条置顶", pin.shown && pin.top.length === 1, pin);
+
+/* 余额：查得到就显，查不到整个不显示（摆个"—"只会让人以为坏了）。
+   **放在最后**：最后那次点击会引一次服务端往返，夹在别的用例中间的话，
+   那份迟到的 status 会把后面的断言搅了。 */
+await ev(`drawCredits({shown:"$9.78", unit:"$", left:9.78, used:0.22, total:10}); true`);
+let money = JSON.parse(await ev(`JSON.stringify({
+  text: document.getElementById("s-left").textContent,
+  hidden: document.getElementById("s-left").hidden,
+  low: document.getElementById("s-left").dataset.low,
+  title: document.getElementById("s-left").title })`));
+check("有余额就显在状态栏", !money.hidden && money.text.includes("$9.78"), money);
+check("充了多少用了多少放在 title 里", money.title.includes("充值") && money.title.includes("已用"),
+      money.title);
+check("余额充足时不染红", money.low === "0", money);
+
+await ev(`drawCredits({shown:"$0.30", unit:"$", left:0.3}); true`);
+check("余额见底要染成 alert 色",
+      (await ev(`document.getElementById("s-left").dataset.low`)) === "1", null);
+
+await ev(`drawCredits({why:"这个接口没有查额度的地方"}); true`);
+money = JSON.parse(await ev(`JSON.stringify({
+  hidden: document.getElementById("s-left").hidden,
+  sep: document.getElementById("s-left-sep").hidden,
+  title: document.getElementById("s-left").title })`));
+check("查不到就整个不显示", money.hidden && money.sep, money);
+check("查不到的理由留在 title 上", money.title.includes("没有查额度"), money.title);
+
+await reset();
+await ev(`document.getElementById("s-left").hidden = false;
+  document.getElementById("s-left").click(); true`);
+await sleep(300);
+const asked = (await state()).sent.map(x => { try { return JSON.parse(x); } catch { return {}; } });
+check("点一下发 op:credits 现查一次", asked.some(m => m.op === "credits"), asked);
+
 
 // 收尾打断：附件那条把 agent 支使去跑活儿了，别留给下一轮
 await ev(`if (window.socket && socket.readyState === 1)

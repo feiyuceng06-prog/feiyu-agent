@@ -8,7 +8,7 @@ from . import hooks as hooks_mod
 from . import mcp as mcp_mod
 from . import serve as serve_mod
 from . import skills as skills_mod
-from . import enabled, keys, memory, permissions, pricing, profiles, progress
+from . import credits, enabled, keys, memory, permissions, pricing, profiles, progress
 from . import sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
@@ -924,6 +924,24 @@ def _cost(agent: Feiyu, workspace) -> str:
         total_in += run["input"]
         total_hit += run["hit"]
         priced = priced or run["priced"]
+    # 接口那边的账 —— 跟上面按你填的价格估出来的花费不是一回事，所以单独一行
+    entry = keys.load().get(agent.name or "")
+    if entry:
+        # **只读缓存**：这条路是同步的，走代理偶尔要八秒，
+        # 让终端为一个锦上添花的数字卡八秒是本末倒置 顺手在后台刷一次，
+        # 下次 /cost 就有了
+        got, why = credits.look(entry, cached=True)
+        if why.startswith("还没查到"):
+            agent.refresh_credits()
+        if got:
+            bits = ["余额 " + got.shown()]
+            if got.total is not None:
+                bits.append("充值 %s%s" % (got.unit, got.total))
+            if got.used is not None:
+                bits.append("已用 %s%s" % (got.unit, round(got.used, 4)))
+            rows += ["", "   " + ui.paint("grey", "接口那边：" + " · ".join(bits))]
+        elif why:
+            rows += ["", "   " + ui.paint("grey", "接口那边：" + ui.clip(why, 60))]
     rows += ["", "   " + ui.bold("合计  %s  %s  缓存命中 %s" % (
         ui.tokens(int(total_tokens)), pricing.yuan(total_cost) if priced else "未配价格",
         _hit_rate(total_hit, total_in)))]

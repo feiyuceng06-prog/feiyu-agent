@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 
+from feiyu import credits as credits_mod
 from feiyu import enabled, events, keys, permissions, serve, ui
 from feiyu import skills as skills_mod, tools as tools_mod
 from feiyu.agent import Feiyu
@@ -916,3 +917,113 @@ class TestKeys(unittest.TestCase):
         box = self.box()
         box.key_drop("没这条")
         self.assertIn("清单里没有", self.out.getvalue())
+
+
+class TestCredits(unittest.TestCase):
+    """接口那边的余额
+
+    **跟 `/cost` 不是一回事**：那个是按你填的价格估的，这个是人家账上的数。
+    查不到就整个不显示 —— 摆一个编的数比不显示糟得多。
+    """
+
+    def setUp(self):
+        credits_mod.forget()
+        self.addCleanup(credits_mod.forget)
+
+    def fake(self, body, *, seen=None):
+        def get(url, key, base):
+            if seen is not None:
+                seen.append((url, key, base))
+            return body
+        before = credits_mod._get
+        credits_mod._get = get
+        self.addCleanup(setattr, credits_mod, "_get", before)
+
+    def test_openrouter_算的是充值减用量(self):
+        self.fake({"data": {"total_credits": 10, "total_usage": 0.25}})
+        got, why = credits_mod.look({"base_url": "https://openrouter.ai/api/v1", "key": "k"})
+        self.assertEqual(why, "")
+        self.assertAlmostEqual(got.left, 9.75)
+        self.assertEqual(got.shown(), "$9.75")
+
+    def test_认不出的接口照实说_不猜(self):
+        got, why = credits_mod.look({"base_url": "https://api.openai.com/v1", "key": "k"})
+        self.assertIsNone(got)
+        self.assertIn("没有查额度的地方", why)
+
+    def test_没填接口地址就不查(self):
+        got, why = credits_mod.look({"key": "k"})
+        self.assertIsNone(got)
+        self.assertIn("没填接口地址", why)
+
+    def test_密钥只发给配置里那个_host(self):
+        """查个余额把 key 发到第三方去，比查不到余额糟糕得多 """
+        self.assertIsNone(credits_mod._get(
+            "https://evil.example/credits", "k", "https://openrouter.ai/api/v1"))
+        self.assertIsNotNone(credits_mod._get.__doc__)
+
+    def test_同一个账号只问一次(self):
+        seen = []
+        self.fake({"data": {"total_credits": 10, "total_usage": 1}}, seen=seen)
+        one = {"base_url": "https://openrouter.ai/api/v1", "key": "k"}
+        for _ in range(4):
+            credits_mod.look(one)
+        self.assertEqual(len(seen), 1, seen)
+
+    def test_失败缓存得比成功短得多(self):
+        """一次网络抖动不该让余额消失一分钟 —— 实测撞过 """
+        self.assertLess(credits_mod.FAIL_TTL, credits_mod.TTL / 4)
+
+    def test_fresh_能绕过缓存(self):
+        seen = []
+        self.fake({"data": {"total_credits": 10, "total_usage": 1}}, seen=seen)
+        one = {"base_url": "https://openrouter.ai/api/v1", "key": "k"}
+        credits_mod.look(one)
+        credits_mod.look(one, fresh=True)
+        self.assertEqual(len(seen), 2)
+
+    def test_形状对不上就当查不到(self):
+        for bad in ({}, {"data": {}}, {"data": {"total_credits": "十块"}}, None):
+            credits_mod.forget()
+            self.fake(bad)
+            got, why = credits_mod.look({"base_url": "https://openrouter.ai/api/v1", "key": "k"})
+            self.assertIsNone(got, bad)
+            self.assertTrue(why)
+
+    def test_只给用量不给余额的也显示得出来(self):
+        one = credits_mod.Balance(left=None, used=3.5, total=None, unit="¥")
+        self.assertEqual(one.shown(), "已用 ¥3.50")
+
+    def test_状态里带上余额_查不到就只带理由(self):
+        class Fake:
+            ready = True
+            mode = style = profile = "x"
+            model = name = "m"
+            tokens = 1
+            cost = 0.0
+            context = 1
+            context_limit = 100
+            credits = credits_mod.Balance(left=9.75, used=0.25, total=10, unit="$")
+            credits_note = ""
+
+        class Box(serve.Server):
+            def __init__(self, agent):
+                self.agent = agent
+                self.workspace = "/tmp"
+                self.busy = False
+        box = Box(Fake())
+        self.assertEqual(box.status()["credits"]["shown"], "$9.75")
+        Fake.credits, Fake.credits_note = None, "查不到"
+        self.assertEqual(box.status()["credits"], {"why": "查不到"})
+
+    def test_cached_不发任何请求(self):
+        """`/cost` 是同步的，走代理偶尔要八秒 —— 那条路只准读缓存 """
+        seen = []
+        self.fake({"data": {"total_credits": 10, "total_usage": 1}}, seen=seen)
+        one = {"base_url": "https://openrouter.ai/api/v1", "key": "k"}
+        got, why = credits_mod.look(one, cached=True)
+        self.assertIsNone(got)
+        self.assertIn("还没查到", why)
+        self.assertEqual(seen, [])
+        credits_mod.look(one)                 # 后台那次填上缓存
+        self.assertIsNotNone(credits_mod.look(one, cached=True)[0])
