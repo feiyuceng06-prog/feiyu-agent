@@ -230,6 +230,21 @@ await cdp.eval(`window.__errs = []; addEventListener("error", (e) => __errs.push
 const feed = (events) =>
   cdp.eval(`(${JSON.stringify(events)}).forEach(handle); true`);
 
+/* **等服务端那一波推完再灌。** 连上时前端会发 `/help` / `status` / `sessions` /
+   `bots`，而 agent 冷启动要载 MCP，几秒才回得来 —— 这几条回话（还有它盘上真有
+   会话时跟着来的 `cleared` / `opened`）会落在 `feed()` 之后，把刚灌进去的那一屏
+   整个换掉。
+   表现很难认：`1_flow.png` 拍到的是**上一轮夹具留下的真实对话**，接着那条
+   量 diff 颜色的断言在一个不存在的元素上抛 `getComputedStyle ... not of type
+   Element`，看着像"前端坏了"。而且是间歇的，跑五次挂一次。
+   `input.mjs` 早就这么等了（「要等 agent 回话，不是等 DOM」），这边漏了。 */
+for (let i = 0; i < 60; i++) {
+  if (await cdp.eval(`commands.length > 0`)) break;
+  await sleep(500);
+}
+await sleep(800);                       // sessions / bots 那几条也让它落地
+await cdp.eval(`stream.replaceChildren(); true`);
+
 await feed(FLOW);
 console.log("拍了", await cdp.shot("1_flow"));
 

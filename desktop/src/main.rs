@@ -33,6 +33,10 @@ const CHANNEL: &str = "feiyu://event";
 /// 上传落在工作区里的哪儿。**必须在工作区内**，否则 agent 的文件工具够不着。
 const UPLOAD_DIR: &str = ".feiyu/uploads";
 
+/// agent 的 stderr 日志攒到这么大就从头写。换工作台会重起一个 agent，
+/// 一直追加下去的话这份文件不封顶。
+const LOG_CAP: u64 = 4 << 20;
+
 struct Agent {
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
@@ -67,10 +71,10 @@ fn send(state: tauri::State<'_, Agent>, line: String) -> Result<(), String> {
     // 一行一个 JSON —— 正文里的换行在 JSON 里本来就是转义的，这里再挡一道，
     // 免得一条畸形消息把协议截成两条
     let line = line.replace('\n', " ");
-    // 只打 op，不打正文 —— stderr 是用户的终端，别把他打的话原样喷出来。
+    // 只记 op，不记正文 —— 日志里有的是路径和命令，别把他打的话也原样抄一份。
     // 桌面端出问题时这是唯一能看见桥接有没有通的东西。
     if let Some(op) = line.split('"').nth(3) {
-        eprintln!("→ {op}");
+        bridge_log(&format!("→ {op}"));
     }
     let mut guard = state.stdin.lock().map_err(|_| "stdin 锁坏了")?;
     let stdin = guard.as_mut().ok_or("agent 已经退出了")?;
@@ -198,6 +202,93 @@ fn parse_args() -> Args {
 /// 起一个 `feiyu --serve`，并接一条把它 stdout 转成事件的线程。
 ///
 /// 一个子进程一条读线程，stdout 一关它自己就结束 —— 换工作台时旧的那条会自然退掉。
+/// agent 的 stderr 往哪儿去。
+///
+/// **默认不给终端。** `feiyu --serve` 把人看的那一整套 ANSI 输出重定向到了
+/// stderr（stdout 只放协议，见 `serve.py` 顶上的注释），而 `Stdio::inherit()`
+/// 会把它原样交给启动 `feiyu-desktop` 的那个终端 —— 于是你在窗口里聊的每一句，
+/// 终端里跟着又演一遍，两块屏幕说同一件事。用户报的就是这个。
+///
+/// 装配出问题时那些字确实有用（Python 的 traceback 也在里面），所以**不是吞掉，
+/// 是落到文件里**：`$XDG_STATE_HOME/feiyu/desktop.log`，跟 trace 那份 JSONL 同一个
+/// 目录、同一档权限。想让它照旧回到终端：`FEIYU_DESKTOP_STDERR=1`。
+///
+/// devserver 那条路不改：它本来就是在终端里跑给夹具用的，那儿要看得见。
+fn agent_stderr() -> Stdio {
+    if std::env::var_os("FEIYU_DESKTOP_STDERR").is_some() {
+        return Stdio::inherit();
+    }
+    match open_log() {
+        Some(file) => Stdio::from(file),
+        // 开不出文件也不能退回 inherit —— 那就等于这个开关时灵时不灵
+        None => Stdio::null(),
+    }
+}
+
+fn log_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("feiyu").join("desktop.log")
+}
+
+fn open_log() -> Option<std::fs::File> {
+    open_log_at(&log_path())
+}
+
+/// 桥接自己那几行话（`→ 某个 op`、`换到 …`）也进日志，不进终端。
+///
+/// **不能留在 `eprintln!` 上。** 0.66.0 的 `@` 补全每敲一个键就发一条 `paths`，
+/// 于是 `→ paths` 变成了逐键刷屏 —— 用户报的"终端跟着同步显示"，agent 那半边
+/// 修好之后剩下的就是这半边。
+/// 启动那一行和"起不来 feiyu"照旧走终端：那两条是必须让人当场看见的。
+fn bridge_log(line: &str) {
+    if std::env::var_os("FEIYU_DESKTOP_STDERR").is_some() {
+        eprintln!("{line}");
+        return;
+    }
+    static FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    if let Some(handle) = FILE.get_or_init(|| open_log().map(Mutex::new)) {
+        if let Ok(mut f) = handle.lock() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+/// `open_log` 的里子。**路径当参数收**，不是里面自己算 —— 用例要各写各的目录，
+/// 而 `XDG_STATE_HOME` 是进程全局的，两条用例并行跑会互相把对方的路径改掉
+/// （第一版就是这么挂的：断言说"没截断"，其实是它去看了另一条用例的文件）。
+fn open_log_at(path: &std::path::Path) -> Option<std::fs::File> {
+    let dir = path.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 跟 Python 那边 `files.private_dir()` 收的是同一道口子：这个目录下面还有
+        // 完整对话原文和长期记忆，不该让同机别的用户列出来
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let full = std::fs::metadata(path).map(|m| m.len() > LOG_CAP).unwrap_or(false);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true);
+    // append 和 truncate 不能同时给，所以在这儿二选一
+    if full { opts.truncate(true); } else { opts.append(true); }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mode()` 只对新建的那次生效 —— 老用户那份是上个版本按默认 umask 建的
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(file)
+}
+
 fn start_agent(
     app: &tauri::AppHandle,
     workspace: &std::path::Path,
@@ -216,11 +307,10 @@ fn start_agent(
     if resume {
         cmd.arg("--resume");
     }
-    // stderr 原样留给终端：agent 那边人看的输出和 Python 的报错都在这儿
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(agent_stderr())
         .spawn()
         .map_err(|e| format!("起不来 feiyu（{bin}）：{e}"))?;
     let stdin = child.stdin.take().ok_or("拿不到 stdin")?;
@@ -278,7 +368,7 @@ fn switch(
     *state.child.lock().map_err(|_| "锁坏了")? = Some(child);
     *state.stdin.lock().map_err(|_| "锁坏了")? = Some(stdin);
     *state.workspace.lock().map_err(|_| "锁坏了")? = next.clone();
-    eprintln!("换到 {}", next.display());
+    bridge_log(&format!("换到 {}", next.display()));
     Ok(next.to_string_lossy().into_owned())
 }
 
@@ -290,6 +380,11 @@ fn main() {
     }
 
     let args = parse_args();
+    // 从终端起的时候说一句日志在哪儿 —— 一行，不是把整段对话再演一遍
+    if std::env::var_os("FEIYU_DESKTOP_STDERR").is_none() {
+        eprintln!("agent 的日志写在 {}（要它回到终端：FEIYU_DESKTOP_STDERR=1）",
+                  log_path().display());
+    }
     let workspace = std::fs::canonicalize(&args.workspace)
         .unwrap_or_else(|_| std::path::PathBuf::from(&args.workspace));
 
@@ -335,4 +430,66 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("窗口起不来");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn 临时目录(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("feiyu-{tag}-{}", std::process::id()))
+            .join("feiyu");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        dir.join("desktop.log")
+    }
+
+    /// 这份日志里有命令原文和文件路径，跟 trace 那份 JSONL 同一性质 —— 必须 0600。
+    /// 它现在是**默认**要写的（不再 inherit 到终端），权限这条不能只靠人记得。
+    #[test]
+    #[cfg(unix)]
+    fn 日志是_0600_而且目录是_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = 临时目录("log");
+        drop(open_log_at(&path).expect("开不出日志"));
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    /// 换一次工作台就重起一个 agent，一直追加下去这份文件不封顶。
+    #[test]
+    #[cfg(unix)]
+    fn 超过上限就从头写_没超过就追加() {
+        use std::io::Write;
+        let path = 临时目录("cap");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![b'x'; (LOG_CAP + 1) as usize]).unwrap();
+        let mut file = open_log_at(&path).expect("开不出日志");
+        file.write_all("新的一行\n".as_bytes()).unwrap();
+        drop(file);
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(after < LOG_CAP, "没截断，还是 {after} 字节");
+        // 没超上限的那次必须是追加，不能把上一次 agent 的报错洗掉
+        let mut again = open_log_at(&path).unwrap();
+        again.write_all("再一行\n".as_bytes()).unwrap();
+        drop(again);
+        assert!(std::fs::metadata(&path).unwrap().len() > after);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    /// 默认那条路**不许**回到终端 —— 用户报的就是"窗口里聊的话终端跟着演一遍"
+    #[test]
+    fn 默认不给终端_给了开关才给() {
+        assert!(std::env::var_os("FEIYU_DESKTOP_STDERR").is_none(),
+                "跑用例的环境里不该带这个开关");
+        // Stdio 不能比较，只能验开关本身这条分支：有它才 inherit
+        unsafe { std::env::set_var("FEIYU_DESKTOP_STDERR", "1") };
+        let inherited = std::env::var_os("FEIYU_DESKTOP_STDERR").is_some();
+        unsafe { std::env::remove_var("FEIYU_DESKTOP_STDERR") };
+        assert!(inherited);
+    }
 }

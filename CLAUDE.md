@@ -2658,3 +2658,49 @@ node desktop/dev/fuzz_ui.mjs <页面地址>
 `_MAX_OUTPUT = 30000` 还小；二是它落在历史很靠前的位置，正好在**接口缓存的
 前缀里**（0.65.1 量过：第 2 轮命中率 87%），重发的是缓存价。
 要给 history 加第二种 slot 的话，先把这两条重新量一遍。
+
+## 0.67.1：窗口里的东西不该跑到终端上
+
+用户拿截图来提的：「我在 desktop 的对话，终端也跟着同步显示」。
+
+根因在 `start_agent`：`.stderr(Stdio::inherit())`。而 `feiyu --serve` 把**人看的
+那一整套 ANSI 输出**重定向到了 stderr（stdout 只放协议，见 `serve.py` 顶上那段），
+于是从终端起 `feiyu-desktop` 的话，窗口里聊的每一句终端里跟着又演一遍。
+
+**不是吞掉，是落到文件里**：`$XDG_STATE_HOME/feiyu/desktop.log`，跟 trace 那份
+JSONL 同一个目录、同一档权限（0600 —— 里面有命令原文和文件路径）。攒到 4 MB
+从头写：换一次工作台就重起一个 agent，一直追加下去这份文件不封顶。
+逃生门 `FEIYU_DESKTOP_STDERR=1` 让它照旧回终端。
+
+**devserver 那条路不改**：它本来就是在终端里跑给夹具用的，那儿要看得见。
+
+### 桥接自己那几行也得一起走
+
+`send()` 里每收一条前端指令打一行 `→ 某个 op`。原来一次用户动作一行，还好；
+**0.66.0 的 `@` 补全每敲一个键就发一条 `paths`**，于是它变成了逐键刷屏 ——
+agent 那半边修好之后，剩下的就是这半边。`bridge_log()` 把它和「换到 …」一起
+写进同一份日志。
+
+留在终端上的只剩两样：启动时那一行「日志写在哪儿」，和「起不来 feiyu」那种
+必须当场看见的。实测从终端起一次，终端上**只有一行**。
+
+### 用例踩到的一条
+
+头一版两条用例各自 `set_var("XDG_STATE_HOME", …)` 再调 `log_path()` ——
+**环境变量是进程全局的，而 cargo 的用例是并行跑的**，第二条去看了第一条的文件，
+断言说"没截断"。改成 `open_log_at(path)` 收路径当参数，用例各写各的目录，
+一个 `set_var` 都不用。
+
+### 顺带逮到 `shoot.mjs` 一个间歇的假故障
+
+跑五次挂一次，报的是 `getComputedStyle ... parameter 1 is not of type Element`
+——看着像前端坏了。翻出那次的 `1_flow.png` 才明白：**拍到的是上一轮夹具留下的
+真实对话**，不是灌进去的那份 FLOW。
+
+原因是它 `Page.navigate` 之后只 `sleep(1500)` 就开灌，而连上时前端会发
+`/help` / `status` / `sessions` / `bots`，agent 冷启动要载 MCP，几秒才回得来 ——
+这几条回话（盘上真有会话时还跟着 `cleared` / `opened`）落在 `feed()` 之后，
+把刚灌进去的那一屏整个换掉。
+
+改成等 `commands.length > 0` 再清一次 `stream` 才开灌。`input.mjs` 里那句
+「**要等 agent 回话，不是等 DOM**」早就写着了，这边一直漏着。连跑四次全干净。

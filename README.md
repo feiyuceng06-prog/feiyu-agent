@@ -293,6 +293,8 @@ feiyu-desktop -r                  # continue the last conversation here
 
 After install it also shows up in your app launcher as **Feiyu**.
 
+**Nothing from the window leaks into your terminal.** The agent's human-readable output — and the bridge's own `→ op` trace — goes to `~/.local/state/feiyu/desktop.log`, kept at 0600 like the session saves and rewritten from the top past 4 MB. To watch it in the terminal instead: `FEIYU_DESKTOP_STDERR=1 feiyu-desktop`.
+
 The sidebar holds new-session and skills-and-tools, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session. The row at the top is the workspace; click it to switch directories.
 
 **Settings** (`Ctrl K`) is five tabs: general, skills, tools, MCP, profiles. "General" holds the appearance, permission mode, answer style, model, helper model, bash sandbox, verify command, permission rules and long-term memory — clicking one takes effect immediately and runs exactly the slash command you would type in the terminal. The model entry
