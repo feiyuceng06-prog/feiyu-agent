@@ -384,6 +384,14 @@ let toolBlocks = new Map();
 let toolSeen = new Map();
 let lastTool = null;
 
+/* 事件里来的清单一律过这两道。**`ev.rows || []` 挡不住东西**：`{}` 是真值，
+   `.forEach` 直接抛；数组里混一个 null，下一行 `row.name` 也抛。量出来是
+   十处（`dev/fuzz_ui.mjs`）。服务端现在不会发这种形状，但 0.65.1 在另一半
+   学过同一课 —— **保证不能建立在"下一支处理函数我会写对"上面**。
+   分两个是因为 `paths` 那条来的是字符串，不是对象。 */
+const rowsOf = (x) => (Array.isArray(x) ? x.filter((r) => r && typeof r === "object") : []);
+const textsOf = (x) => (Array.isArray(x) ? x.filter((r) => typeof r === "string") : []);
+
 function handle(ev) {
   const wasDown = atBottom();
   switch (ev.kind) {
@@ -393,7 +401,7 @@ function handle(ev) {
       break;
 
     case "resumed":
-      (ev.history || []).forEach((row) => {
+      rowsOf(ev.history).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
         else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
       });
@@ -445,10 +453,11 @@ function handle(ev) {
       note.dataset.error = ev.is_error ? "1" : "0";
       note.textContent = ev.summary || "";
       target.append(note);
-      if (ev.detail && ev.detail.length) {
+      const detail = rowsOf(ev.detail);
+      if (detail.length) {
         const list = document.createElement("ul");
         list.className = "tool__lines";
-        ev.detail.forEach((row) => {
+        detail.forEach((row) => {
           const li = document.createElement("li");
           li.dataset.kind = row.kind || "";
           li.textContent = row.text;
@@ -463,9 +472,9 @@ function handle(ev) {
     case "catalog":
       // **档案是另一条事件推的，别在这儿把它抹掉** —— 整个对象赋值下去,
       // shelf.data.profiles 变 undefined，下一次 drawShelf 就在 .length 上抛
-      shelf.data.skills = ev.skills || [];
-      shelf.data.tools = ev.tools || [];
-      shelf.data.mcp = ev.mcp || [];
+      shelf.data.skills = rowsOf(ev.skills);
+      shelf.data.tools = rowsOf(ev.tools);
+      shelf.data.mcp = rowsOf(ev.mcp);
       shelf.got = true;
       if (shelfOpen()) drawShelf();
       break;
@@ -479,7 +488,7 @@ function handle(ev) {
       break;
 
     case "bots":
-      bots = { rows: ev.rows || [], current: ev.current || "" };
+      bots = { rows: rowsOf(ev.rows), current: ev.current || "" };
       drawBots();
       break;
 
@@ -495,10 +504,10 @@ function handle(ev) {
       break;
 
     case "profiles":
-      shelf.data.profiles = ev.rows || [];
+      shelf.data.profiles = rowsOf(ev.rows);
       shelf.got = true;
       // 存完服务端会重推，这时候盘上那份才是真的 —— 把缓存的正文清掉重取
-      (ev.rows || []).forEach((r) => { if (shelf.draft[r.name] === undefined)
+      rowsOf(ev.rows).forEach((r) => { if (shelf.draft[r.name] === undefined)
         delete shelf.bodies["档案:" + r.name]; });
       if (shelfOpen()) drawShelf();
       break;
@@ -542,7 +551,7 @@ function handle(ev) {
 
     case "preview":
       // 确认之前的 diff。挂在下一条 ask 上，这里先攒着。
-      pendingPreview = ev.rows || [];
+      pendingPreview = rowsOf(ev.rows);
       break;
 
     case "ask":
@@ -566,13 +575,13 @@ function handle(ev) {
       break;
 
     case "sessions":
-      drawTalks(ev.rows || [], ev.current);
+      drawTalks(rowsOf(ev.rows), ev.current);
       break;
 
     case "opened":
       showShelf(false);
       showBotShop(false);
-      (ev.history || []).forEach((row) => {
+      rowsOf(ev.history).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
         else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
       });
@@ -583,9 +592,16 @@ function handle(ev) {
       streamEl.replaceChildren();
       break;
 
+    case "paths":
+      // `@` 补全的候选回来了 存下来再画一次：算候选的是服务端
+      // （跟终端同一个 mentions.complete），前端不自己列目录
+      mention = { prefix: ev.prefix || "", rows: textsOf(ev.rows) };
+      showPalette();
+      break;
+
     case "help":
-      commands = ev.commands || [];
-      cmdArgs = ev.args || {};
+      commands = rowsOf(ev.commands);
+      cmdArgs = (ev.args && typeof ev.args === "object" && !Array.isArray(ev.args)) ? ev.args : {};
       // 连上时会自己发一次 /help 去取补全清单 —— **那一次不该画出来**，
       // 不然每次开页面都白白多一块。只有用户自己敲的那次才画。
       if (wantHelp) {
@@ -871,6 +887,8 @@ function drawShelf() {
       now.className = "shelf__now";
       const spec = SETTINGS.find((r) => r.name === row.name);
       now.textContent = spec && (conf || spec.local) ? spec.meta(conf) : "";
+      // 这一列只有一行高，长的值会被切掉 —— 停上去看得到完整的那份
+      if (now.textContent) now.title = now.textContent;
       li.append(left, now);
     } else if (shelf.tab === "profiles") {
       /* **档案不给开关。** 它是「用哪一份」不是「开不开」—— 单选套上双态开关的皮，
@@ -2044,7 +2062,26 @@ function hello() {
 function inbound(raw) {
   let ev;
   try { ev = JSON.parse(raw); } catch { return; }
-  handle(ev);
+  /* **这道 catch 才是保证。** 上面那些 rowsOf 挡的是已知的十处，
+     而下一支处理函数是谁写的、写没写对，这儿管不着 —— 服务端 0.65.1
+     那道 `except` 是同一个位置的同一件事。
+     抛出去的话，`handle` 里那条语句之后的一句都不跑：`turn_end` 断在半路，
+     `toolBlocks` 就留着上一轮的块，下一轮的结果会画到上一轮的调用上去。
+     （`busy` 不在这条路上 —— 它跟着 `status` 走，服务端每轮都会重推一份，
+     所以"秒表停不下来"这种最糟的形态本来就不会发生。）
+     所以：接住、说一声、把这一轮的残留收干净，接着听下一条。 */
+  try {
+    handle(ev);
+  } catch (err) {
+    console.error("[feiyu] 这条事件没处理完：", ev && ev.kind, err);
+    closeSaying();
+    toolBlocks.clear();
+    toolSeen.clear();
+    pendingPreview = null;
+    block("出错").innerHTML =
+      `<p class="note" data-level="error">界面没接住一条 ${esc(String(ev && ev.kind))} 事件：` +
+      `${esc(String((err && err.message) || err))}<br>对话本身没事，接着说就行。</p>`;
+  }
 }
 
 function send(msg) {
@@ -2126,9 +2163,31 @@ let palMoved = false;
    写死在前端迟早对不上）。见 serve.Server.push_help。 */
 let cmdArgs = {};
 
+/* `@路径` 补全最近一次的结果 {prefix, rows}。
+
+   跟斜杠命令**共用同一个菜单和同一套键位**：两套菜单就是两套上下键、
+   两套 Tab、两处 esc，而它们从来不会同时出现（`/` 只在行首、`@` 不在行首）。
+
+   候选一律问服务端要（`op: "paths"` → `mentions.complete()`），前端不自己
+   列目录 —— "点开头要不要出现"、"哪些目录跳过" 这些规则只该有一处，
+   两边各写一套的结果就是终端和桌面端补出来的东西不一样。 */
+let mention = null;
+
+// `@` 后面已经打了什么（光标之前那一段），不在一个没打完的 mention 上就 null
+// 判法跟 mentions.typing() 一一对应，改一处要改两处
+function mentionAt() {
+  const before = inputEl.value.slice(0, inputEl.selectionStart);
+  const at = before.lastIndexOf("@");
+  if (at < 0) return null;
+  if (at > 0 && !" \t\n\r([{（「【".includes(before[at - 1])) return null;
+  const typed = before.slice(at + 1);
+  if (/\s/.test(typed)) return null;
+  return { at, typed };
+}
+
 function showPalette() {
   const typed = inputEl.value;
-  if (!typed.startsWith("/") || typed.includes("\n")) return hidePalette();
+  if (!typed.startsWith("/") || typed.includes("\n")) return showMentions();
   const cut = typed.indexOf(" ");
   if (cut < 0) {
     // 还在打命令名。按**整串**筛，不是按第一个词 —— 原来是 `typed.split(" ")[0]`，
@@ -2150,6 +2209,24 @@ function showPalette() {
       .map((a) => ({ text: head + " " + a, name: a, about: head.slice(1), whole: true }));
     palItems.sort((a, b) => (b.name === rest) - (a.name === rest));
   }
+  return paint();
+}
+
+function showMentions() {
+  const spot = mentionAt();
+  if (!spot) return hidePalette();
+  if (!mention || mention.prefix !== spot.typed) {
+    // 还没问过这一截 菜单先留着别收，收了再弹是一次肉眼可见的闪
+    return send({ op: "paths", prefix: spot.typed });
+  }
+  palItems = mention.rows.map((path) => ({
+    text: path, name: path, about: path.endsWith("/") ? "目录" : "文件",
+    at: spot.at, path,
+  }));
+  return paint();
+}
+
+function paint() {
   if (!palItems.length) return hidePalette();
   palIndex = Math.min(palIndex, palItems.length - 1);
   paletteEl.replaceChildren(...palItems.map((c, n) => {
@@ -2178,6 +2255,19 @@ function hidePalette() {
 function pick(n) {
   const chosen = palItems[n];
   if (!chosen) return;
+  if (chosen.path !== undefined) {
+    // `@` 可能在句子中间，只能换掉 `@` 到光标这一段，不能整框覆盖
+    const caret = inputEl.selectionStart;
+    const folder = chosen.path.endsWith("/");
+    const head = inputEl.value.slice(0, chosen.at + 1) + chosen.path + (folder ? "" : " ");
+    inputEl.value = head + inputEl.value.slice(caret);
+    hidePalette();
+    inputEl.focus();
+    inputEl.setSelectionRange(head.length, head.length);
+    grow();
+    if (folder) showPalette();      // 补到目录就接着往下一层补
+    return;
+  }
   // 补参数时 text 已经是「命令 + 参数」整串，后面不再加空格 —— 那一条打完了
   inputEl.value = chosen.whole ? chosen.text : chosen.text + " ";
   hidePalette();
@@ -2192,6 +2282,18 @@ inputEl.addEventListener("input", () => {
   palMoved = false;
   grow();
   showPalette();
+});
+
+/* 光标挪了也要重算：`@` 补全看的是"光标之前那一段"，
+   而点一下、按左右键都不触发 input —— 不听这个的话菜单会留在原地，
+   补出去的东西落在别的位置上。
+
+   挂在 document 上而不是 inputEl 上：元素级的 selectionchange 是这两年
+   才有的事，WebKitGTK（Tauri 在 Linux 上用的就是它）未必有；document 级的
+   哪儿都有，多一次 activeElement 判断而已。 */
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement !== inputEl) return;
+  if (!paletteEl.hidden || mentionAt()) showPalette();
 });
 
 inputEl.addEventListener("keydown", (e) => {

@@ -55,7 +55,7 @@ class Fake(FakeBackend):
     def __init__(self, *a, **k):
         super().__init__(list(SCRIPT))
         self.model = "deepseek-v4-flash"   # 状态栏显示的是 backend.model，别让它写 fake
-    def run_turn(self, on_text, on_tool=None):
+    def run_turn(self, on_text, on_tool=None, on_think=None):
         import time
         text, calls = self.script[0] if self.script else ("说完了", [])
         # 逐字慢放，让流式渲染真的走一遍

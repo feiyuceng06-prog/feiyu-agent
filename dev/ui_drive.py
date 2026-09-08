@@ -97,8 +97,13 @@ def main():
         os.execv(sys.executable, [sys.executable, os.path.join(S, "ui_runner.py")])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen = pyte.Screen(COLS, ROWS); stream = pyte.ByteStream(screen)
+    # `@c` 先探一次补全菜单（calc.py / CLAUDE.md 两条，大小写不敏感），
+    # 拍完用 ctrl-u 清掉再打正题 —— 菜单是布局的一节、不是 Float，
+    # 只有真跑一遍才看得出它有没有把底边框顶掉
+    probe = list(os.environ.get("FEIYU_UI_PROBE") or "@c")
     keys = list("看看这个项目，然后给 calc.py 加个 mul 函数，改完跑一遍测试") + ["\r"]
     t0 = time.time(); last = t0; last_confirm = 0; sent_prompt = False; confirmed = False; shots = 0; done_final = False
+    probed = False
     texts = []
     def text():
         return "\n".join(screen.display)
@@ -117,14 +122,20 @@ def main():
         if not sent_prompt and idle > 1.0 and now - t0 > 1.5:
             render(screen, os.path.join(ARGS.out, "1_welcome.png")); texts.append(("welcome", scr))
             sent_prompt = True
-        elif sent_prompt and keys and idle > 0.05:
+        elif sent_prompt and probe and idle > 0.05:
+            os.write(fd, probe.pop(0).encode()); time.sleep(0.01)
+        elif sent_prompt and not probed and idle > 0.6:
+            render(screen, os.path.join(ARGS.out, "2_mention.png")); texts.append(("mention", scr))
+            os.write(fd, b"\x15")      # ctrl-u 清掉这一行，接着打正题
+            probed = True; last = now
+        elif sent_prompt and probed and keys and idle > 0.05:
             os.write(fd, keys.pop(0).encode()); time.sleep(0.01)
         elif "[y]" in (scr.rstrip().splitlines() or [""])[-1] and idle > 0.8 and now - last_confirm > 1.5:
             if not confirmed:
-                render(screen, os.path.join(ARGS.out, "2_confirm.png")); texts.append(("confirm", scr))
+                render(screen, os.path.join(ARGS.out, "3_confirm.png")); texts.append(("confirm", scr))
             os.write(fd, b"y"); confirmed = True; last_confirm = now; last = now
         elif confirmed and not done_final and idle > 2.5 and "42" in scr:
-            render(screen, os.path.join(ARGS.out, "3_final.png")); texts.append(("final", scr))
+            render(screen, os.path.join(ARGS.out, "4_final.png")); texts.append(("final", scr))
             done_final = True
             os.write(fd, b"\x04"); break
         if now - t0 > 60:

@@ -17,6 +17,10 @@ env/
 .claude/
 .DS_Store
 
+# 夹具跑一次就往这儿传一张图（desktop/dev/shoot.mjs 的出图那一屏），
+# 而它是工作区里的真目录 —— 不排掉的话每跑一次夹具仓库就脏一次
+.feiyu/
+
 # 密钥相关 —— 模型配置本来存在 ~/.config/feiyu/ 下，
 # 这几条是防手滑把副本放进仓库
 .env*

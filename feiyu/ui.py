@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from . import events, files
+from . import events, files, mentions
 
 # **prompt_toolkit 到用的时候再 import。** 整个包要 53 ms，占冷启动的一半，
 # 而只有交互 TUI 用得上它 —— `feiyu "任务"`、管道、`--serve`（桌面端起的就是它）
@@ -248,7 +248,7 @@ def welcome(workspace, version: str, project: str) -> str:
         paint("grey", "工作目录  ") + clip_path(shown, max(20, room - 10)),
         paint("grey", "项目约定  ") + project,
         "",
-        paint("grey", "⏎ 发送   \\⏎ 换行   esc 中断   /help 更多"),
+        paint("grey", "⏎ 发送   \\⏎ 换行   @ 带上文件   esc 中断   /help 更多"),
     ]
     art = logo_rows() if LOGO and width() >= LOGO_MIN_WIDTH else []
     if not art:
@@ -1302,6 +1302,8 @@ MODE_NAMES: list[str] = []
 # 模型清单随时会变，用回调取而不是快照 机器人同理（面板里随时能加）
 MODEL_NAMES = lambda: []
 BOT_NAMES = lambda: []
+# `@路径` 补全从哪个目录起算 由 main() / serve 填成工作区，没填就没有 @ 补全
+MENTION_ROOT = None
 
 
 def _history_file() -> str:
@@ -1349,10 +1351,22 @@ class InputBox:
         self.status = status
         self.on_cycle_mode = on_cycle_mode
 
-        class _Slash(Completer):
+        class _Input(Completer):
+            """两种补全：行首的 `/命令`，和任何位置的 `@路径`
+
+            合在一个 Completer 里而不是用 `merge_completers`：两者互斥
+            （`/` 只在行首、`@` 只在一个没打完的 mention 上），分开写的话
+            每次按键要各判一遍同一件事。
+            """
+
             def get_completions(self, document, complete_event):
                 text = document.text_before_cursor
                 if not text.startswith("/"):
+                    typed = mentions.typing(text) if MENTION_ROOT else None
+                    if typed is None:
+                        return
+                    for path in mentions.complete(MENTION_ROOT, typed):
+                        yield Completion(path, start_position=-len(typed))
                     return
                 cmd, sep, arg = text.partition(" ")
                 if not sep:
@@ -1387,7 +1401,7 @@ class InputBox:
             multiline=True,
             history=FileHistory(_history_file()),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=_Slash(),
+            completer=_Input(),
             complete_while_typing=True,
             accept_handler=lambda buf: self._accept(),
         )

@@ -1,7 +1,9 @@
 """七个工具 网络那个只测拦截逻辑，不真的出网 """
 
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -1356,3 +1358,58 @@ class TestMissingFile(Base):
     def test_真在的文件照读不误(self):
         self.write("app.py", "x = 1\n")
         self.assertFalse(self.read("app.py").is_error)
+
+
+class TestOddFiles(Base):
+    """命名管道会把整个进程挂死 —— 而且是**没有任何输出**地挂死
+
+    打开一个没有另一端的 FIFO，read 和 write 都会一直阻塞。界面上一个字都没有，
+    `STREAM_TIMEOUT` 也不响（那条管的是模型的流，这儿还没发出去）。
+    实测 read_file / write_file 各能这么挂住一次，跟 0.58.0 那次「为什么卡死了」
+    是同一种毛病。这几条用例都带 timeout：挂住的话是**卡死**不是失败，
+    所以要在子进程里跑，别把整个测试跑挂在这儿。
+    """
+
+    def fifo(self, name="pipe.txt"):
+        path = self.root / name
+        try:
+            os.mkfifo(path)
+        except (AttributeError, OSError):
+            self.skipTest("这个平台建不了 FIFO")
+        return path
+
+    def _in_child(self, tool, args):
+        """真跑一遍，但跑在子进程里、带超时 —— 没修好的话这儿会超时而不是挂死"""
+        code = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "from feiyu.tools import Toolbox\n"
+            "b = Toolbox(Path(sys.argv[1]))\n"
+            "r = b.run(sys.argv[2], json.loads(sys.argv[3]))\n"
+            "print(r.summary or '')\n")
+        done = subprocess.run(
+            [sys.executable, "-c", code, str(self.root), tool, json.dumps(args)],
+            capture_output=True, text=True, timeout=20)
+        return done.stdout.strip()
+
+    def test_读命名管道要报错不能挂住(self):
+        self.fifo()
+        self.assertEqual(self._in_child("read_file", {"path": "pipe.txt"}), "不是普通文件")
+
+    def test_写命名管道要报错不能挂住(self):
+        self.fifo()
+        self.assertEqual(
+            self._in_child("write_file", {"path": "pipe.txt", "content": "x"}),
+            "不是普通文件")
+
+    def test_改命名管道说的是它不是普通文件不是不存在(self):
+        """只说"不存在"的话它会转头去 write_file，那条路一样挂住 """
+        self.fifo()
+        self.assertEqual(
+            self._in_child("edit_file",
+                           {"path": "pipe.txt", "old_str": "a", "new_str": "b"}),
+            "不是普通文件")
+
+    def test_普通文件照旧读得动(self):
+        self.write("ok.txt", "一行\n")
+        self.assertIn("读取", self._in_child("read_file", {"path": "ok.txt"}))

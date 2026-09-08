@@ -434,7 +434,6 @@ TOOL_SCHEMAS = [
     },
 ]
 
-_IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", "dist", "build"}
 # 列目录的上限 没有上限的话在 ~ 这种地方一跑就是三十多万个文件：
 # 走完要好几秒，拼出来的字符串几 MB，而模型看到的仍然只是被截断的前几十行
 LIST_CAP = 300
@@ -1007,6 +1006,13 @@ def _missing_note(target, shown: str) -> "ToolResult | None":
     if target.is_dir():
         return ToolResult("这是个目录，不是文件 想看里面有什么用 list_files ",
                           is_error=True, summary="这是目录")
+    odd = files.odd_kind(target)
+    if odd:
+        # 读一个没有写端的 FIFO 会一直阻塞，整个 agent 就挂在这儿了，
+        # 而且界面上一个字都没有 见 files.odd_kind
+        return ToolResult("%s 是%s，不是普通文件，读它会把整个进程挂住 "
+                          "要它的内容就用 bash 配上超时 " % (shown, odd),
+                          is_error=True, summary="不是普通文件")
     if target.exists():
         return None
     near = []
@@ -1458,6 +1464,12 @@ class Toolbox:
 
     def _tool_write_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
+        # 写一个没有读端的 FIFO 跟读它一样会永远阻塞，而 `is_file()` 对 FIFO
+        # 是 False —— 不拦的话它会当成"新建一个文件"，然后挂在 write_text 上
+        odd = files.odd_kind(target)
+        if odd:
+            return ToolResult("%s 已经是%s了，不是普通文件，写它会把整个进程挂住 "
+                              % (args["path"], odd), is_error=True, summary="不是普通文件")
         existed = target.is_file()
         if existed:
             blocked = self._check_fresh(target, args["path"])
@@ -1484,6 +1496,12 @@ class Toolbox:
     def _tool_edit_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
         if not target.is_file():
+            # **先说清是"不是普通文件"**：只说"不存在"的话它会转头去 write_file，
+            # 那条路一样会挂住（0.65.1 那条 read_file 说错了错也是同一个道理）
+            odd = files.odd_kind(target)
+            if odd:
+                return ToolResult("%s 是%s，不是普通文件，改不了 " % (args["path"], odd),
+                                  is_error=True, summary="不是普通文件")
             return ToolResult(f"{args['path']} 不存在 要新建文件用 write_file ", is_error=True)
         blocked = self._check_fresh(target, args["path"])
         if blocked is not None:
@@ -1530,7 +1548,7 @@ class Toolbox:
         # glob 会把它们里面每个文件都吐出来再让我们一个个 stat 掉，本仓库实测
         # 8455 次 stat、178 毫秒，而真正要列的只有 54 个文件（剪枝后 0 毫秒）
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if d not in _IGNORE_DIRS)
+            dirnames[:] = sorted(d for d in dirnames if d not in files.IGNORE_DIRS)
             here = Path(dirpath).relative_to(self.root)
             for name in sorted(filenames):
                 rel = here / name if str(here) != "." else Path(name)
@@ -2071,7 +2089,7 @@ class Toolbox:
         for path in self.root.glob(glob or "**/*"):
             if not path.is_file():
                 continue
-            if any(part in _IGNORE_DIRS for part in path.relative_to(self.root).parts):
+            if any(part in files.IGNORE_DIRS for part in path.relative_to(self.root).parts):
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -2125,7 +2143,7 @@ def _ripgrep(regex: str, glob: str, root: Path, context: int = 0,
     argv += ["-e", regex]
     if glob:
         argv += ["-g", glob]
-    for name in _IGNORE_DIRS:
+    for name in files.IGNORE_DIRS:
         argv += ["-g", "!" + name]
     argv.append(".")
     try:

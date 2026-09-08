@@ -92,7 +92,14 @@ def _plain(obj):
 
 
 def _first_words(messages) -> str:
-    """拿人说的第一句当标题 侧边栏上一行字，得让人认得出是哪次对话 """
+    """拿人说的第一段当标题 侧边栏上一行字，得让人认得出是哪次对话
+
+    **只取第一段，遇空行就停。** 发出去的那条 user 消息后面常常挂着机器拼的东西
+    —— 桌面端的「我上传了这些文件（相对工作区）：」、`@路径` 读好附上的整份文件
+    正文，都是用空行隔开接在后面的。把整条拍平了截 60 个字，一列会话就全长成
+    「看看这张图 我上传了这些文件（相对工作区）： -...」，彼此认不出来
+    （实测侧边栏里连着十五条一模一样）。人自己打的那句话在第一段里。
+    """
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
@@ -101,7 +108,16 @@ def _first_words(messages) -> str:
             # anthropic 那边 user 消息里可能装的是 tool_result，那不是人说的话
             content = " ".join(b.get("text", "") for b in content
                                if isinstance(b, dict) and b.get("type") == "text")
-        text = " ".join(str(content or "").split())
+        if not isinstance(content, str):
+            continue        # 写坏的存盘里 content 可能是个 dict，别把它 str() 成标题
+        para: list[str] = []
+        for line in content.splitlines():
+            if not line.strip():
+                if para:
+                    break
+                continue        # 开头的空行不算一段的结束
+            para.append(line)
+        text = " ".join(" ".join(para).split())
         if text:
             return text[:TITLE_CAP]
     return ""
@@ -179,7 +195,11 @@ def _read(path: str) -> dict | None:
             data = json.load(f)
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) and data.get("messages") else None
+    # **messages 必须真的是个列表。** 只判真值的话 `{"messages": "坏了"}` 也算数，
+    # restore 会把这个字符串直接装进 backend.messages，下一次请求就是 400 ——
+    # 而那时候已经离这儿很远了，看着像"接口坏了"
+    return (data if isinstance(data, dict) and isinstance(data.get("messages"), list)
+            and data["messages"] else None)
 
 
 def listing(workspace) -> list[dict]:
@@ -207,14 +227,36 @@ def listing(workspace) -> list[dict]:
     return rows
 
 
+def _num(value, fallback: float = 0.0) -> float:
+    """存盘里的数字一律过这道 —— 盘上的东西不保证是数
+
+    一份写坏的存盘（写到一半被 kill、手改过、别的版本留下的）里 `saved_at`
+    可能是字符串，而 `listing()` 会拿它去 `time.localtime()`，一个 TypeError
+    **把整份侧边栏都带走** —— 一份坏文件，一条历史都列不出来。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return fallback
+    # 1e300 这种喂给 localtime 会抛 OverflowError，照样是一条都列不出来
+    return value if -1e12 < value < 1e12 else fallback
+
+
 def _summary(sid: str, data: dict) -> dict:
+    saved = _num(data.get("saved_at"))
+    title = data.get("title")
+    if not isinstance(title, str) or not title:
+        title = _first_words(data.get("messages")) or "（没有标题）"
+    messages = data.get("messages")
+    count = data.get("count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        count = len(messages) if isinstance(messages, list) else 0
+    model = data.get("model")
     return {
         "id": sid,
-        "title": data.get("title") or _first_words(data.get("messages")) or "（没有标题）",
-        "model": data.get("model", ""),
-        "count": data.get("count", len(data.get("messages", []))),
-        "saved_at": data.get("saved_at", 0),
-        "when": time.strftime("%m-%d %H:%M", time.localtime(data.get("saved_at", 0))),
+        "title": title,
+        "model": model if isinstance(model, str) else "",
+        "count": count,
+        "saved_at": saved,
+        "when": time.strftime("%m-%d %H:%M", time.localtime(saved)),
     }
 
 

@@ -116,6 +116,23 @@ class TestRoundTrip(Base):
         session.save(self.ws, Agentish(b), "20260101-000000")
         self.assertEqual(session.listing(self.ws)[0]["title"], "把 parser 拆一下")
 
+    def test_标题只取第一段(self):
+        """机器拼在后面的东西不许进标题 —— 桌面端的附件说明、`@路径` 附的
+        整份文件正文都是用空行隔开接在后面的，拍平了截 60 个字的话，一列
+        会话会全长成同一句「我上传了这些文件（相对工作区）：…」"""
+        for said, want in (
+                ("看看这张图\n\n我上传了这些文件（相对工作区）：\n- a.png", "看看这张图"),
+                ("照着 @feiyu/ui.py 改\n\n----- feiyu/ui.py -----\n1\timport json",
+                 "照着 @feiyu/ui.py 改"),
+                ("  \n\n开头是空行", "开头是空行"),
+                ("第一行\n第二行", "第一行 第二行")):
+            b = FakeBackend([])
+            b.messages = [{"role": "system", "content": "系统"},
+                          {"role": "user", "content": said},
+                          {"role": "assistant", "content": "好"}]
+            session.save(self.ws, Agentish(b), "20260101-000000")
+            self.assertEqual(session.listing(self.ws)[0]["title"], want)
+
     def test_标题不要把工具结果当成人说的话(self):
         """anthropic 那边 tool_result 是挂在 user 消息里的 """
         b = FakeBackend([])
@@ -402,3 +419,59 @@ class TestNewId(unittest.TestCase):
         first = session.new_id()
         self.assertRegex(first, r"^\d{8}-\d{6}$")
         self.assertTrue(session.new_id() > first)
+
+
+class TestBrokenFiles(unittest.TestCase):
+    """一份写坏的存盘不许把整份侧边栏带走
+
+    盘上的东西不保证是数：写到一半被 kill、手改过、别的版本留下的都可能。
+    原来 `saved_at` 是个字符串就足够让 `listing()` 抛 TypeError ——
+    **一条历史都列不出来**，而用户看到的是"侧边栏空了"。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        before = session.DIR
+        session.DIR = os.path.join(self.tmp.name, "sessions")
+        self.addCleanup(setattr, session, "DIR", before)
+        self.ws = Path(self.tmp.name) / "ws"
+        self.ws.mkdir()
+        self.here = Path(session.folder(self.ws))
+        self.here.mkdir(parents=True)
+
+    def put(self, name, body):
+        (self.here / name).write_text(body, encoding="utf-8")
+
+    def test_坏的_saved_at_不影响别的(self):
+        self.put("20260101-000001.json", '{"messages":[{"role":"user","content":"坏"}], '
+                                         '"saved_at":"不是数"}')
+        self.put("20260101-000002.json", '{"messages":[{"role":"user","content":"好"}], '
+                                         '"saved_at":1788000000}')
+        rows = session.listing(self.ws)               # 不该抛
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["title"], "好")      # 好的那份排前面
+
+    def test_大到离谱的时间戳也不抛(self):
+        """1e300 喂给 time.localtime 是 OverflowError，照样一条都列不出来 """
+        self.put("20260101-000001.json", '{"messages":[{"role":"user","content":"x"}], '
+                                         '"saved_at":1e300}')
+        self.assertEqual(len(session.listing(self.ws)), 1)
+
+    def test_messages_不是列表就当这份坏了(self):
+        """只判真值的话这个字符串会被装进 backend.messages，下一次请求直接 400 """
+        self.put("20260101-000001.json", '{"messages":"不是列表"}')
+        self.assertEqual(session.listing(self.ws), [])
+        self.assertIsNone(session.load(self.ws, "20260101-000001"))
+
+    def test_标题和条数不是那个类型时不崩(self):
+        self.put("20260101-000001.json", '{"messages":[{"role":"user","content":"好"}], '
+                                         '"title":["列表"], "count":"多", "model":7}')
+        row = session.listing(self.ws)[0]
+        self.assertEqual(row["title"], "好")
+        self.assertEqual(row["count"], 1)
+        self.assertEqual(row["model"], "")
+
+    def test_content_不是字符串时不拿它当标题(self):
+        self.put("20260101-000001.json", '{"messages":[{"role":"user","content":{"x":1}}]}')
+        self.assertEqual(session.listing(self.ws)[0]["title"], "（没有标题）")

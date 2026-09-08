@@ -1123,3 +1123,53 @@ class TestApiHints(unittest.TestCase):
         """0.26.0 给终端加过，桌面端这条路一直在原样甩 JSON """
         src = pathlib.Path("feiyu/serve.py").read_text(encoding="utf-8")
         self.assertIn("cli._explain(exc)", src)
+
+
+class TestPaths(unittest.TestCase):
+    """`@` 补全的候选走 reader 线程，不进 inbox
+
+    进 inbox 的话它会排在正在跑的那一轮后面 —— 补全菜单成了"打完一句才弹出来"，
+    等于没有。这条路只读一层目录、不碰 agent 的任何状态，所以可以就地答。
+    """
+
+    class Box(serve.Server):
+        def __init__(self, workspace, out):
+            self.workspace = workspace
+            self.inbox = queue.Queue()
+            self.busy = False
+            self.proto = serve.Protocol(out)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "feiyu").mkdir()
+        (self.root / "README.md").write_text("x\n", encoding="utf-8")
+        self.out = io.StringIO()
+        self.box = self.Box(self.root, self.out)
+
+    def sent(self):
+        return [json.loads(l) for l in self.out.getvalue().splitlines() if l.strip()]
+
+    def test_就地答不排队(self):
+        self.box._dispatch_in(json.dumps({"op": "paths", "prefix": ""}))
+        self.assertTrue(self.box.inbox.empty())
+        row = self.sent()[-1]
+        self.assertEqual(row["kind"], "paths")
+        self.assertEqual(row["prefix"], "")
+        self.assertIn("feiyu/", row["rows"])
+
+    def test_带上问的是哪一截(self):
+        """前端拿 prefix 对一下才知道这份候选还算不算数（打字比往返快）"""
+        self.box._dispatch_in(json.dumps({"op": "paths", "prefix": "READ"}))
+        row = self.sent()[-1]
+        self.assertEqual(row["prefix"], "READ")
+        self.assertEqual(row["rows"], ["README.md"])
+
+    def test_越界的问法答空(self):
+        self.box._dispatch_in(json.dumps({"op": "paths", "prefix": "../"}))
+        self.assertEqual(self.sent()[-1]["rows"], [])
+
+    def test_prefix_不是字符串也不崩(self):
+        self.box._dispatch_in(json.dumps({"op": "paths", "prefix": {"a": 1}}))
+        self.assertEqual(self.sent()[-1]["rows"], [])

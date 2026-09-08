@@ -124,6 +124,9 @@ def load() -> dict:
             raw = json.load(f)
     except (OSError, ValueError):
         raw = {}
+    # 合法 JSON 不等于对象：`null` / `[]` / `"x"` 都会让下面的 `.get` 抛
+    if not isinstance(raw, dict):
+        raw = {}
     allow = raw.get("allow")
     if not isinstance(allow, list):
         return {"allow": list(DEFAULT_ALLOW), "deny": list(raw.get("deny") or [])}

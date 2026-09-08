@@ -23,8 +23,17 @@
   --bg: #ffffff;
   --text: rgba(0, 0, 0, 0.8);
   --soft: rgba(0, 0, 0, 0.7);
-  --muted: rgba(0, 0, 0, 0.5);
-  --faint: rgba(0, 0, 0, 0.32);
+  /* **这两档比博客那边深。** 博客里 --muted 是 0.5，注释说它"对白纸 10.4:1，
+     远在 AA 之上" —— 那个数是错的：rgba(0,0,0,.5) 压在纯白上是 rgb(128,128,128)，
+     量出来 3.98:1，压在 --panel 上 3.87:1，两处都在 AA 的 4.5 之下。
+     而这半边把这两档用在了比博客更吃力的地方：9–10px 的时间戳、条数、`Ctrl N`、
+     图说里的路径，还有会话行上那个 × 按钮。所以按量出来的数往下压一档：
+       --muted 0.56 → 白 4.94:1 / panel 4.77:1（正文 AA 4.5）
+       --faint 0.44 → 白 3.24:1 / panel 3.18:1（非文本与大字 AA 3.0）
+     四档墨色的结构、"只有一个色相构造式"那条规矩都没动，改的只有两个 α。
+     要再动先把这四个数重新量一遍，别凭手感调。 */
+  --muted: rgba(0, 0, 0, 0.56);
+  --faint: rgba(0, 0, 0, 0.44);
   --line: rgba(0, 0, 0, 0.1);
   --line-strong: rgba(0, 0, 0, 0.2);
   --accent: #0f62fe;
@@ -100,8 +109,10 @@
   --bg: #fbf6ea;
   --text: rgba(43, 32, 22, 0.88);
   --soft: rgba(43, 32, 22, 0.74);
-  --muted: rgba(43, 32, 22, 0.54);
-  --faint: rgba(43, 32, 22, 0.34);
+  /* 同上，按这张纸重量了一遍：0.65 → 纸 4.86:1 / panel 4.59:1；
+     0.52 → 纸 3.30:1 / panel 3.18:1。泛黄的纸比纯白暗一点，所以 α 要更大 */
+  --muted: rgba(43, 32, 22, 0.65);
+  --faint: rgba(43, 32, 22, 0.52);
   --line: rgba(43, 32, 22, 0.13);
   --line-strong: rgba(43, 32, 22, 0.26);
   --accent: #c0562c;
@@ -456,23 +467,33 @@ body[data-side="off"] .side { border-right: 0; }
   padding-right: var(--space-5);
 }
 
+/* 日期和条数走 --muted 而不是 --faint：它们是**要读的数**（这是哪天的哪一段），
+   不是记号。10px 的字在 --faint 上量出来 3.18:1，过不了正文的 4.5。
+   同理的还有图说里那条路径。 */
 .talk__meta {
   display: block;
   margin-top: var(--space-1);
   font-size: var(--text-2xs);
   font-family: var(--font-mono);
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* 删除那个叉：平时不显形，划到这一行才出现 —— 侧栏是索引，
    常态不该被一排叉占着。键盘走到它上面也要显形。 */
+/* 删那一条的叉。**记号小、可点的面积不小**：原来整个按钮量出来 17×15，
+   在触控板上要瞄准才点得中（24px 是最小可点边）。字号照旧，
+   靠 min-width/height 把盒子撑到 24，位置用负 margin 抵回去，行不移。 */
 .talk__x {
   position: absolute;
-  right: var(--space-2);
-  top: var(--space-2);
+  right: var(--space-1);
+  top: var(--space-1);
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  min-height: 24px;
   border: 0;
   background: none;
-  padding: 0 var(--space-1);
+  padding: 0;
   color: var(--faint);
   font: inherit;
   line-height: 1;
@@ -507,7 +528,12 @@ body[data-side="off"] .side { border-right: 0; }
 }
 
 .status__left, .status__right { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.status__left { overflow: hidden; }
+/* **让路的一律是左边。** 两边都能压缩的话，窄窗口下 `overflow: hidden` 剪掉的是
+   最右那一格，也就是版本号 —— 而右边这一排（模式 / 上下文 / 花费 / 余额 / 版本）
+   每一格都是要看的数，工作目录反而是那个截了也认得出来的。量出来的：390px 下
+   整条溢出 40px，版本号看不见。 */
+.status__left { overflow: hidden; flex: 1 1 auto; }
+.status__right { flex: 0 0 auto; }
 .status__sep { color: var(--line-strong); }
 .status .mono { font-family: var(--font-mono); }
 
@@ -527,7 +553,9 @@ body[data-side="off"] .side { border-right: 0; }
 .status__left-btn:hover { color: var(--text); }
 /* 余额见底了要显出来 —— 这是"需要你动手"的一种 */
 .status__left-btn[data-low="1"] { color: var(--alert); }
-#s-cwd { overflow: hidden; text-overflow: ellipsis; }
+/* flex 子项默认 `min-width: auto`，不写这一条它就不肯缩到内容宽度以下，
+   `text-overflow` 一辈子用不上 —— 上面那条 flex-shrink 也就白设了 */
+#s-cwd, #s-boot { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* 连接状态那个点。**只有三档**：断了 / 就绪 / 干活中，别再加第四种颜色。 */
 .dot { width: 6px; height: 6px; background: var(--faint); flex: none; }
@@ -694,7 +722,7 @@ body[data-side="off"] .side { border-right: 0; }
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   letter-spacing: 0.04em;
-  color: var(--faint);
+  color: var(--muted);
   padding-top: var(--space-1);
   overflow-wrap: anywhere;
 }
@@ -1087,13 +1115,19 @@ body[data-side="off"] .side { border-right: 0; }
 }
 
 /* 设置那一页：清单右边显示当前值，右栏是一组可选项 */
+/* 设置清单右边那个当前值。**一行封顶，长了切掉**：原来是 `overflow-wrap:
+   anywhere`，于是「校验命令」那条值折成三行，把行高从 41px 撑到 89px，
+   整张清单的节奏塌了一格。完整的值就在右栏那个输入框里，鼠标停上去也有 ——
+   清单这一列的职责只是「现在是什么」，不是把它读完。 */
 .shelf__now {
   font-size: var(--text-2xs);
   font-family: var(--font-mono);
   color: var(--muted);
   text-align: right;
-  overflow-wrap: anywhere;
-  max-width: 9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 11rem;
 }
 
 .opts { display: flex; flex-direction: column; margin-top: var(--space-3); }

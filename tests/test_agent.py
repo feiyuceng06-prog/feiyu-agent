@@ -1133,3 +1133,40 @@ class TestModeTables(unittest.TestCase):
         """cycle_mode 走的是 MODE_ORDER.index(self.mode)，而 restore / start_bot
         校验的是 MODES —— 两张表不一致的话，shift+tab 会在某个模式上抛 ValueError """
         self.assertEqual(set(agent_mod.MODES), set(agent_mod.MODE_ORDER))
+
+
+class TestMentions(Base):
+    """`@路径` 在 send() 这一层就展开 —— 这是它省下一整轮往返的地方"""
+
+    def test_内容跟着这句话一起发出去(self):
+        (Path(self.tmp.name) / "note.txt").write_text("秘密\n", encoding="utf-8")
+        b = self.use([("好", [])])
+        quiet(self.agent.send, "看看 @note.txt")
+        said = [m["content"] for m in b.messages if m["role"] == "user"][0]
+        self.assertIn("秘密", said)
+        self.assertIn("note.txt", said)
+
+    def test_用户打的那句话本身不变(self):
+        """展开出来的东西挂在这句话后面，`task` 记的仍是用户说的话
+        （trace 和 /cost 按它分组，掺进几千行文件就没法看了）"""
+        (Path(self.tmp.name) / "note.txt").write_text("x\n", encoding="utf-8")
+        self.use([("好", [])])
+        quiet(self.agent.send, "看看 @note.txt")
+        self.assertEqual(self.agent.task, "看看 @note.txt")
+
+    def test_附过的文件算它读过了(self):
+        """不记进 Watcher 的话，它下一步 edit_file 会被「你还没读过」挡回去 ——
+        而用户明明已经把内容摆在它面前了"""
+        target = Path(self.tmp.name) / "note.txt"
+        target.write_text("老内容\n", encoding="utf-8")
+        self.use([("好", [])])
+        quiet(self.agent.send, "把 @note.txt 里的老改成新")
+        got = self.agent.toolbox.run("edit_file", {
+            "path": "note.txt", "old_str": "老内容", "new_str": "新内容"})
+        self.assertFalse(got.is_error, got.content)
+
+    def test_没有_at_的一句话一个字都不多(self):
+        b = self.use([("好", [])])
+        quiet(self.agent.send, "随便说点什么")
+        said = [m["content"] for m in b.messages if m["role"] == "user"][0]
+        self.assertEqual(said, "随便说点什么")

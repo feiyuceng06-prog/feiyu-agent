@@ -6,6 +6,7 @@
 
 import contextlib
 import io
+import pathlib
 import unittest
 
 from feiyu import ui
@@ -494,3 +495,29 @@ class TestThemes(unittest.TestCase):
         minus = [int(x) for x in got["red"].split(";")]
         far = sum((a - b) ** 2 for a, b in zip(plus, minus)) ** 0.5
         self.assertGreater(far, 90, "%s vs %s" % (plus, minus))
+
+
+class TestFixtureKeepsUp(unittest.TestCase):
+    """`dev/ui_runner.py` 的假后端必须收得下真后端 run_turn 的每个参数
+
+    0.58.0 给 `run_turn` 加了 `on_think`，假后端没跟上 —— 于是 pty 夹具
+    **从那一版起就一句话都跑不完**（"got an unexpected keyword argument"），
+    而它是唯一能看见真实渲染的东西。中间七个版本都没人发现，因为夹具挂了
+    只是少几张图，没有任何一条断言会红。这条就是那条断言。
+    """
+
+    def test_签名对得上(self):
+        import ast
+        import inspect
+
+        from feiyu.providers import AnthropicBackend, OpenAICompatBackend
+
+        want = set()
+        for real in (AnthropicBackend, OpenAICompatBackend):
+            want |= set(inspect.signature(real.run_turn).parameters) - {"self"}
+        source = pathlib.Path(__file__).resolve().parent.parent / "dev" / "ui_runner.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        fake = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "run_turn")
+        got = {a.arg for a in fake.args.args} - {"self"}
+        self.assertLessEqual(want, got, "夹具的假后端少收了：%s" % sorted(want - got))

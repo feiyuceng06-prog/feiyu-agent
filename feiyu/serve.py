@@ -38,6 +38,7 @@ import _thread
 from . import agent as agent_mod
 from . import bots as bots_mod
 from . import enabled, events, keys, memory, permissions, profiles as profiles_mod
+from . import mentions as mentions_mod
 from . import session as session_mod
 from . import skills as skills_mod, tools as tools_mod, ui
 from . import __version__
@@ -199,6 +200,15 @@ class Server:
         """侧边栏那份列表 只出摘要，正文点开才读 """
         self.proto.send("sessions", rows=session_mod.listing(self.workspace),
                         current=self.agent.session_id)
+
+    def push_paths(self, prefix: str) -> None:
+        """`@` 补全的候选 跟终端那边是同一个 `mentions.complete()`
+
+        走 reader 线程、不进 inbox：只读一层目录，不碰 agent 的任何状态，
+        排在正在跑的那一轮后面的话补全菜单就成了"打完一句才弹出来"。
+        """
+        self.proto.send("paths", prefix=prefix,
+                        rows=mentions_mod.complete(self.workspace, prefix))
 
     def new_session(self) -> None:
         """开一段新对话 **旧的那份留在盘上**，这是它跟 /clear 的全部区别 """
@@ -776,6 +786,8 @@ class Server:
             self.inbox.put(("open", str(msg.get("id") or "")))
         elif op == "delete":
             self.inbox.put(("delete", str(msg.get("id") or "")))
+        elif op == "paths":
+            self.push_paths(str(msg.get("prefix") or "")[:MAX_TEXT])
         elif op == "catalog":
             self.push_catalog()
         elif op == "detail":

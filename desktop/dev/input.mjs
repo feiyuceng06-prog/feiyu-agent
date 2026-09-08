@@ -311,6 +311,61 @@ await type("把 a.py 改一下");
 s = await state();
 check("普通输入不弹菜单", !s.palette, s);
 
+// ── @路径 ────────────────────────────────────────────────────
+/* 候选是服务端算的（`op:"paths"` → `mentions.complete()`），所以每条都要
+   **等回话到了再断言**：打字比一次往返快，固定 sleep 会挂在还没到的那份上。 */
+async function waitPaths(want) {
+  for (let i = 0; i < 40; i++) {
+    const now = await state();
+    if (now.palette && now.items.some((x) => x.includes(want))) return now;
+    await sleep(150);
+  }
+  return await state();
+}
+
+await reset();
+await type("@fei");
+s = await waitPaths("feiyu");
+check("@ 弹出路径补全", s.palette && s.items.includes("feiyu/"), s);
+
+// Tab 补到目录之后**不加空格**，接着往下一层补
+await key("Tab");
+s = await waitPaths("feiyu/");
+check("补到目录不封口", s.value === "@feiyu/", s);
+check("目录补完接着列下一层",
+      s.palette && s.items.some((x) => x.startsWith("feiyu/")), s);
+
+// 补到文件要加空格，菜单收起
+await reset();
+await type("@READ");
+s = await waitPaths("README");
+await key("Tab");
+s = await state();
+check("补到文件后面跟一个空格", s.value === "@README.md ", s);
+check("补完文件菜单收起", !s.palette, s);
+
+// **句子中间的 @ 也要补，而且只换掉那一段** —— 整框覆盖的话前面打的话就没了
+await reset();
+await type("照着 @fei");
+s = await waitPaths("feiyu");
+await key("Tab");
+s = await state();
+check("句子中间补全只换 @ 那一段", s.value === "照着 @feiyu/", s);
+
+// 邮箱里的 @ 不是 mention
+await reset();
+await type("发到 a@b");
+await sleep(400);
+s = await state();
+check("邮箱里的 @ 不弹菜单", !s.palette, s);
+
+// 打到一个不存在的路径，菜单要收起来，回车照旧是发送
+await reset();
+await type("@zzzz");
+await sleep(500);
+s = await state();
+check("没有匹配时菜单收起", !s.palette, s);
+
 // ── 侧边栏 ──────────────────────────────────────────────────
 async function side() {
   return JSON.parse(await ev(`JSON.stringify({

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import ui
 from . import history, hooks as hooks_mod
+from . import mentions as mentions_mod
 from . import profiles as profiles_mod
 from . import progress as progress_mod
 from . import bots as bots_mod
@@ -855,6 +856,15 @@ class Feiyu:
             note += ("\n\n（用户用 /undo 退掉了你的改动：%s 文件已经是改动之前的内容，"
                      "要再动它先重新读一遍 ）" % "；".join(self._undone))
             self._undone = []
+        # 用户 @ 指的文件在这儿就读好 少一次 read_file 就少一整轮往返，
+        # 而且 mentions 会把它记进 files.Watcher —— 不记的话它下一步改这个文件
+        # 会被「你还没读过」挡回去
+        attached, said = mentions_mod.expand(
+            user_message, self.toolbox.root, self.toolbox.files)
+        if said:
+            print(ui.notice("已读好并附上：" + "、".join(said)))
+            print()
+            note += attached
         self.backend.add_user_message(user_message + note)
         rounds = 0
         nudged = False      # 清单没做完只提醒一次，提醒到底会转不出来

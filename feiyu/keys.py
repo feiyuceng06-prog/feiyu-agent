@@ -35,8 +35,14 @@ def load() -> dict[str, dict]:
             raw = json.load(f)
     except (OSError, ValueError):
         return {}
+    # **形状也要判。** `json.load` 只保证是合法 JSON，不保证是个对象：
+    # 一份写坏成 `123` 或 `"..."` 的 models.json 会让 `.items()` 抛 AttributeError，
+    # 而这条在启动路径上 —— 表现是 feiyu 一敲就崩，跟"密钥没了"分不出来。
+    # `_state()` / `image_config()` / `mcp._read_json()` 都是这么判的，这儿漏了。
+    if not isinstance(raw, dict):
+        return {}
     out = {}
-    for name, entry in (raw or {}).items():
+    for name, entry in raw.items():
         if isinstance(entry, dict) and entry.get("key") and entry.get("model"):
             row = {k: entry.get(k) for k in FIELDS}
             row["kind"] = row.get("kind") or "openai"

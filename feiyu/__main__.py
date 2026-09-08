@@ -183,6 +183,7 @@ def main() -> int:
     ui.MODE_NAMES[:] = list(MODES)
     ui.MODEL_NAMES = lambda: list(keys.load())
     ui.BOT_NAMES = lambda: [b.name for b in bots_mod.load()]
+    ui.MENTION_ROOT = workspace
     ui.enter_screen()
 
     project = f"{agent.context_file}（{len(agent.context_text)} 字）" if agent.context_text else "无"
@@ -745,6 +746,7 @@ def _help() -> str:
         rows.append("    " + ui.bold(ui.pad(cmd, 10)) + ui.paint("grey", desc))
     rows.append("")
     rows.append(ui.notice("按键    ⏎ 发送 · \\⏎ 换行 · shift+tab 切模式 · esc 中断当前回答 · ctrl-d 退出"))
+    rows.append(ui.notice("带文件  句子里写 @路径（Tab 补全），发出去之前就替它读好，省一次往返"))
     rows.append(ui.notice("版本    feiyu " + __version__))
     return "\n".join(rows)
 

@@ -83,7 +83,10 @@ def level() -> str:
         return from_env
     try:
         with open(STORE, encoding="utf-8") as f:
-            saved = json.load(f).get("level")
+            raw = json.load(f)
+        # `.get` 直接接在 json.load 后面的话，一份内容是 `[]` 的配置会抛
+        # AttributeError —— 而 except 只接了 OSError / ValueError
+        saved = raw.get("level") if isinstance(raw, dict) else None
     except (OSError, ValueError):
         saved = None
     if saved in LEVELS:

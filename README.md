@@ -77,11 +77,27 @@ For a window instead of a terminal, run `feiyu-desktop` — see [the desktop app
   Done. search now prefers rg and falls back to the regex implementation.
 ```
 
-Keys: `⏎` send, `\⏎` newline, `shift+tab` cycle permission mode, `esc` interrupt, `ctrl-d` quit, `↑` `↓` history.
+Keys: `⏎` send, `\⏎` newline, `@` attach a file, `shift+tab` cycle permission mode, `esc` interrupt, `ctrl-d` quit, `↑` `↓` history.
 
 The top border shows how much of the context is used and what the session has cost. Context is a percentage; models without a price configured show no amount. Markdown in replies is rendered (bold, code, lists, tables, links), except italics, because `*` is usually a glob on the command line.
 
 `esc` is safe: whatever was said stays in the history, unfinished calls get an "interrupted" result, and the conversation is not corrupted.
+
+### `@` points at a file
+
+Write `@path` anywhere in a sentence and the file is read *before* the message goes
+out, so the model does not have to spend a round trip calling `read_file` on
+something you already know it needs. `Tab` completes paths one directory at a time.
+
+```
+> rewrite the fetch helper in @feiyu/tools.py to match @feiyu/serve.py
+  read and attached: feiyu/tools.py (400/2331 lines) · feiyu/serve.py (400/920 lines)
+```
+
+`@` on a directory attaches a one-level listing. Images and binaries are not pasted
+in — the path is confirmed and the model reads them itself. Only paths that really
+exist inside the workspace are expanded, so `@property` and `user@example.com` stay
+plain text.
 
 Type `/` for command completion:
 
@@ -332,7 +348,7 @@ neither**: the persona slot is shared, and starting a bot drops the current prof
 difference between the two: a profile is a persona you switch *into the conversation you are
 having*; a bot is a persona you *start a conversation with*.
 
-The `＋` left of the composer uploads files; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
+`@path` completes in the composer exactly as it does in the terminal — the candidates come from the server, so both surfaces offer the same list. For files outside the workspace, the `＋` left of the composer uploads them; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
 
 Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown as a diff or the literal command and nothing runs until you approve. Slash commands, skills and `esc` to interrupt all work. Key management stays in the terminal (`/key add` inside `feiyu`); the desktop app cannot even read them.
 
@@ -524,7 +540,7 @@ Linux and macOS fully; the bash sandbox is Linux only. Windows works inside WSL 
 python -m unittest discover -s tests -t .
 ```
 
-761 cases, twenty seconds, no real API calls, nothing under `~/.config/feiyu/` is touched. The sandbox group skips itself without bubblewrap.
+1069 cases, twenty seconds, no real API calls, nothing under `~/.config/feiyu/` is touched. The sandbox group skips itself without bubblewrap.
 
 ## Versioning
 

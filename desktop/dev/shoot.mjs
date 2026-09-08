@@ -285,7 +285,16 @@ await cdp.call("Page.navigate", { url });
 await sleep(1200);
 const shotPath = await putImage();
 await feed(JSON.parse(JSON.stringify(SHOT).replaceAll("@@SHOT@@", shotPath)));
-await sleep(900);                     // 图是异步读回来的，等它落地
+/* 图是异步读回来的（走 invoke / fetch 再转 blob），**要等它真的落地，不能固定 sleep**。
+   原来是 `sleep(900)`，机器一忙就不够 —— 表现是下面那条断言拿到 `[]`，
+   看着像"出图坏了"，其实只是还没画完。跟 input.mjs 里那句「要等 agent 回话，
+   不是等 DOM」是同一条：**别把断言挂在一个还没发生的事情上**。 */
+for (let i = 0; i < 40; i++) {
+  const ok = await cdp.eval(`[...document.querySelectorAll("figure.shot img")]
+    .some((im) => im.getBoundingClientRect().width > 64)`);
+  if (ok) break;
+  await sleep(250);
+}
 console.log("拍了", await cdp.shot("5_image", { width: 1280, height: 1100 }));
 
 /* 图必须真的画出来了，而且只画了一次。
@@ -539,6 +548,17 @@ if (!km.warn.includes("改不了密钥") || String(km.addDisabled) !== "true" ||
 
 await cdp.eval(`document.querySelector('[data-tab="skills"]').click(); true`);
 await sleep(500);
+/* 「关掉的那份长什么样」跟工具那页一样，现场要自己铺 —— 不能指望跑夹具这台
+   机器上正好有一份技能是关着的 */
+const skillOffName = await cdp.eval(`(() => {
+  const row = [...document.querySelectorAll("#shelf-list .shelf__row")]
+    .find((r) => r.querySelector(".sw") &&
+                 r.querySelector(".sw").getAttribute("aria-checked") !== "false");
+  if (!row) return "";
+  row.querySelector(".sw").click();
+  return row.querySelector(".shelf__name").textContent;
+})()`);
+await sleep(500);
 const shelfRows = await cdp.eval(`JSON.stringify({
   tabs: [...document.querySelectorAll("#shelf-tabs .tab")].map((t) => t.textContent),
   rows: [...document.querySelectorAll("#shelf-list .shelf__row")].map((r) => ({
@@ -549,6 +569,16 @@ const shelfRows = await cdp.eval(`JSON.stringify({
   body: (document.querySelector(".shelf__body-text") || {}).textContent || "",
   sheetHidden: sheet.hidden, composerHidden: document.getElementById("composer").hidden,
 })`);
+// 开回去，别把这台机器上的配置改了
+if (skillOffName) {
+  await cdp.eval(`(() => {
+    const row = [...document.querySelectorAll("#shelf-list .shelf__row")]
+      .find((r) => r.querySelector(".shelf__name").textContent === ${JSON.stringify(skillOffName)});
+    if (row && row.querySelector(".sw").getAttribute("aria-checked") === "false")
+      row.querySelector(".sw").click();
+  })(); true`);
+  await sleep(400);
+}
 const shelf = JSON.parse(shelfRows);
 const bad = [];
 if (!shelf.rows.length) bad.push("技能一份都没列出来");
@@ -597,6 +627,19 @@ await sleep(300);
 // 工具集那一页：开关必须是看得见的方块，不是零尺寸
 await cdp.eval(`document.querySelector('[data-tab="tools"]').click(); true`);
 await sleep(400);
+/* **「关掉的那一行长什么样」这个现场要自己铺。** 原来是直接断言"总得有一条是
+   关着的"—— 而那取决于跑夹具这台机器上 enabled.json 里有什么，一份干净的配置
+   下它必红。夹具喊狼来了几次之后就没人看它了。
+   自己关一条、断言完再开回去，跟评测那边「每题在自己的临时目录里从头铺现场」
+   是同一条规矩。 */
+const swOffName = await cdp.eval(`(() => {
+  const row = [...document.querySelectorAll("#shelf-list .shelf__row")]
+    .find((r) => r.dataset.on !== "0" && !r.querySelector(".sw[disabled]"));
+  if (!row) return "";
+  row.querySelector(".sw").click();
+  return row.querySelector(".shelf__name").textContent;
+})()`);
+await sleep(500);
 console.log("拍了", await cdp.shot("7_shelf_tools", { width: 1280, height: 900 }));
 const sw = await cdp.eval(`JSON.stringify((() => {
   const s = document.querySelector("#shelf-list .sw");
@@ -608,6 +651,15 @@ const sw = await cdp.eval(`JSON.stringify((() => {
   return { w: Math.round(r.width), h: Math.round(r.height), off, locked };
 })())`);
 const swBox = JSON.parse(sw);
+// 关回去，别把这台机器上的配置改了
+if (swOffName) {
+  await cdp.eval(`(() => {
+    const row = [...document.querySelectorAll("#shelf-list .shelf__row")]
+      .find((r) => r.querySelector(".shelf__name").textContent === ${JSON.stringify(swOffName)});
+    if (row && row.dataset.on === "0") row.querySelector(".sw").click();
+  })(); true`);
+  await sleep(400);
+}
 if (swBox.w < 20 || swBox.h < 12 || !swBox.locked || !swBox.off.length) {
   console.error("工具集那一页不对（开关要看得见、要有关掉的和锁住的）：", sw);
   process.exitCode = 1;
@@ -631,7 +683,10 @@ const souls = JSON.parse(await cdp.eval(`JSON.stringify({
   soul: (document.querySelector(".soul") || {}).value || "",
   acts: [...document.querySelectorAll(".acts .act")].map((b) => b.textContent),
 })`));
-if (souls.rows.length < 3 || souls.switches !== 0 || !souls.soul || souls.acts.length !== 3) {
+/* 清单至少要有「一份档案 + 新建行」两条。**不能要求三条** —— 那等于要求
+   跑夹具这台机器上正好有两份档案，跟上面那条开关是同一种毛病。
+   「增删改」那一段本来就会自己建一份，真正的多份场景在那儿验。 */
+if (souls.rows.length < 2 || souls.switches !== 0 || !souls.soul || souls.acts.length !== 3) {
   console.error("档案那一页不对（该有清单+新建行、没有开关、有正文和三个按钮）：",
                 JSON.stringify(souls));
   process.exitCode = 1;

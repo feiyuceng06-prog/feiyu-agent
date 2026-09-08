@@ -1,12 +1,20 @@
 """记住 agent 看过的文件版本，写之前对一下，别盖掉它没看见的改动
 
-顺带放一个 `private_dir()`：feiyu 自己那几个目录（配置、存盘、日志、记忆）
-统一走它建，理由见那个函数的注释
+顺带放两样跟"文件系统本身"有关、别处都要用的东西：`private_dir()`（feiyu
+自己那几个目录统一走它建，理由见那个函数）和 `IGNORE_DIRS`。
+
+`IGNORE_DIRS` 放在这儿而不是 `tools.py`，是因为 `ui.py` 的 `@` 补全也要用它，
+而 ui 不该为了一个集合把整个 tools 拉进来。
 """
 
 import hashlib
 import os
+import stat as stat_mod
 from pathlib import Path
+
+# 谁都不想走进去的目录：列文件、搜内容、`@` 补全共用一份
+IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+               ".mypy_cache", "dist", "build"}
 
 
 def private_dir(path) -> None:
@@ -29,6 +37,32 @@ def private_dir(path) -> None:
             os.chmod(target, 0o700)
         except OSError:
             pass    # Windows 上是空操作，只读文件系统上也不该因此崩
+
+
+def odd_kind(path) -> str | None:
+    """这个路径不是一份普通文件时说清它是什么，否则 None
+
+    **命名管道会把整个进程挂死。** 打开一个没有另一端的 FIFO 时，read 和 write
+    都会一直阻塞：界面上一个字都没有，`STREAM_TIMEOUT` 也不会响（那条超时管的是
+    模型的流，这儿根本还没发出去）。实测 `read_file` 和 `write_file` 各能这么挂住
+    —— 跟 0.58.0 那次「为什么卡死了」是同一种毛病：**查不出来才是那个 bug**。
+    设备节点和 socket 同理。
+
+    `os.stat` 跟着软链走，所以指向 FIFO 的软链也认得出来。
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return None                 # 不在 / 权限不足，那是另一条判断管的事
+    if stat_mod.S_ISDIR(mode):
+        return "目录"
+    if stat_mod.S_ISREG(mode):
+        return None
+    if stat_mod.S_ISFIFO(mode):
+        return "命名管道"
+    if stat_mod.S_ISSOCK(mode):
+        return "socket"
+    return "设备文件"
 
 
 def _mark(path: Path) -> tuple[int, int]:
