@@ -3279,3 +3279,59 @@ set -e; cd sub; false →  同上
 我差点当成"这条用例没用"。实际是 `sed` 的模式压根没匹配上，改动没落地。
 **回退验证本身也要验证它真的改到了东西**，不然它给的是假的安心。
 后来改成 Python 里 `assert s.count(old) == 1` 再替换，立刻就红了。
+
+## 0.70.0：接进 Terminal-Bench（Harbor）
+
+SWE-bench Verified 那把尺子饱和了（45/46 = 97.8%，全行业都在 96-97%），
+量不出任何改动的好坏。Terminal-Bench 2.0 最强的才 60-83%，有区分度；
+而且它测的正好是 **0.69.0 那个持久 shell**——SWE-bench 全是"改 Python 文件让测试变绿"，
+几乎用不到 `export` / `source activate` / 管进程，那个改动在那儿一分贡献也看不出来。
+
+`evals/tbench.py` 是一个 Harbor `BaseAgent` 子类，用
+`-a evals.tbench:FeiyuAgent` 挂进去。
+
+### 为什么是「装进容器」，不是「把命令送进容器」
+
+SWE-bench 那条路（`swedocker.py`）是 feiyu 跑在宿主机、**只把 bash 送进容器**，
+成立的前提是 `start()` 把工作区 bind-mount 进去，两边**看同一份文件**。
+
+**Harbor 一个 volume 都不挂**（compose 模板里没有 `volumes:`）。照搬的话
+`read_file` / `write_file` / `search` 在宿主机上对着一个**空目录**操作，
+而 bash 在容器里改真文件——两边不是一个世界，**而且没有任何报错**。
+
+所以反过来：`setup()` 把 feiyu 传进容器、装依赖、写配置，`run()` 在容器里本地跑。
+这也正是 Harbor 自己的模型（claude-code 那些官方适配器都这么干）。
+
+三条代价写在文件开头：要网（默认 `NetworkMode.PUBLIC`，断网的题 `setup()` 报
+`NotUsable`，**跟"没解决"分开**，不进解决率的分母）；API key 要进容器（0600，
+但容器里的 bash 就是模型自己，**拿额度有限的 key 跑**）；容器里没 bwrap，
+feiyu 自己的沙箱是关的（无所谓，容器本身就是沙箱）。
+
+### 先验判分，再花钱
+
+跟 SWE-bench 那边 `-p gold` 同一个套路，两条都**不花钱**：
+
+    harbor run -d terminal-bench@2.0 -a oracle -i <题名>   # 参考答案 → 1.0 ✓
+    harbor run -d terminal-bench@2.0 -a nop    -i <题名>   # 什么都不做 → 0.0 ✓
+
+两条都对了才轮到 feiyu。首跑 `openssl-selfsigned-cert`：**reward 1.0**，
+5 分 3 秒，14.0 万 token，$0.0106。
+
+### 路上踩的
+
+- **机器上没有 `docker compose`。** Docker 29.7.2 装着，但 compose 是独立插件
+  （Arch 上的 `docker-compose` 包）。没有它 89 道题在**起容器阶段**全挂，
+  连 oracle 都跑不了，而报错是 `unknown flag: --project-name`，看不出是缺件。
+- **我猜了三个名字，三个都错**：`environment.no_network`（真名是私有的
+  `_network_disabled`，已改走公开的 `network_policy.network_mode`）、
+  `-p` 传题面（feiyu 的题面是**位置参数**）、`run_end` 里的 `round`（没这个字段）。
+  自己明明定了「不猜 API」，`exec` / `ExecResult` / `AgentContext` 全是翻源码确认的，
+  偏偏这三处顺手写了看着合理的名字。**顺手的那几个才是会错的。**
+- 结果在 `agent_result.metadata`，**不是 `agent_context`**。
+
+### 成本实测
+
+`openssl-selfsigned-cert` 花了 $0.0106（≈¥0.075），比按 SWE-bench 外推的
+¥0.19–0.29 便宜不少——这题简单，别拿它当全量的单价。
+另外 feiyu 自己记 ¥0.0548，账面扣 ¥0.075，**差 37%**，一道题的样本说明不了什么，
+但跑全量之前值得回头对一次。
