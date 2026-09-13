@@ -45,6 +45,12 @@ MODEL_NAME = "bench"                   # 容器里那条配置叫什么，`-m` �
 SETUP_TIMEOUT = 900
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_ROUNDS = 60
+# 每道题最多花这么多钱（元）feiyu 自己的 `--budget` 闸
+#
+# **比墙钟超时管用。** 十道冒烟里有五道撞了 900 秒超时，钱照烧但一分记录没有
+# （超时是被 SIGKILL，trace 的 run_end 根本没写）。按钱收口的话，跑飞的那道
+# 自己会停下来、而且会把停下来这件事记进历史。
+DEFAULT_BUDGET = 0.5
 # 最低 Python 跟 pyproject 一致 比这个老的镜像直接说不行，别让它跑一半炸
 MIN_PY = (3, 10)
 
@@ -95,11 +101,16 @@ class FeiyuAgent(BaseAgent):
                 "这道题的容器断网，而 feiyu 要在里面 pip install 才能跑 "
                 "（装不进去跟「没解决」是两回事，别把它算进解决率的分母）")
 
-        got = await self._sh(environment, "python3 -c "
-                             "'import sys;print(\"%d.%d\"%sys.version_info[:2])'")
+        got = await self._probe_python(environment)
         if got.return_code != 0:
-            raise NotUsable("容器里没有 python3，feiyu 装不进去：%s"
-                            % (got.stderr or "").strip()[:200])
+            # 镜像里压根没有解释器 —— feiyu 是个 Python 程序，装运行时跟
+            # claude-code 要 node 是一回事，Harbor 的官方适配器也都在 setup() 里装
+            if not await self._install_python(environment):
+                raise NotUsable("容器里没有 python3，也装不上：%s"
+                                % (got.stderr or "").strip()[:200])
+            got = await self._probe_python(environment)
+            if got.return_code != 0:
+                raise NotUsable("装完 python3 还是跑不起来")
         try:
             ver = tuple(int(x) for x in (got.stdout or "").strip().split("."))
         except ValueError:
@@ -110,16 +121,51 @@ class FeiyuAgent(BaseAgent):
 
         await environment.upload_dir(_feiyu_src(), REMOTE_ROOT + "/feiyu")
 
-        # **要 openai 和 prompt_toolkit。** 这两个是硬的：providers 里
-        # `from openai import OpenAI`，ui 里 `get_cwidth` 没有兜底
-        got = await self._sh(environment,
-                             "python3 -m pip install --quiet --no-input "
-                             "openai prompt_toolkit", timeout=SETUP_TIMEOUT)
+        got = await self._pip_install(environment, "openai prompt_toolkit")
         if got.return_code != 0:
             raise NotUsable("容器里装依赖失败：%s"
                             % ((got.stderr or got.stdout or "").strip()[-400:]))
 
         await self._write_model_config(environment)
+
+    async def _probe_python(self, environment):
+        return await self._sh(
+            environment,
+            "python3 -c 'import sys;print(\"%d.%d\"%sys.version_info[:2])'")
+
+    async def _install_python(self, environment) -> bool:
+        """镜像里没有 python3 就用它自己的包管理器装一个
+
+        十道冒烟题里有两道（`adaptive-rejection-sampler` / `sqlite-with-gcov`）
+        是这种，占两成——不处理的话两成的题根本够不着。
+        """
+        for probe, install in (
+                ("apt-get", "apt-get update -qq && apt-get install -y -qq python3 python3-pip"),
+                ("apk", "apk add --no-cache python3 py3-pip"),
+                ("dnf", "dnf install -y -q python3 python3-pip"),
+                ("yum", "yum install -y -q python3 python3-pip"),
+        ):
+            if (await self._sh(environment, "command -v %s" % probe)).return_code != 0:
+                continue
+            got = await self._sh(environment, install, timeout=SETUP_TIMEOUT)
+            if got.return_code == 0:
+                return True
+            self.logger.warning("用 %s 装 python3 没成：%s", probe,
+                                (got.stderr or "")[-200:])
+        return False
+
+    async def _pip_install(self, environment, packages: str):
+        """**PEP 668 那道闸要绕。** Debian 12+ 的镜像上 `pip install` 直接拒绝
+        （externally-managed-environment），十道里有两道栽在这儿。
+        `--break-system-packages` 是官方给的出口，但老 pip 不认这个参数，
+        所以认不认都试一遍。容器跑完就删，弄坏系统 python 也无所谓。
+        """
+        base = "python3 -m pip install --quiet --no-input "
+        got = await self._sh(environment, base + "--break-system-packages " + packages,
+                             timeout=SETUP_TIMEOUT)
+        if got.return_code == 0:
+            return got
+        return await self._sh(environment, base + packages, timeout=SETUP_TIMEOUT)
 
     async def _write_model_config(self, environment) -> None:
         """把一条模型配置写进容器
@@ -176,6 +222,7 @@ class FeiyuAgent(BaseAgent):
         import os
         rounds = int(os.environ.get("FEIYU_BENCH_ROUNDS") or DEFAULT_MAX_ROUNDS)
         timeout = int(os.environ.get("FEIYU_BENCH_TIMEOUT") or DEFAULT_TIMEOUT)
+        budget = float(os.environ.get("FEIYU_BENCH_BUDGET") or DEFAULT_BUDGET)
 
         # 题面走文件不走命令行：里头有换行、引号、反引号，拼进命令行迟早出事
         await self._sh(environment,
@@ -190,8 +237,9 @@ class FeiyuAgent(BaseAgent):
             "NO_COLOR": "1",
         }
         # 题面是**位置参数**，没有 -p 这个开关（`feiyu [选项] [prompt ...]`）
-        cmd = ("python3 -m feiyu --mode auto -m %s --max-rounds %d -- \"$(cat /tmp/feiyu-task.txt)\""
-               % (shlex.quote(MODEL_NAME), rounds))
+        cmd = ("python3 -m feiyu --mode auto -m %s --max-rounds %d --budget %s "
+               "-- \"$(cat /tmp/feiyu-task.txt)\""
+               % (shlex.quote(MODEL_NAME), rounds, shlex.quote("%g" % budget)))
         got = await environment.exec(cmd, timeout_sec=timeout, env=env)
         self.logger.info("feiyu 退出码 %s", got.return_code)
         if got.stdout:
@@ -251,3 +299,13 @@ class FeiyuAgent(BaseAgent):
 # `agent_result.metadata` 是这边回填的 token / 花费。**不是 `agent_context`**。
 #
 # 机器上要有 `docker compose`（Arch 上是 `docker-compose` 包，Docker 本体不带它）。
+#
+# **`FEIYU_BENCH_TIMEOUT` 管不住 Harbor 自己那道闸。** Harbor 对 agent 另有一个
+# 执行超时（题里带的，默认 900 秒），到点直接 `AgentTimeoutError`，
+# 跟这边 `exec` 的 timeout 是两回事。十道冒烟里有四道栽在它上面，
+# 要放宽得在命令行上给：
+#
+#     harbor run ... --agent-timeout-multiplier 2.0
+#
+# **超时的题算「撞上限」，不算「没解决」**（跟 `evals/report.py` 里那套分类一个道理）
+# —— 量出来的是我们给的上限，不是 agent 的能力。

@@ -1,0 +1,12 @@
+# Terminal-Bench 2.0 的 10 道冒烟子集
+# 89 道按题名排序后等距取，**不随机** —— 换台机器、换个时间都是这 10 道
+adaptive-rejection-sampler
+chess-best-move
+custom-memory-heap-crash
+filter-js-from-html
+headless-terminal
+make-doom-for-mips
+nginx-request-logging
+protein-assembly
+regex-chess
+sqlite-with-gcov
