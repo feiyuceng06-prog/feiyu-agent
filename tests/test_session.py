@@ -475,3 +475,27 @@ class TestBrokenFiles(unittest.TestCase):
     def test_content_不是字符串时不拿它当标题(self):
         self.put("20260101-000001.json", '{"messages":[{"role":"user","content":{"x":1}}]}')
         self.assertEqual(session.listing(self.ws)[0]["title"], "（没有标题）")
+
+
+class TestDescribeBroken(unittest.TestCase):
+    """`describe()` 也要挡住坏数据 —— 它比 `listing()` 更疼
+
+    `listing()` 坏了是侧边栏空一块；`describe()` 在**启动路径**上
+    （`__main__` 里 `--resume` 和「这个目录有上次的对话」那两句都不带兜底），
+    一抛 TypeError 就是 **feiyu 在这个目录里根本起不来**，连 /clear 都够不着。
+    `_num()` 当初就是为这条写的，只是漏了这一处。
+    """
+
+    def probe(self, data):
+        text = session.describe(data)
+        self.assertIsInstance(text, str)
+        return text
+
+    def test_saved_at_是什么都不崩(self):
+        for bad in ("不是数", None, True, [], {}, 1e300, -1e300, float("nan")):
+            with self.subTest(saved_at=bad):
+                self.probe({"model": "m", "messages": [], "saved_at": bad})
+
+    def test_model_和_messages_的类型也兜住(self):
+        self.assertIn("? ", self.probe({"model": 7, "messages": "坏了"}))
+        self.assertIn("0 条消息", self.probe({"model": 7, "messages": "坏了"}))

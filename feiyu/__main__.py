@@ -14,7 +14,8 @@ from . import credits, enabled, keys, memory, permissions, pricing, profiles, pr
 from . import sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
-from .agent import CONTEXT_FILES, MODE_ORDER, MODES, STYLES, Feiyu, find_score
+from .agent import (CONTEXT_FILES, MAX_ROUNDS, MODE_ORDER, MODES, STYLES, Feiyu,
+                    find_score)
 from .providers import OpenAICompatBackend
 
 
@@ -50,6 +51,23 @@ def main() -> int:
         metavar="文件",
         default=None,
         help="跑完按这个 JSON schema 输出结果 只有 JSON 进 stdout，其余进 stderr ",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        metavar="N",
+        help="连续调多少轮工具之后停下来问一句（默认 %d，0 是不限） "
+             "非交互场景没人能回答，到了就是硬停 —— 跑 benchmark 要调大 "
+             "也可以写进项目约定文件：单起一行 `max-rounds: N` " % MAX_ROUNDS,
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        metavar="元",
+        help="这次任务最多花多少钱，到了就停（0 是不限） 只有填过价格的模型算得出来 "
+             "也可以写进项目约定文件：单起一行 `budget: 5` ",
     )
     parser.add_argument(
         "--review",
@@ -98,8 +116,20 @@ def main() -> int:
     except (ValueError, RuntimeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
+    # **这两个要装在第一个 return 上面。** main() 有三条路径（一次性任务 / 管道 /
+    # 交互），前两条都是 return —— 0.11.0 把 agent.approve 装在 TUI 那一段里，
+    # 结果 `feiyu "改一下 x"` 每个写操作都被当成"用户拒绝"，README 演示的用法根本改不动文件。
+    # `is not None` 不是 `if`：0 现在是"不限"这个明确的选择，用真值判的话
+    # `--max-rounds 0` 会被当成没给，约定文件里的数原样留着
+    if args.max_rounds is not None:
+        agent.max_rounds = args.max_rounds
+        agent.limit_cli.add("max_rounds")
+    if args.budget is not None:
+        agent.budget = args.budget
+        agent.limit_cli.add("budget")
     tracer.write("run_start", version=__version__, model=agent.model,
                  name=agent.name, mode=agent.mode, verify=agent.verify or None,
+                 max_rounds=agent.max_rounds, budget=agent.budget or None,
                  task=" ".join(args.prompt) if args.prompt else None)
 
     if args.serve:
@@ -286,6 +316,8 @@ def main() -> int:
                 print(_allow(arg))
             elif cmd == "/style":
                 print(_style(agent, arg))
+            elif cmd == "/effort":
+                print(_effort(agent, arg))
             elif cmd == "/theme":
                 print(_theme(arg))
             elif cmd == "/verify":
@@ -655,6 +687,66 @@ def _style(agent: Feiyu, arg: str) -> str:
     return "\n".join(rows)
 
 
+# 给人看的档位名 —— **接口认的是英文那几个**，中文只在界面上出现
+EFFORT_LABEL = {"low": "低", "medium": "中", "high": "高",
+                "xhigh": "极高", "max": "最高"}
+
+
+def _effort(agent: Feiyu, arg: str) -> str:
+    """看或改推理强度 只对认这个参数的后端有意义 """
+    from .providers import EFFORTS
+    b = agent.backend
+    if b is None:
+        return ui.error("还没有可用的模型 ")
+    arg = arg.strip().lower()
+    # 中文也收：界面上显示的是中文，用户多半照着打
+    for key, label in EFFORT_LABEL.items():
+        if arg == label:
+            arg = key
+            break
+    if arg in ("on", "off", "开", "关"):
+        b.thinking_on = arg in ("on", "开")
+        note = ""
+        # **两个方向都要挡。** 改档位时会挡一次（下面），但"当前已经是 xhigh，
+        # 现在把思考关掉"走的是这条路 —— 不挡的话下一次请求直接 400，
+        # 而那时候用户早就忘了自己关过思考
+        if not b.thinking_on and getattr(b, "effort", "") in ("xhigh", "max"):
+            b.effort = "high"
+            note = " 顺带把强度降到 high —— xhigh / max 配上「不思考」接口会 400 "
+        return ui.notice("思考已%s（这一段对话内有效）%s"
+                         % ("打开" if b.thinking_on else "关掉", note))
+    if arg:
+        if arg not in EFFORTS:
+            return ui.error("没有 %s 这一档 anthropic 认的是：%s"
+                            % (arg, "、".join("%s（%s）" % (k, EFFORT_LABEL[k])
+                                              for k in EFFORTS)))
+        # 关掉思考只在 high 及以下能用：xhigh / max 配 disabled 会被接口 400
+        if not b.thinking_on and arg in ("xhigh", "max"):
+            b.thinking_on = True
+            note = " 顺带把思考打开了 —— xhigh / max 配上「不思考」接口会 400 "
+        else:
+            note = ""
+        b.effort = arg
+        return ui.notice("推理强度已切到 %s（%s）%s 只影响这一段对话；"
+                         "要长期改就 /key 重加一次 " % (arg, EFFORT_LABEL[arg], note))
+    rows = ["   思考：" + ("开" if getattr(b, "thinking_on", True) else "关"), ""]
+    now = getattr(b, "effort", "")
+    for key in EFFORTS:
+        tick = ui.paint("brown", " ●") if key == now else "  "
+        name = (ui.bold(key.ljust(8)) if key == now
+                else ui.paint("grey", key.ljust(8)))
+        rows.append("   " + tick + " " + name + ui.paint("grey", EFFORT_LABEL[key]))
+    if not now:
+        rows.append("")
+        rows.append(ui.paint("grey", "   （这条配置没设，按接口自己的默认走）"))
+    rows.append("")
+    rows.append(ui.notice(
+        "/effort <档位> 切换，/effort 关 不思考 越高越肯想、也越贵 "
+        "编程和 agent 类任务 xhigh 通常最划算 "
+        "openai 兼容的接口多数不认这个参数，填了可能直接报错 "))
+    return "\n".join(rows)
+
+
 def _mcp(agent: Feiyu) -> str:
     reg = agent.toolbox.mcp
     if not reg.servers and not reg.errors:
@@ -759,6 +851,7 @@ def _finish(agent: Feiyu, tracer, code: int) -> int:
     # 而他已经没有任何句柄能找到它们了
     agent.toolbox.lsp.close()
     agent.toolbox.mcp.close()
+    agent.toolbox.shell_reset()     # /tmp 里那份 shell 状态，里头是整份环境
     left = agent.toolbox.jobs.running()
     if left:
         agent.toolbox.jobs.kill_all()

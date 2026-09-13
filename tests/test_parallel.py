@@ -265,3 +265,61 @@ class TestAllowAll(Base):
         quiet(self.agent.send, "抓两个")
         self.assertIn("Fetch(*)", permissions.load()["allow"])
         self.assertEqual(self.ran(b), ["ok", "ok"])
+
+
+class TestImages(Base):
+    """并行那条路不能把图弄丢
+
+    `read_file` 在 PARALLEL_SAFE 里，所以"读一张图 + 读一个文件"就走并行 ——
+    而图是挂在 `ToolResult.image` 上、由后端另起一条消息送出去的。
+    原来 `_run_parallel` 拼 `ToolOutput` 时没抄 `image`：模型收到的只有
+    「（下面是 a.png，…）」这句话，图根本没发出去。同一次 read_file，
+    看不看得见图取决于它旁边有没有别的调用 —— 而这个**没有任何报错**。
+    """
+
+    def images(self, backend):
+        """后端为了送图另起的那几条消息 """
+        return [m for m in backend.messages
+                if m["role"] == "user" and isinstance(m.get("content"), list)]
+
+    def one_image(self, name, args):
+        if args.get("path", "").endswith(".png"):
+            return ToolResult("（下面是 %s）" % args["path"], summary="看图",
+                              image=("image/png", "AAAA"))
+        return ToolResult("文本", summary="读了")
+
+    def test_并行批里的图要送到模型手上(self):
+        b = self.use([call("c1", "read_file", path="a.png"),
+                      call("c2", "read_file", path="b.txt")])
+        self.agent.toolbox.run = self.one_image
+        quiet(self.agent.send, "看这两个")
+        self.assertEqual(len(self.images(b)), 1, "并行那一批把图丢了")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_串行和并行送出去的图一样多(self):
+        """同一次读图，旁边多一个只读调用就看不见图了 —— 那是最难查的一种 """
+        solo = self.use([call("c1", "read_file", path="a.png")])
+        self.agent.toolbox.run = self.one_image
+        quiet(self.agent.send, "看一张")
+        alone = len(self.images(solo))
+        self.setUp()
+        pair = self.use([call("c1", "read_file", path="a.png"),
+                         call("c2", "read_file", path="b.txt")])
+        self.agent.toolbox.run = self.one_image
+        quiet(self.agent.send, "看一张加一个文件")
+        self.assertEqual(len(self.images(pair)), alone)
+
+    def test_后台命令结束的通知不该把图顶掉(self):
+        """`_note_jobs` / `_after_tools` 会重建最后那条结果，字段要抄全 """
+        from feiyu.providers import ToolOutput
+
+        outputs = [ToolOutput(id="c1", content="（下面是 a.png）",
+                              image=("image/png", "AAAA"))]
+
+        class Done:
+            id, command, code = 7, "true", 0
+
+        self.agent.toolbox.jobs.finished_since = lambda: [Done()]
+        self.agent._note_jobs(outputs)
+        self.assertIn("后台命令已经结束", outputs[-1].content)
+        self.assertEqual(outputs[-1].image, ("image/png", "AAAA"))

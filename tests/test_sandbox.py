@@ -206,3 +206,57 @@ class TestStrict(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExecWrapper(unittest.TestCase):
+    """`FEIYU_EXEC_WRAPPER`：把命令送到别处执行的钩子
+
+    SWE-bench 那条路靠它把 bash 送进实例容器 —— 实例镜像里 python 是 3.6~3.9，
+    agent 本身跑不进去，只有命令要进去。**它不是安全机制**，开着的时候
+    「写被关进工作区」不成立，所以 `effective()` 要照实说。
+    """
+
+    def setUp(self):
+        before = os.environ.get("FEIYU_EXEC_WRAPPER")
+        self.addCleanup(lambda: os.environ.__setitem__("FEIYU_EXEC_WRAPPER", before)
+                        if before is not None
+                        else os.environ.pop("FEIYU_EXEC_WRAPPER", None))
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_给了就整条走它_不叠_bwrap(self):
+        os.environ["FEIYU_EXEC_WRAPPER"] = "/bin/myexec --flag"
+        got = sandbox.wrap("ls -la", workspace=self.root, cwd=self.root)
+        self.assertEqual(got, ["/bin/myexec", "--flag", str(self.root), "ls -la"])
+        self.assertNotIn("bwrap", got)
+
+    def test_cwd_是第一个参数_命令是第二个(self):
+        """容器那边 `docker exec -w "$1" … bash -lc "$2"` 就是照这个约定接的 """
+        os.environ["FEIYU_EXEC_WRAPPER"] = "/bin/myexec"
+        sub = self.root / "子目录"
+        got = sandbox.wrap("echo 你好", workspace=self.root, cwd=sub)
+        self.assertEqual(got[1], str(sub))
+        self.assertEqual(got[2], "echo 你好")
+
+    def test_带空格的路径要能拆对(self):
+        os.environ["FEIYU_EXEC_WRAPPER"] = '"/tmp/有 空格/exec.sh"'
+        got = sandbox.wrap("ls", workspace=self.root, cwd=self.root)
+        self.assertEqual(got[0], "/tmp/有 空格/exec.sh")
+
+    def test_effective_要照实说不沙箱(self):
+        os.environ["FEIYU_EXEC_WRAPPER"] = "/bin/myexec"
+        mode, why = sandbox.effective()
+        self.assertEqual(mode, "off")
+        self.assertIn("外部执行器", why)
+
+    def test_没设就照旧走沙箱那条路(self):
+        os.environ.pop("FEIYU_EXEC_WRAPPER", None)
+        got = sandbox.wrap("ls", workspace=self.root, cwd=self.root)
+        # 装了 bwrap 就该是 bwrap，没装就是 None —— 两种都不该是外挂执行器
+        self.assertTrue(got is None or got[0] == "bwrap", got)
+
+    def test_空串当成没设(self):
+        os.environ["FEIYU_EXEC_WRAPPER"] = "   "
+        got = sandbox.wrap("ls", workspace=self.root, cwd=self.root)
+        self.assertTrue(got is None or got[0] == "bwrap", got)

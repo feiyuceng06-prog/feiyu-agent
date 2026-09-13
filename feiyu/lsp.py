@@ -35,6 +35,12 @@ FIRST_TIMEOUT = 45
 # 实测 pyright 0 秒时 1 处、0.5 秒后 3 处 等一下再问，漏引用比慢一秒糟得多
 WARMUP = 1.0
 MAX_RESULTS = 100
+# 推送式诊断最多等这么久 服务器分析要一点时间，但这是**卡在写文件之后**的，
+# 等太久每次改文件都要顿一下；等太短就收不到 实测 pyright 半秒够
+# 一个文件最多报几条 前几条通常就够定位了，全报会把工具结果撑爆
+# 骨架最多列几项 大文件（本仓库 tools.py 是 147 项）全列也就几百行，
+# 但几万行的文件要封顶，否则骨架自己就成了那个撑爆上下文的东西
+MAX_OUTLINE = 200
 
 
 def which(command: str) -> str | None:
@@ -79,6 +85,11 @@ class Client:
         self.buf = b""
         self.seq = 0
         self.opened: dict[str, int] = {}     # uri -> version
+        # 服务器推过来的诊断 uri -> [诊断]
+        # **原来这些是被丢掉的**：`request()` 的循环只认「服务器的请求」和
+        # 「自己那条回复」，而 publishDiagnostics 有 method 没有 id，两个分支
+        # 都不match，被 while 吃掉。改完代码有没有语法错、用没用错名字，
+        # 本来这一刻就知道，却要等模型自己去跑一遍测试才发现
         self.warm = False
         self._initialize()
 
@@ -136,6 +147,12 @@ class Client:
                 if "id" in msg and "method" in msg:
                     # 服务器反过来问我们（注册能力、要配置）：一律回空，别让它等
                     self._send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+                elif "method" in msg:
+                    # 通知（有 method 没有 id）：诊断、进度、日志 收下**丢掉**。
+                    # 要紧的是把它从管道里读走 —— 不读的话它一直卡在这个 while 里，
+                    # 自己那条回复永远等不到（0.68.0 之前就是这样，两个分支都不 match，
+                    # 被 while True 吃掉）
+                    pass
                 elif msg.get("id") == mine:
                     if "error" in msg:
                         raise RuntimeError(str(msg["error"].get("message") or msg["error"]))
@@ -154,6 +171,10 @@ class Client:
             "capabilities": {"textDocument": {
                 "definition": {"linkSupport": False},
                 "references": {},
+                # 声明了才会推给我们；`diagnostic` 那条是 3.17 的拉取式
+                "publishDiagnostics": {},
+                "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                "diagnostic": {"dynamicRegistration": False},
             }},
         }, timeout=FIRST_TIMEOUT)
         self.notify("initialized", {})
@@ -198,6 +219,60 @@ class Client:
                               "column": rng["start"]["character"]})
         return spots
 
+    SYMBOL_KIND = {5: "class", 6: "method", 12: "function", 13: "变量", 14: "常量",
+                   11: "interface", 23: "struct", 10: "enum", 8: "field", 9: "构造"}
+    # 骨架里只留"结构"。**参数和局部变量一律不要** —— pyright 把它们也报成
+    # symbol（kind 13），一个几千行的文件里那是几百条噪音，正好淹掉要找的东西
+    OUTLINE_KINDS = frozenset({5, 6, 12, 11, 23, 10, 9})
+    # 模块层的常量留着（配置、上限这类是找代码时的路标），嵌套里的不留
+    OUTLINE_TOP_ONLY = frozenset({13, 14, 8})
+
+    def outline(self, path: Path, text: str) -> list[dict]:
+        """文件的骨架：类、函数、方法 + 它们在第几行
+
+        **一个几千行的文件，整份读进来是上万 token，而且每一轮都要重发。**
+        骨架只有几十行，看完再用 read_file 的 offset/limit 读那一段 ——
+        这正是系统提示里"大文件先定位再读"那条一直缺的工具。
+
+        两种返回形状都认：新的 `DocumentSymbol`（带 children 的树）和
+        老的 `SymbolInformation`（拍平的、位置在 location 里）。
+        """
+        self.open(path, text)
+        got = self.request("textDocument/documentSymbol",
+                           {"textDocument": {"uri": _uri(path)}})
+        if not isinstance(got, list):
+            return []
+        out: list[dict] = []
+
+        def walk(items, depth):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                rng = item.get("selectionRange") or item.get("range")
+                if rng is None:
+                    rng = ((item.get("location") or {}).get("range") or {})
+                line = ((rng or {}).get("start") or {}).get("line")
+                if line is None:
+                    continue
+                kind = item.get("kind")
+                keep = kind in self.OUTLINE_KINDS or (
+                    depth == 0 and kind in self.OUTLINE_TOP_ONLY)
+                if keep:
+                    out.append({
+                        "name": str(item.get("name") or ""),
+                        "kind": self.SYMBOL_KIND.get(kind, ""),
+                        "line": int(line) + 1,      # 给人和模型看的行号从 1 起
+                        "depth": depth,
+                    })
+                kids = item.get("children")
+                if isinstance(kids, list):
+                    # 层级按**留下来的**那些算，不然过滤完缩进会是错的
+                    walk(kids, depth + 1 if keep else depth)
+
+        walk(got, 0)
+        out.sort(key=lambda x: x["line"])
+        return out
+
     def close(self) -> None:
         try:
             self.proc.kill()
@@ -226,6 +301,60 @@ class Pool:
                 client = Client(argv, self.root)
                 self.clients[key] = client
             return client
+
+    SYMBOL_KIND = {5: "class", 6: "method", 12: "function", 13: "变量", 14: "常量",
+                   11: "interface", 23: "struct", 10: "enum", 8: "field", 9: "构造"}
+    # 骨架里只留"结构"。**参数和局部变量一律不要** —— pyright 把它们也报成
+    # symbol（kind 13），一个几千行的文件里那是几百条噪音，正好淹掉要找的东西
+    OUTLINE_KINDS = frozenset({5, 6, 12, 11, 23, 10, 9})
+    # 模块层的常量留着（配置、上限这类是找代码时的路标），嵌套里的不留
+    OUTLINE_TOP_ONLY = frozenset({13, 14, 8})
+
+    def outline(self, path: Path, text: str) -> list[dict]:
+        """文件的骨架：类、函数、方法 + 它们在第几行
+
+        **一个几千行的文件，整份读进来是上万 token，而且每一轮都要重发。**
+        骨架只有几十行，看完再用 read_file 的 offset/limit 读那一段 ——
+        这正是系统提示里"大文件先定位再读"那条一直缺的工具。
+
+        两种返回形状都认：新的 `DocumentSymbol`（带 children 的树）和
+        老的 `SymbolInformation`（拍平的、位置在 location 里）。
+        """
+        self.open(path, text)
+        got = self.request("textDocument/documentSymbol",
+                           {"textDocument": {"uri": _uri(path)}})
+        if not isinstance(got, list):
+            return []
+        out: list[dict] = []
+
+        def walk(items, depth):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                rng = item.get("selectionRange") or item.get("range")
+                if rng is None:
+                    rng = ((item.get("location") or {}).get("range") or {})
+                line = ((rng or {}).get("start") or {}).get("line")
+                if line is None:
+                    continue
+                kind = item.get("kind")
+                keep = kind in self.OUTLINE_KINDS or (
+                    depth == 0 and kind in self.OUTLINE_TOP_ONLY)
+                if keep:
+                    out.append({
+                        "name": str(item.get("name") or ""),
+                        "kind": self.SYMBOL_KIND.get(kind, ""),
+                        "line": int(line) + 1,      # 给人和模型看的行号从 1 起
+                        "depth": depth,
+                    })
+                kids = item.get("children")
+                if isinstance(kids, list):
+                    # 层级按**留下来的**那些算，不然过滤完缩进会是错的
+                    walk(kids, depth + 1 if keep else depth)
+
+        walk(got, 0)
+        out.sort(key=lambda x: x["line"])
+        return out
 
     def close(self) -> None:
         for client in self.clients.values():

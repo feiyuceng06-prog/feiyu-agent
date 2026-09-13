@@ -102,6 +102,34 @@ class TestRun(Base):
         self.assertEqual(report, "在 a.py:2")
         self.assertTrue(any("search" in text for _, text in lines))
 
+    def test_读到图要送给子模型_不能只送那句说明(self):
+        """**这是第三处同样的坑。** 主 agent 那两处（`_run_parallel`、`_note_jobs`）
+        已经修过：`read_file` 读图时 content 只是「（下面是 a.png，1024×768）」这一句，
+        图挂在 `ToolResult.image` 上。拼 `ToolOutput` 时不抄 image，子 agent 收到的
+        就只有这句话 —— 而它**没有任何报错**，看起来一切正常。
+
+        `box.vision` 是按后端能力打开的，所以这条路是真会走到的。
+        """
+        self.fake_sub([
+            ("", [ToolCall(id="s1", name="read_file", input={"path": "a.png"})]),
+            ("看完了", []),
+        ])
+        def one_image(name, args):
+            if str(args.get("path", "")).endswith(".png"):
+                return ToolResult("（下面是 a.png，1×1）", summary="看图",
+                                  image=("image/png", "AAAA"))
+            return ToolResult("文本", summary="读了")
+
+        import feiyu.tools as tools_mod
+        # **addCleanup 要在换掉之前登记**，否则存下来的是替身不是原件（这个坑踩过）
+        self.addCleanup(setattr, tools_mod.Toolbox, "run", tools_mod.Toolbox.run)
+        tools_mod.Toolbox.run = staticmethod(one_image)
+        subagent.run("看这张图", entry={"model": "m", "key": "k"}, workspace=self.root)
+        sub = FakeSub.made[0]
+        sent = [m for m in sub.messages
+                if m["role"] == "user" and isinstance(m.get("content"), list)]
+        self.assertEqual(len(sent), 1, "子 agent 把图弄丢了，模型只收到那句说明")
+
     def test_不给它的工具会被挡(self):
         self.fake_sub([
             ("", [ToolCall(id="s1", name="bash", input={"command": "rm -rf /"})]),

@@ -75,8 +75,12 @@ def run(prompt: str, *, entry: dict, workspace, trace=None, lsp=None) -> tuple[s
             result = box.run(call.name, call.input)
             lines.append(("", "%s %s" % (
                 call.name, _target(call.input))[:100] + " → " + (result.summary or "")))
+            # **图片要带上。** `box.vision` 上面刚按后端能力打开了，read_file 读图片
+            # 时 content 只是「（下面是 a.png，1024×768）」这一句，图在 result.image 里 ——
+            # 不抄过来的话子 agent 收到的就只有这句话 主 agent 那两处（_run_parallel、
+            # _note_jobs）是同一个坑，这是第三处
             outputs.append(ToolOutput(id=call.id, content=result.content,
-                                      is_error=result.is_error))
+                                      is_error=result.is_error, image=result.image))
         backend.add_tool_results(outputs)
     else:
         report = "（查了 %d 轮还没收敛，先停了 问题可能太大，拆小一点再派）" % MAX_ROUNDS

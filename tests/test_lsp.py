@@ -72,3 +72,67 @@ class TestPyright(unittest.TestCase):
         self.box.lsp.close()
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.poll())
+
+
+class TestOutline(unittest.TestCase):
+    """文件骨架：几百行以上的文件先定位再读
+
+    一个 2526 行的文件整份读进来是九万多字符、每一轮还要重发；
+    骨架只有四千多（**省 96%**）。系统提示里「大文件先定位再读」那条
+    一直没有配套工具，这就是它。
+    """
+
+    def setUp(self):
+        from feiyu import lsp
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.f = self.root / "m.py"
+        self.f.write_text(
+            "import os\n\n\nCAP = 10\n\n\nclass Box:\n    def __init__(self, n):\n"
+            "        self.n = n\n\n    def grow(self, by):\n        total = self.n + by\n"
+            "        return total\n\n\ndef helper(x):\n    return x * 2\n",
+            encoding="utf-8")
+        if lsp.server_for(self.f) is None:
+            raise unittest.SkipTest("没装 pyright")
+        self.pool = lsp.Pool(self.root)
+        self.addCleanup(self.pool.close)
+
+    def rows(self):
+        return self.pool.get(self.f).outline(self.f, self.f.read_text(encoding="utf-8"))
+
+    def test_出得来类和函数_带行号(self):
+        got = {r["name"]: r for r in self.rows()}
+        self.assertEqual(got["Box"]["kind"], "class")
+        self.assertEqual(got["Box"]["line"], 7)
+        self.assertEqual(got["helper"]["kind"], "function")
+        self.assertEqual(got["grow"]["kind"], "method")
+
+    def test_参数和局部变量一律不要(self):
+        """**pyright 把它们也报成 symbol** —— 一个几千行的文件里那是几百条噪音，
+        正好淹掉要找的东西 """
+        names = {r["name"] for r in self.rows()}
+        for noise in ("n", "by", "x", "total", "self"):
+            self.assertNotIn(noise, names, "参数/局部变量混进骨架了：%s" % noise)
+
+    def test_模块层常量留着(self):
+        """配置、上限这类是找代码时的路标 """
+        names = {r["name"] for r in self.rows()}
+        self.assertIn("CAP", names)
+
+    def test_方法要比类缩进一级(self):
+        got = {r["name"]: r for r in self.rows()}
+        self.assertEqual(got["Box"]["depth"], 0)
+        self.assertEqual(got["grow"]["depth"], got["Box"]["depth"] + 1)
+        self.assertEqual(got["helper"]["depth"], 0)
+
+    def test_按行号排序(self):
+        lines = [r["line"] for r in self.rows()]
+        self.assertEqual(lines, sorted(lines))
+
+    def test_行号从_1_起(self):
+        """LSP 的行号是 0 起始，给人和模型看的必须是 1 起始 —— 差一行就对不上 read_file """
+        text = self.f.read_text(encoding="utf-8").splitlines()
+        for r in self.rows():
+            self.assertIn(r["name"], text[r["line"] - 1],
+                          "%s 说在第 %d 行，那一行是 %r" % (r["name"], r["line"], text[r["line"]-1]))

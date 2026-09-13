@@ -131,6 +131,13 @@ def build_backend(entry: dict, *, system: str, tools: list[dict]):
     )
     # 能不能看图没法探测，只能按用户在 /key add 里填的来
     backend.vision = bool(entry.get("vision"))
+    effort = str(entry.get("effort") or "").strip().lower()
+    if effort:
+        backend.effort = effort
+    # 没填就是开着 —— 思考是现在这些模型的常态，而且 anthropic 那边
+    # 关掉它在 xhigh/max 上直接 400
+    if entry.get("thinking") is not None:
+        backend.thinking_on = bool(entry["thinking"])
     # 用户在 /key add 里填的价格优先于内置价格表
     backend.rates = _as_rates(entry.get("price"))
     return backend
@@ -195,9 +202,23 @@ class Billing:
             self.cost += spent
 
 
+# 推理强度 —— anthropic 官方是这五档（`output_config.effort`，GA，不用 beta 头）
+# 接口默认是 `high`；**我们默认 `xhigh`**，因为文档明确说它是编程和 agent 类任务
+# 的最佳档，也是 Claude Code 的默认。往上还有 `max`：正确性比钱重要时才用。
+#
+# **别自己发明档位。** 见过的客户端有分成七档的（最小/低/中/高/极高/最高/超高），
+# 那是它自己的叫法，喂给接口会被 400 顶回来。
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "xhigh"
+
+
 class AnthropicBackend(Billing):
     MAX_TOKENS = 64_000
-    EFFORT = "xhigh"
+    EFFORT = DEFAULT_EFFORT
+    # **放类属性不放 __init__**：测试里的假后端和 tests/fakes.py 都绕过 __init__
+    # 构造（那会去建真客户端），放实例上的话 run_turn 里一读就 AttributeError
+    effort = DEFAULT_EFFORT
+    thinking_on = True
 
     def __init__(self, *, system: str, tools: list[dict], model: str,
                  base_url: str | None = None, api_key: str | None = None,
@@ -361,8 +382,10 @@ class AnthropicBackend(Billing):
             model=self.model,
             max_tokens=self.max_tokens,
             system=self._cached_system(),
-            thinking={"type": "adaptive"},
-            output_config={"effort": self.EFFORT},
+            # 关掉思考只在 high 及以下能用：xhigh / max 配 disabled 会 400
+            thinking=({"type": "adaptive"} if self.thinking_on
+                      else {"type": "disabled"}),
+            output_config={"effort": self.effort},
             tools=self._cached_tools(),
             messages=self.messages,
         ) as stream:
@@ -404,6 +427,12 @@ class AnthropicBackend(Billing):
 
 
 class OpenAICompatBackend(Billing):
+    # openai 兼容那套叫 `reasoning_effort`，档位各家不一样（而且多数模型压根
+    # 不认这个参数）—— **所以默认空着不发**，只有用户在 /key 里明确填了才带上，
+    # 由接口自己去校验。乱发的后果是本来能用的模型直接 400。
+    # 同样放类属性：假后端绕过 __init__（理由见 AnthropicBackend 那条）
+    effort = ""
+    thinking_on = True
     # 没在 /key 里填 max_tokens 时的保底 往高了写不安全：有些兼容接口
     # 收到超过自己上限的值直接报错 要写长文件的模型（Claude、Kimi K2）
     # 得在 /key 里按它自己的上限填一个，否则每次都撞上长度上限半途而废
@@ -524,6 +553,7 @@ class OpenAICompatBackend(Billing):
 
     def run_turn(self, on_text, on_tool=None, on_think=None) -> TurnResult:
         self._mind_thinking()
+        extra = {"reasoning_effort": self.effort} if self.effort else {}
         stream = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -531,6 +561,7 @@ class OpenAICompatBackend(Billing):
             messages=self.messages,
             stream=True,
             stream_options={"include_usage": True},
+            **extra,
         )
 
         text = ""

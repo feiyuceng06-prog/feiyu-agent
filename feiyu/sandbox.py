@@ -26,6 +26,7 @@
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 
@@ -47,6 +48,12 @@ SHADOW_DIRS = (
 )
 # 盖成 /dev/null 的单个文件（tmpfs 只能盖目录）
 SHADOW_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials")
+
+# 执行用的 shell **`/bin/sh` 在这台机器上就是 bash，但以 sh 的名字起来会进
+# POSIX 模式**，而模型写的是 bash：`source 相对路径` 在 POSIX 模式下不搜当前目录
+# （只搜 PATH），`export -p` 的输出格式也不一样 工具叫 bash、说明里写的是 shell 命令，
+# 那就该真给它 bash 没装 bash 的系统退回 /bin/sh
+SHELL = shutil.which("bash") or "/bin/sh"
 
 _probe: bool | None = None
 
@@ -106,6 +113,10 @@ def set_level(name: str) -> None:
 
 def effective() -> tuple[str, str]:
     """(实际生效的档位, 为什么) 想开但开不了的时候要说清楚，不能默默不沙箱 """
+    # 外挂执行器接管的时候要照实说 —— 那时候命令跑在别的地方（SWE-bench 的实例
+    # 容器里），「写被关进工作区」这句话不成立，欢迎框和 /sandbox 不能还那么显示
+    if os.environ.get("FEIYU_EXEC_WRAPPER", "").strip():
+        return "off", "命令交给外部执行器跑（FEIYU_EXEC_WRAPPER），本机不沙箱"
     want = level()
     if want == "off":
         return "off", "已关闭"
@@ -121,7 +132,17 @@ def wrap(command: str, *, workspace, cwd, writable=()) -> list[str] | None:
 
     writable 是额外要放行写入的路径（bash 工具那个记 pwd 的临时文件要靠它，
     否则它落在沙箱内的 tmpfs 上，外面读不到，cd 就跨不了调用）
+
+    **`FEIYU_EXEC_WRAPPER` 是把命令送到别处执行的钩子，不是安全机制。**
+    给了它就整条走它、不再叠 bwrap —— SWE-bench 那条路靠它把命令送进实例容器
+    （容器里 python 是 3.6~3.9，agent 本身跑不进去，只有命令要进去）。
+    开着的时候「写被关进工作区」这句话不成立，`effective()` 会照实说。
+    接缝选在这儿是因为 `_tool_bash` 和 `_start_job` 是仅有的两个执行入口，
+    两个都从这里拿 argv，改一处就够。
     """
+    hook = os.environ.get("FEIYU_EXEC_WRAPPER", "").strip()
+    if hook:
+        return shlex.split(hook) + [str(cwd), command]
     mode, _ = effective()
     if mode == "off":
         return None
@@ -148,5 +169,5 @@ def wrap(command: str, *, workspace, cwd, writable=()) -> list[str] | None:
         argv += ["--bind", str(path), str(path)]
     if mode == "strict":
         argv += ["--unshare-net"]
-    argv += ["--chdir", str(cwd), "--", "/bin/sh", "-c", command]
+    argv += ["--chdir", str(cwd), "--", SHELL, "-c", command]
     return argv

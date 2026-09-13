@@ -248,6 +248,59 @@ await cdp.eval(`stream.replaceChildren(); true`);
 await feed(FLOW);
 console.log("拍了", await cdp.shot("1_flow"));
 
+/* **行长按内容类型分两档，这一条要量不要看。**
+   散文（段落 / 列表 / 「你」那句）吃 --measure，代码块 / diff / 表格照旧吃满
+   --content。不分档的话正文一行 51 个汉字 —— 眼睛看"有点宽"说不清，量得清。
+   判据：正文 ≤ 40 字（中文可读上限），而代码块必须**明显更宽**，
+   否则就是有人把 --content 一起缩了，diff 会折得很碎。 */
+const wide = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const cjk = (el) => { const b = el.getBoundingClientRect();
+    return Math.round(b.width / parseFloat(getComputedStyle(el).fontSize)); };
+  const w = (el) => Math.round(el.getBoundingClientRect().width);
+  const pro = document.querySelector(".block:not(.block--you) .prose > p");
+  const you = document.querySelector(".block--you .block__body");
+  const pre = document.querySelector(".prose pre");
+  return { prose: cjk(pro), you: cjk(you), proseW: w(pro), preW: pre ? w(pre) : 0 };
+})())`));
+if (wide.prose > 40 || wide.you > 40 || wide.preW <= wide.proseW) {
+  console.error("行长那两档不对（正文该 ≤40 字、代码块该更宽）：", JSON.stringify(wide));
+  process.exitCode = 1;
+} else {
+  console.log(`正文 ${wide.prose} 字 / 「你」${wide.you} 字，代码块 ${wide.preW} 宽`);
+}
+
+/* **敲进去的字和发出来的字要在同一条竖线上。**
+   输入区第一列吃 --rail，＋ 靠右贴着 rail 那条线，textarea 的文字起点
+   就落回 .block__body 上。差过 1px 就是有人动了那一列。 */
+const lineUp = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const ta = document.getElementById("input");
+  const body = document.querySelector(".block__body");
+  return { input: Math.round(ta.getBoundingClientRect().x
+                             + parseFloat(getComputedStyle(ta).paddingLeft)),
+           body: Math.round(body.getBoundingClientRect().x) };
+})())`));
+if (Math.abs(lineUp.input - lineUp.body) > 1) {
+  console.error("输入框里的字跟正文没对齐：", JSON.stringify(lineUp));
+  process.exitCode = 1;
+} else {
+  console.log(`敲的字和正文都起于 ${lineUp.body}`);
+}
+
+/* 一页只该有一条纵线：代码块不许再画自己的左竖线（meta-rail 就在左边 16px）。
+   **必须在有代码块的那一屏上量。** 这一条原来跑在并行那屏（全是工具调用、
+   一个 `.prose pre` 都没有），`[].some()` 永远是 false —— 绿了很久，
+   其实一次都没验过。挪到 1_flow 之后，并加一条"至少得有一个"的守卫。 */
+const lines = JSON.parse(await cdp.eval(`JSON.stringify(
+  [...document.querySelectorAll(".prose pre")].map((p) =>
+    getComputedStyle(p).borderLeftWidth))`));
+if (lines.length === 0 || lines.some((w) => w !== "0px")) {
+  console.error("代码块的竖线这条没验成（该有代码块、且都不画线）：", JSON.stringify(lines));
+  process.exitCode = 1;
+} else {
+  console.log(`代码块 ${lines.length} 块，没有多余的竖线`);
+}
+
+
 /* **每个主题下 diff 的加号减号都得分得开。** 复古那套整页暖色，
    加号原来直接用 --accent（赭色），跟减号的砖红糊成一片 —— 眼睛看
    "都是红的"说不清差多少，量 RGB 距离说得清。 */
@@ -284,6 +337,21 @@ await cdp.call("Page.navigate", { url });
 await sleep(1200);
 await feed(FLOW.slice(0, 8));
 console.log("拍了", await cdp.shot("3_narrow", { width: 390, height: 1200 }));
+
+/* **这一档没有 rail 那一列，输入区左边那个 ＋ 不许跑出屏幕。**
+   宽屏下它靠右贴着 rail 那条线（`justify-self: end`）；窄屏 `--rail` 归 0，
+   不把第一列退回 `auto` 的话 ＋ 的右边缘就被钉在 0 上，整个按钮溢到界外
+   —— 390px 下只剩半个加号，这一条就是那次逮到的。 */
+const clip = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const b = document.querySelector(".composer__row > .chip--attach").getBoundingClientRect();
+  return { x: Math.round(b.x), w: Math.round(b.width) };
+})())`));
+if (clip.x < 0 || clip.w < 24) {
+  console.error("390px 下输入区那个 ＋ 跑出屏幕了：", JSON.stringify(clip));
+  process.exitCode = 1;
+} else {
+  console.log(`390px 下 ＋ 在 ${clip.x}，${clip.w} 宽`);
+}
 
 // 纯对话那一屏单独拍一张 —— 它跟有工具调用的那屏排版重点完全不同
 await cdp.call("Emulation.setDeviceMetricsOverride",
@@ -382,16 +450,6 @@ await cdp.call("Emulation.setDeviceMetricsOverride",
   { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
 await sleep(300);
 
-/* 一页只该有一条纵线：代码块不许再画自己的左竖线（meta-rail 就在左边 16px）。 */
-const lines = JSON.parse(await cdp.eval(`JSON.stringify(
-  [...document.querySelectorAll(".prose pre")].map((p) =>
-    getComputedStyle(p).borderLeftWidth))`));
-if (lines.some((w) => w !== "0px")) {
-  console.error("代码块又画了自己的竖线，会跟 meta-rail 并排：", JSON.stringify(lines));
-  process.exitCode = 1;
-} else {
-  console.log("代码块没有多余的竖线");
-}
 
 /* 机器人：跟"会话"平级摆在侧栏顶上，**不在设置里**。
    点一个 = 开一段新对话（发 op:bot do:start），点「改」= 进编辑器那一屏。 */

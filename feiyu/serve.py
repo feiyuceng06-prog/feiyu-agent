@@ -39,6 +39,7 @@ from . import agent as agent_mod
 from . import bots as bots_mod
 from . import enabled, events, keys, memory, permissions, profiles as profiles_mod
 from . import mentions as mentions_mod
+from . import providers as providers_mod
 from . import session as session_mod
 from . import skills as skills_mod, tools as tools_mod, ui
 from . import __version__
@@ -178,8 +179,15 @@ class Server:
                "profile": agent.profile, "bot": agent.bot, "workspace": str(self.workspace),
                "version": __version__, "busy": self.busy}
         if agent.ready:
+            # **`agent.cost` 会是 None**（这条配置没填价格，`priced` 掉成 False）——
+            # `round(None)` 抛 TypeError，而这个方法在每一处 push_status 上，
+            # 连主循环那道兜底 except 自己都要调它：一抛就是**整个 --serve 没了**，
+            # 桌面端表现为窗口突然不响应 前端本来就判了 `typeof s.cost === "number"`，
+            # 原样把 None 传过去就行（终端那半边一直是这么做的：`if spent:`）
+            spent = agent.cost
             out.update(model=agent.model, name=agent.name,
-                       tokens=agent.tokens, cost=round(agent.cost, 6),
+                       tokens=agent.tokens,
+                       cost=round(spent, 6) if spent is not None else None,
                        context=agent.context, context_limit=agent.context_limit)
             got = agent.credits
             if got is not None:
@@ -349,6 +357,7 @@ class Server:
         args = {
             "/mode": list(agent_mod.MODE_ORDER),
             "/style": list(agent_mod.STYLES),
+            "/effort": list(providers_mod.EFFORTS) + ["关"],
             "/model": models,
             "/helper": models + ["off"],
             "/profile": [p.name for p in profiles_mod.load()] + ["off"],
@@ -418,6 +427,38 @@ class Server:
 
     # ---- 模型配置 ----
 
+    # 价格在 models.json 里存的是 `{"hit","input","output"[,"write"]}` —— `/key add`
+    # 写的是这个形状，`providers._as_rates` **也只认这个形状**。面板上是三个格子，
+    # 所以在这条边界上来回换一次。原来两边直接对着一个列表，后果有两条：
+    #   1. 面板里填的价 `_as_rates` 认不出来 → 一直 `priced=False`，一分钱都不显示
+    #      （而界面上那句提示写的是"不填就只显示 token 数"，填了也一样，看着像坏了）
+    #   2. 拿面板改一条终端加的配置时，表单读不出 dict 里的价、回来是三个空格子，
+    #      于是**把原来的价抹掉** —— 正是 `merged()` 那段注释要防的事故
+    PRICE_KEYS = ("hit", "input", "output")
+
+    @classmethod
+    def price_row(cls, price) -> list:
+        """存的 dict → 面板那三个格子 """
+        if not isinstance(price, dict) or not all(k in price for k in cls.PRICE_KEYS):
+            return []
+        return [price[k] for k in cls.PRICE_KEYS]
+
+    @classmethod
+    def price_dict(cls, cells, old) -> dict | None:
+        """面板那三个格子 → 存的 dict 三个没填满就是"没价格"
+
+        `write`（缓存写入价）面板上没有这一格，原来填过的要留住 ——
+        不留的话在面板上动一下别的字段就把它冲掉了
+        """
+        nums = [c for c in (cells or []) if c not in ("", None)]
+        if len(nums) < 3:
+            return None
+        out = {k: float(v) for k, v in zip(cls.PRICE_KEYS, nums)}
+        keep = old.get("write") if isinstance(old, dict) else None
+        if keep is not None:
+            out["write"] = keep
+        return out
+
     def push_models(self) -> None:
         """模型清单 **一个 key 都不往外发。**
 
@@ -434,7 +475,7 @@ class Server:
                 "vision": bool(one.get("vision")),
                 "max_tokens": one.get("max_tokens") or "",
                 "limit": one.get("limit") or "",
-                "price": one.get("price") or [],
+                "price": self.price_row(one.get("price")),
                 # 只说有没有，绝不给内容
                 "has_key": bool(one.get("key")),
                 "using": name == self.agent.name,
@@ -477,14 +518,13 @@ class Server:
                 return None
             return cast(got) if cast else got
 
-        price = [p for p in (row.get("price") or []) if p not in ("", None)]
         try:
             keys.add(name,
                      base_url=merged("base_url"),
                      model=model, key=key,
                      kind="anthropic" if row.get("kind") == "anthropic" else "openai",
-                     price=([float(p) for p in price] if len(price) >= 3
-                            else (None if "price" in row else old.get("price"))),
+                     price=(self.price_dict(row.get("price"), old.get("price"))
+                            if "price" in row else old.get("price")),
                      vision=bool(row.get("vision", old.get("vision"))),
                      max_tokens=merged("max_tokens"),
                      limit=merged("limit"))
@@ -655,6 +695,9 @@ class Server:
             self.push_settings()
         elif head == "/style":
             self._say(cli._style(agent, rest))
+            self.push_settings()
+        elif head == "/effort":
+            self._say(cli._effort(agent, rest))
             self.push_settings()
         elif head == "/compact":
             self._say(cli._compact(agent))

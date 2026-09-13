@@ -134,7 +134,7 @@ Eighteen tools, every call printed on screen:
 
 | Tool | What it does |
 |---|---|
-| `bash` | Run a shell command. `cd` persists between calls; long commands can run in the background |
+| `bash` | Run a shell command. `cd`, exported variables, sourced environments (a venv) and shell functions all persist between calls; long commands can run in the background |
 | `read_file` `write_file` `edit_file` | Read, write, exact replace. Paths are relative to the workspace root. `edit_file` takes several edits to one file in one call and points at the nearest match when it fails; `write_file` can append |
 | `list_files` `search` | Glob the tree, grep it with a regex |
 | `symbol` | Definitions and references through a language server (pyright, clangd, rust-analyzer, typescript-language-server, gopls, lua-language-server; only when installed) |
@@ -265,6 +265,19 @@ verify: npm test
 ```
 
 From then on the command runs after every file write or edit, and failures go back to the model to fix. The failure comes with a digest first (which test failed, the assertion, the compile error line), then the raw output.
+
+**Two gates for long tasks.** In the same convention file, one line each:
+
+```
+max-rounds: 0
+budget: 5
+```
+
+`max-rounds` is how many consecutive tool rounds pass before it stops and asks (25 by default, **0 means no limit**). The default is tuned for interactive use: an edit-compile-read-the-error-edit-again loop runs for hundreds of rounds, and there is no right number to pick up front.
+
+**If you lift the round limit, set `budget`.** Non-interactive runs (a pipe, a one-shot task) have nobody to answer that question, so money is the only remaining gate — and a model with no configured price cannot be costed, which leaves no gate at all.
+
+`--max-rounds` and `--budget` on the command line win over the convention file, and `/context` will not overwrite them.
 
 **Hooks.** Global in `~/.config/feiyu/hooks.json`, per project in `.feiyu/hooks.json`:
 

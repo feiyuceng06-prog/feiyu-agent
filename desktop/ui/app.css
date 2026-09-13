@@ -81,6 +81,16 @@
   /* 单一竖向边界，跟博客同一个思路。比博客的 700px 宽一档：这里要装 diff
      和命令输出，700px 下代码行会折得很碎。 */
   --content: 54rem;
+  /* **散文自己的行长上限，比 --content 窄。** 量出来的：--content 下正文一行
+     760px，15px 中文是 51 个字、拉丁约 95 个字符 —— 两个都越过了可读上限
+     （中文 35–40 字、拉丁 45–75 字符），长行读到行尾回不去，会丢行。
+     `--content` 不能缩，它是为 diff 和命令输出定的（注释在上面）；
+     所以**按内容类型分两档**：段落、列表、引用、标题吃这一档，
+     代码块 / 表格 / 图 / 工具输出照旧吃满 --content。
+       34rem = 544px → 正文 15px 36 字、拉丁 75 字符；「你」那句 18px 30 字。
+     两处用的是同一个**绝对长度**，所以右边缘落在同一条竖线上 —— 换成 em
+     就会因为字号不同而错开。 */
+  --measure: 34rem;
   /* meta-rail 那一列的宽度。够放四个中文大写标签。 */
   --rail: 5.5rem;
   /* 侧边栏宽度。收起时被 body[data-side="off"] 改成 0 */
@@ -462,7 +472,9 @@ body[data-side="off"] .side { border-right: 0; }
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: var(--text-sm);
-  line-height: 1.4;
+  /* 行高是长度不是比例（1.4 在 14px 上是 19.6，不落在阶上）。
+     两行标题在这儿最常见，所以没直接用 24px 的基线 —— 侧栏一屏会少两条。 */
+  line-height: 20px;
   color: var(--text);
   padding-right: var(--space-5);
 }
@@ -650,13 +662,16 @@ body[data-side="off"] .side { border-right: 0; }
 
 .block--you .block__body {
   font-size: var(--text-lg);
-  line-height: 1.5;
+  /* 28px 而不是 1.5 —— 行高是长度不是比例（1.5 在 18px 上是 27，不落在阶上） */
+  line-height: 28px;
+  /* 跟正文 .prose 同一个绝对长度：字号不同、右边缘同在一条竖线上 */
+  max-width: var(--measure);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 /* 标签跟着正文的第一行走：正文大了一档，行高不一样，不调的话标签会浮在上面 */
-.block--you .block__label { line-height: calc(var(--text-lg) * 1.5); }
+.block--you .block__label { line-height: 28px; }
 
 /* 一段对话里，它说的话跟上面那句问话是一体的，之间不再画线 */
 .block--you + .block { border-top-color: transparent; }
@@ -837,6 +852,17 @@ body[data-side="off"] .side { border-right: 0; }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
 
+/* **行长按内容类型分两档。** 段落、列表、引用、标题是拿来读的，吃 --measure；
+   代码块、表格、图不是（折行会把它们读坏），照旧吃满 --content。
+   量出来的：不分档的话正文一行 51 个汉字 / 95 个拉丁字符，两个都越界。 */
+.prose > p,
+.prose > ul,
+.prose > ol,
+.prose > blockquote,
+.prose > h1,
+.prose > h2,
+.prose > h3 { max-width: var(--measure); }
+
 .prose p { margin: 0 0 var(--space-4); }
 .prose > p:last-child { margin-bottom: 0; }
 
@@ -844,7 +870,7 @@ body[data-side="off"] .side { border-right: 0; }
   margin: var(--space-5) 0 var(--space-2);
   font-size: var(--text-md);
   font-weight: var(--w-bold);
-  line-height: 1.35;
+  line-height: var(--leading-body);
 }
 
 .prose h1 { font-size: var(--text-lg); }
@@ -872,7 +898,7 @@ body[data-side="off"] .side { border-right: 0; }
 .prose pre code {
   background: none;
   padding: 0;
-  line-height: 1.55;
+  line-height: 20px;
 }
 
 .prose blockquote {
@@ -1072,8 +1098,11 @@ body[data-side="off"] .side { border-right: 0; }
   line-height: var(--leading-body);
 }
 
+/* 说明文字跟正文同一个上限。量出来的：右栏 624px 宽，14px 下一行 44 个汉字，
+   跟 .prose 那条是同一个病 —— 这一句是拿来读的，不是要撑满栏宽。 */
 .shelf__pane .lead {
   margin: var(--space-2) 0 var(--space-5);
+  max-width: var(--measure);
   font-size: var(--text-sm);
   color: var(--soft);
 }
@@ -1388,14 +1417,23 @@ body[data-side="off"] .side { border-right: 0; }
   background: var(--bg);
 }
 
+/* **敲进去的字要跟发出来的字落在同一条竖线上。**
+   量出来的：`.stream` 和这一行本来就都是 864 居中、左边缘同在 328，可
+   输入框从 368 起（第一列是 `auto`，只有那个 ＋ 那么宽），而正文从 432 起 ——
+   同一句话敲的时候在一处、发完在另一处，差 64px。
+   第一列改吃 `--rail`，＋ 靠右贴着 rail 那条线（跟左边一列的大写标签同一侧），
+   输入框就落回正文那条线上。窄屏下 `--rail` 本来就是 0，自动退回原样。 */
 .composer__row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: var(--rail) minmax(0, 1fr) auto auto;
   align-items: end;
   gap: var(--space-2);
   max-width: var(--content);
   margin: 0 auto;
 }
+
+.composer__row > .chip--attach { justify-self: end; }
+
 
 #input {
   font: var(--w-regular) var(--text-base) / var(--leading-body) var(--font-sans);
@@ -1443,7 +1481,10 @@ body[data-side="off"] .side { border-right: 0; }
 .go:hover { background: var(--accent); }
 .go--stop { background: var(--alert); }
 
-/* 待发送的附件。上传完先在这儿列着，随下一条消息一起交给 agent。 */
+/* 待发送的附件。上传完先在这儿列着，随下一条消息一起交给 agent。
+   **跟补全菜单一样贴 composer 那条 864 的左边缘（328），不跟输入框的 432 走。**
+   这两个都是浮在输入行上方的辅助面板，对齐的是这一整块；输入框的文字对齐正文，
+   那是另一条线，各管各的。 */
 .clips {
   max-width: var(--content);
   margin: 0 auto var(--space-2);
@@ -1510,7 +1551,19 @@ body[data-side="off"] .scrim { display: none; }
 @media (max-width: 46rem) {
   :root { --rail: 0rem; }
   .block { grid-template-columns: minmax(0, 1fr); gap: var(--space-1) 0; }
-  .block__label { line-height: 1.4; }
+  /* 这一档标签是堆在正文**上面**的，所以行高照着 9px 的字给，不是照 24px 基线。
+     12px 而不是原来的 `1.4`（12.6）—— 行高是长度不是比例。
+     **别顺手套 `.talk__title` 那个 20px**：那是给 14px 的字定的，
+     套到 9px 的标签上会在标签和正文之间凭空多出 8px。 */
+  .block__label { line-height: 12px; }
+  /* `.block--you .block__label` 特指度比上面那条高，不单独写一条它就吃不到
+     —— 窄屏下它一直是 27/28px，标签和正文之间空一大截（既有的，这次顺手修）。 */
+  .block--you .block__label { line-height: 12px; }
+  /* 这一档没有 rail 那一列了，输入区第一列要退回按内容宽 ——
+     不退的话 `justify-self: end` 把 ＋ 的右边缘钉在 0 上，整个按钮溢到屏幕外
+     （390px 下只剩半个加号，夹具那张 3_narrow 逮到的）。 */
+  .composer__row { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+  .composer__row > .chip--attach { justify-self: auto; }
   .palette__item { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .side { position: fixed; inset: var(--bar) auto var(--bar-s) 0; width: 15rem; background: var(--bg); z-index: 3; }
   body { grid-template-columns: minmax(0, 1fr); }

@@ -130,27 +130,41 @@ def find(text: str, root: Path) -> list[tuple[str, Path]]:
     return out
 
 
-def _listing(target: Path) -> tuple[str, str]:
+def _listing(target: Path, budget: int) -> tuple[str, str]:
+    """**这一条也要吃预算。** 只按 MAX_ENTRIES 数项数是不够的：名字最长能到 255 字，
+    八十项就是两万字 —— 正好是 MAX_CHARS 的全部。原来它一个字都不数，于是
+    `@某个目录 @某个文件` 里那个文件分到的是**负数预算**，`_numbered` 的
+    `first[:budget]` 变成从末尾切，报出来的话是「只截了前 -509 个字符」，
+    而实际贴进去的是整整五万字（那道 20000 的闸等于不存在）。
+    """
     names = []
+    used = 0
     try:
         entries = sorted(os.scandir(target), key=lambda e: (not e.is_dir(), e.name))
     except OSError as exc:
         return "（列不了这个目录：%s）" % exc, "列不了"
+    full = True
     for entry in entries:
         if entry.is_dir():
             if entry.name in files.IGNORE_DIRS:
                 continue
-            names.append(entry.name + "/")
+            name = entry.name + "/"
         else:
-            names.append(entry.name)
+            name = entry.name
+        if used + len(name) + 1 > budget:
+            full = False
+            break
+        names.append(name)
+        used += len(name) + 1
         if len(names) >= MAX_ENTRIES:
+            full = False
             break
     if not names:
-        return "（空目录）", "空目录"
+        return ("（空目录）", "空目录") if full else ("（这个目录列不下，用 list_files 看 ）", "列不下")
     body = "\n".join(names)
-    if len(names) >= MAX_ENTRIES:
+    if not full:
         # 截断要说出来，否则"这个目录里有哪些文件"的结论直接是错的
-        body += "\n（只列了前 %d 项，用 list_files 看全部 ）" % MAX_ENTRIES
+        body += "\n（只列了前 %d 项，用 list_files 看全部 ）" % len(names)
     return body, "%d 项" % len(names)
 
 
@@ -187,8 +201,13 @@ def _numbered(raw: bytes, budget: int) -> tuple[str, str]:
 
 def _one(shown: str, target: Path, budget: int, watcher) -> tuple[str, str]:
     """一个 `@` 的正文和一句概要 概要是给人看的，正文是给模型看的"""
+    if budget < MIN_SHARE:
+        # 前面几个把预算吃光了 跟 expand 里"贴不下"那条同一个说法：
+        # 半截东西说明不了任何事，而**预算绝不能变成负数**——负数会一路传到
+        # `first[:budget]` 那种切片上，切出来的东西比不贴还糟
+        return ("（这次没贴内容，一句话里指的东西太多了 要看就用 read_file 读它 ）", "未贴")
     if target.is_dir():
-        return _listing(target)
+        return _listing(target, budget)
     odd = files.odd_kind(target)
     if odd:
         # 打开一个没有另一端的 FIFO 会一直阻塞 —— 而这条路是在**发消息之前**跑的，
@@ -242,7 +261,7 @@ def expand(text: str, root: Path, watcher=None) -> tuple[str, list[str]]:
         # **按份分，不是先到先得。** 一句话里指三个文件是常事，让第一个把预算
         # 吃光的话后两个只剩零头甚至一个字没有 —— 而用户是把这三个一起指出来的。
         # 小的用不完，余下的自然滚给后面（除号里的分母跟着 i 走）。
-        body, brief = _one(shown, target, left // (keep - i), watcher)
+        body, brief = _one(shown, target, max(0, left) // (keep - i), watcher)
         left -= len(body)
         blocks.append("----- %s -----\n%s" % (shown, body))
         said.append("%s（%s）" % (shown, brief))

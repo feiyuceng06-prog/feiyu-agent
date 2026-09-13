@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import ui
+from . import pricing, ui
 from . import history, hooks as hooks_mod
 from . import mentions as mentions_mod
 from . import profiles as profiles_mod
@@ -196,6 +196,12 @@ VERIFY_LINE = re.compile(r"^verify:[ \t]*`?([^`\n]+?)`?[ \t]*$", re.M | re.I)
 VERIFY_MAX_CHARS = 4000
 VERIFY_TIMEOUT = 300
 
+# 约定文件里同样单起一行的 `max-rounds: N` 和 `budget: N`，跟 verify 一个机制
+# **0 是不设闸，不是"没写"**：证明、跨几十个文件的重构这类活要几百轮，
+# 事先给不出一个对的数字 放开轮数就得靠 budget 收口（两道闸在 send 里同一处）
+ROUNDS_LINE = re.compile(r"^max[-_ ]?rounds:[ \t]*`?(\d+)`?[ \t]*$", re.M | re.I)
+BUDGET_LINE = re.compile(r"^budget:[ \t]*`?[¥$]?(\d+(?:\.\d+)?)`?[ \t]*$", re.M | re.I)
+
 
 SCORE_LINE = re.compile(r"评分[:：]\s*(\d+(?:\.\d+)?)\s*/\s*10")
 
@@ -226,6 +232,18 @@ def _failure_note(r) -> str:
 def find_verify(text: str) -> str:
     hit = VERIFY_LINE.search(text or "")
     return hit.group(1).strip() if hit else ""
+
+
+def find_limits(text: str) -> dict[str, float]:
+    """约定文件里的两道闸 **没写的键不出现**——0 是"不限"，不能拿它表示"没配" """
+    out: dict[str, float] = {}
+    hit = ROUNDS_LINE.search(text or "")
+    if hit:
+        out["max_rounds"] = int(hit.group(1))
+    hit = BUDGET_LINE.search(text or "")
+    if hit:
+        out["budget"] = float(hit.group(1))
+    return out
 
 
 def load_project_context(workspace: Path) -> tuple[str, str]:
@@ -404,6 +422,9 @@ class Feiyu:
         self.trace = trace or Trace(workspace, enabled=False)
         self.verify = find_verify(self.context_text)
         self.verified_ok = None      # 最近一次校验过没有：True/False/None（没跑过）
+        # 动手之前那次"先跑一遍看什么是坏的"跑过没有 一个会话只跑一次
+        self._baseline = ""          # 跑出来的要点，附在第一次写文件的结果里
+        self._baseline_done = False
         self.hooks: list = []
         self.hooks_note = ""
         self.approve_hooks = None    # 交互层塞进来：(路径, 条数) -> bool
@@ -423,6 +444,15 @@ class Feiyu:
         self.touched: list[str] = []      # 这次运行改过哪些文件，/review 要用
         self.before: dict[str, str] = {}  # 它们被动之前长什么样，没有 git 时靠这个算 diff
         self.style = "default"
+        # 连续调多少轮工具之后停下来问一句 出厂 MAX_ROUNDS，跑 benchmark 时调大：
+        # 非交互下第 25 轮是**硬停**，SWE-bench 那种题量出来的是上限不是能力
+        self.max_rounds = MAX_ROUNDS
+        # 单次任务的花费上限（元），0 就是不限 放开轮数之后这是唯一的另一道闸
+        self.budget = 0.0
+        # 命令行显式给过的闸 `/context` 重载时不被约定文件盖掉：
+        # 用户敲了 --max-rounds 就是要这个数，不该被仓库里的一行改掉
+        self.limit_cli: set[str] = set()
+        self._apply_project_limits()
         self.mode = "default"
         # 路径 -> 这个文件在历史里还有效的那几条 read_file 结果的 id
         # 同一个文件再读一次、或者被改过，之前那几份就该从历史里折叠掉
@@ -495,6 +525,7 @@ class Feiyu:
     def reload_context(self) -> None:
         self.context_file, self.context_text = load_project_context(self.toolbox.root)
         self.verify = find_verify(self.context_text)
+        self._apply_project_limits()
         self._refresh_system()
 
     def tool_schemas(self) -> list[dict]:
@@ -503,6 +534,8 @@ class Feiyu:
         # （改了 images.json 要重启，跟 MCP 一个规矩），中途变工具集会作废整段 prompt cache
         cfg = tools_mod.image_config()
         drop = set() if (cfg.get("base_url") and cfg.get("key")) else {"image_generate"}
+        if not tools_mod.assist_on():
+            drop.add("symbol")      # A/B 对照档：连 outline 一起摘掉
         drop |= enabled.disabled("tools")
         drop -= enabled.LOCKED
         off = enabled.disabled("mcp")
@@ -965,7 +998,12 @@ class Feiyu:
                 self._pending += sum(len(o.content) for o in outputs) // CHARS_PER_TOKEN
                 self._fold(turn.tool_calls, outputs)
             rounds += 1
-            if rounds >= MAX_ROUNDS:
+            # 预算和轮数在同一处收口 放开了轮数就必须有另一道闸，
+            # 否则一道 SWE-bench 题能自己烧掉一整轮评测的钱
+            spent = self._over_budget()
+            if spent:
+                return self._stop_budget(spent)
+            if self.max_rounds and rounds >= self.max_rounds:
                 said = self._round_limit(rounds)
                 if said is None:
                     rounds = 0
@@ -1140,6 +1178,34 @@ class Feiyu:
 
     CONTINUE = "接着做"
 
+    def _over_budget(self) -> str:
+        """超预算了没 超了返回一句给人看的话，没超返回空串
+
+        **`self.cost` 会是 None** —— 没填价格的配置 `priced` 是 False，
+        而 0.67.2 刚因为 `round(None)` 把整个 `--serve` 弄死过一次。
+        没有价格就没法谈预算，那时候只能靠轮数那道闸。
+        """
+        if not self.budget:
+            return ""
+        spent = self.cost
+        if spent is None or spent < self.budget:
+            return ""
+        return "这次任务已经花掉 %s，到了你设的上限 %s" % (
+            pricing.yuan(spent), pricing.yuan(self.budget))
+
+    def _stop_budget(self, note: str) -> str:
+        """花超了，收手
+
+        **必须往历史补一条 assistant** —— 跟 `_stop_runaway` 同一个理由：
+        不补的话角色不再交替，下一轮请求直接 400（0.12.0 那条记了三遍的坑）。
+        """
+        text = note + " 我先停下 要接着做就把上限调高，或者 feiyu --resume 接上 "
+        self.backend.messages.append({"role": "assistant", "content": text})
+        self.trace.write("budget_stop", cost=self.cost, budget=self.budget)
+        print(ui.warn(text))
+        print()
+        return text
+
     def _round_limit(self, rounds: int) -> str | None:
         """撞到轮数上限 返回 None 表示用户让它接着跑，否则返回该带给模型的话
 
@@ -1172,6 +1238,13 @@ class Feiyu:
                           "feiyu --resume \"接着做\" 可以接上 " % rounds))
         print()
         return note
+
+    def _apply_project_limits(self) -> None:
+        """约定文件里的 max-rounds / budget 装到实例上 命令行给过的那项跳过 """
+        for key, value in find_limits(self.context_text).items():
+            if key in self.limit_cli:
+                continue
+            setattr(self, key, int(value) if key == "max_rounds" else float(value))
 
     def _apply_limit(self, name: str, entry: dict) -> None:
         """上下文上限从哪来：配置里填的 > 撞墙学到的 > 出厂 128k """
@@ -1358,8 +1431,13 @@ class Feiyu:
                 print()
                 self.trace.write("tool", name=call.name, args=call.input,
                                  ok=not result.is_error, summary=summary, parallel=True)
+                # **图片也要带上。** read_file 在 PARALLEL_SAFE 里，一批里但凡有
+                # 两个只读调用就走这条路 —— 漏掉 image 的话模型收到的只有
+                # 「（下面是 a.png，1024×768）」这句话，图本身根本没发出去，
+                # 而串行那条路是给的：同一次调用，看不看得见图取决于它旁边有没有别的调用
                 outputs.append(
-                    ToolOutput(id=call.id, content=result.content, is_error=result.is_error))
+                    ToolOutput(id=call.id, content=result.content,
+                               is_error=result.is_error, image=result.image))
         self.trace.write("parallel", count=len(calls),
                          ms=round((time.monotonic() - began) * 1000))
 
@@ -1391,6 +1469,7 @@ class Feiyu:
                 continue
             if call.name in VERIFY_AFTER:
                 self._snapshot(call)
+                self._reproduce_first()
             began = time.monotonic()
             result = self.toolbox.run(call.name, call.input)
             summary = result.summary or result.content.splitlines()[0][:80]
@@ -1408,8 +1487,15 @@ class Feiyu:
             if not result.is_error and call.name in VERIFY_AFTER:
                 changed = (call.name, permissions.subject(call.name, call.input))
                 self._remember_touched(call)
+            content = result.content
+            if self._baseline:
+                # 动手之前那张现场照片挂在**第一次写文件**的结果上，挂完就清掉。
+                # 挂在这儿而不是另起一条 user 消息：两种后端的消息结构不通用，
+                # tool_result 是唯一两边都能安全追加内容的地方（跟 verify 失败同理）
+                content += "\n\n---\n\n" + self._baseline
+                self._baseline = ""
             outputs.append(
-                ToolOutput(id=call.id, content=result.content,
+                ToolOutput(id=call.id, content=content,
                            is_error=result.is_error, image=result.image)
             )
         return changed
@@ -1534,6 +1620,56 @@ class Feiyu:
         if path and path not in self.touched:
             self.touched.append(path)
 
+    def _reproduce_first(self) -> None:
+        """动手改第一个文件之前，先跑一遍 `verify:` 看**现在**什么是坏的
+
+        为什么值得多花一次测试的时间：修 bug 类的任务里，"哪几条测试在红、
+        报什么错"是最硬的线索，而它就在一条命令之外。不跑的话模型只能照着
+        题面猜该改哪儿 —— 实测 `django__django-13212` 就是这么丢的：
+        5 条失败测试全在 `forms_tests` 那个包里，而它 52 轮只盯着题面提到的
+        `core/validators.py`，方向对、改了一半，从头到尾没看见那几个测试名。
+
+        **一个会话只跑一次**（`_baseline_done`）：它是"动手前的现场照片"，
+        改完之后的校验由 PostToolUse 那条钩子管，两者不是一回事。
+        跑不起来就当没有 —— 这是帮忙的东西，不该挡着人干活。
+        """
+        if self._baseline_done or not self.verify:
+            return
+        if not tools_mod.assist_on():
+            return      # 评测的 A/B 对照档
+        self._baseline_done = True
+        hook = hooks_mod.Hook("PreWrite", {"matcher": "*", "command": self.verify,
+                                           "timeout": VERIFY_TIMEOUT}, "verify:")
+        print(ui.notice("动手之前先跑一遍 `%s`，看看现在什么是坏的…"
+                        % ui.clip(self.verify, 50)))
+        print()
+        began = time.monotonic()
+        try:
+            outcome = hooks_mod.run(hook, {"event": "PreWrite",
+                                           "workspace": str(self.toolbox.root)},
+                                    self.toolbox.root)
+        except Exception:
+            return
+        ms = round((time.monotonic() - began) * 1000)
+        self.trace.write("reproduce", ok=outcome.ok, ms=ms)
+        if outcome.ok:
+            # 全绿。**这条也要说**：它意味着"现在没有失败的测试"，
+            # 那么这个任务多半是加功能而不是修 bug，别再去找不存在的红灯
+            self._baseline = ("（动手之前跑过一遍 `%s`：**现在是全绿的**，"
+                              "所以没有现成的失败可以照着修 ）" % self.verify)
+            print(ui.notice("现在是全绿的（%d 毫秒）" % ms))
+            print()
+            return
+        points = verify_mod.digest(outcome.output)
+        body = _clip_middle(outcome.output, VERIFY_MAX_CHARS)
+        head = ("（这是**你动手之前**的现场：`%s` 跑出来是红的 "
+                "下面就是现在失败的东西，照着它定位，别只照题面猜 ）\n" % self.verify)
+        self._baseline = head + (
+            ("要点：\n" + "\n".join("- " + x for x in points) + "\n\n完整输出：\n\n" + body)
+            if points else ("输出如下：\n\n" + body))
+        print(ui.warn("现在有失败：%s" % (points[0] if points else "见输出")))
+        print()
+
     def _snapshot(self, call) -> None:
         """动手之前存一份原样 没有 git 的工作区靠它算出真正的 diff
 
@@ -1582,6 +1718,7 @@ class Feiyu:
             content=last.content + "\n\n---\n\n后台命令已经结束：" + notes
             + " 用 job（action=output）看它打了什么 ",
             is_error=last.is_error,
+            image=last.image,      # 重建这条时别把图弄丢了，见 _after_tools
         )
 
     def _after_tools(self, changed: bool, outputs: list[ToolOutput]) -> None:
@@ -1604,4 +1741,8 @@ class Feiyu:
                 "\n\n---\n\n改动之后自动跑了检查，先把下面这些修好再往下做，别绕过去 \n\n"
                 + notes),
             is_error=True,
+            # **重建 ToolOutput 时字段要抄全。** 这条和 _note_jobs 都是"往最后一条
+            # 结果上补一句话"，而最后一条可能正是那次读图（`edit_file` 之后紧跟着
+            # 一个 read_file 就是）—— 少写 image 就是把图悄悄扔了
+            image=last.image,
         )

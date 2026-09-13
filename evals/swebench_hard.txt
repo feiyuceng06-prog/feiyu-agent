@@ -1,0 +1,51 @@
+# SWE-bench Verified 的**难题档**：难度为 1-4 hours / >4 hours 的**全部** 45 道
+# 生成：python -m evals.swebench --hard
+# 为什么全取不抽样：这一档总共就这么多，全取之后「这把尺子是哪几道」
+# 由数据集本身定死，没有抽样规则要记，也就没得漂。
+# **50 题那把尺子在 qwen3.8-flash 上是 45/46，已经饱和、量不出改进**，
+# 这一档是用来接替它的。
+astropy__astropy-13398
+astropy__astropy-13579
+astropy__astropy-14369
+django__django-10554
+django__django-11138
+django__django-11400
+django__django-11885
+django__django-12325
+django__django-12708
+django__django-13128
+django__django-13212
+django__django-13344
+django__django-13449
+django__django-13837
+django__django-14007
+django__django-14011
+django__django-14631
+django__django-15128
+django__django-15268
+django__django-15503
+django__django-15629
+django__django-15957
+django__django-16263
+django__django-16560
+django__django-16631
+pydata__xarray-3993
+pydata__xarray-6992
+pylint-dev__pylint-4551
+pylint-dev__pylint-8898
+pytest-dev__pytest-10356
+pytest-dev__pytest-5787
+pytest-dev__pytest-6197
+scikit-learn__scikit-learn-25102
+sphinx-doc__sphinx-11510
+sphinx-doc__sphinx-7590
+sphinx-doc__sphinx-8548
+sphinx-doc__sphinx-9229
+sphinx-doc__sphinx-9461
+sympy__sympy-12489
+sympy__sympy-13852
+sympy__sympy-13878
+sympy__sympy-14248
+sympy__sympy-16597
+sympy__sympy-17630
+sympy__sympy-18199

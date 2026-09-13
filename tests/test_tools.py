@@ -2,8 +2,10 @@
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
+import time
 import tempfile
 import unittest
 import unittest.mock
@@ -22,6 +24,7 @@ class Base(unittest.TestCase):
         enabled.STORE = str(self.root / "enabled.json")
         self.addCleanup(setattr, enabled, "STORE", before)
         self.box = Toolbox(self.root)
+        self.addCleanup(self.box.shell_reset)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -298,6 +301,57 @@ class TestListCap(Base):
     def test_无匹配(self):
         self.assertIn("无匹配", self.box.run("list_files", {"pattern": "*.没有"}).summary)
 
+    def test_pattern_匹配不靠_3_13_才有的_API(self):
+        """**`PurePath.full_match` 是 3.13 才有的**，而 pyproject / install.sh /
+        README 三处都说支持 3.10 起 —— 用它的那半年里，3.13 以下的 list_files
+        整个是坏的（一句 `'PosixPath' object has no attribute 'full_match'`），
+        而本机跑测试看不出来：本机是 3.14。
+
+        所以这条直接断言**不碰那个方法**。语义另有下面那条按表逐条比。
+        """
+        self.write("a.py", "x")
+        called = []
+        # 3.13 以下压根没有这个属性，所以取不到时装一个照样会被记下来的替身 ——
+        # 这条用例本身要能在**所有**支持的版本上跑
+        real = getattr(pathlib.PurePath, "full_match", None)
+
+        def spy(self, *a, **kw):
+            called.append(1)
+            return real(self, *a, **kw) if real else False
+
+        if real is None:
+            self.addCleanup(delattr, pathlib.PurePath, "full_match")
+        else:
+            self.addCleanup(setattr, pathlib.PurePath, "full_match", real)
+        pathlib.PurePath.full_match = spy
+        self.box.run("list_files", {"pattern": "**/*.py"})
+        self.assertEqual(called, [], "又用上 full_match 了，3.13 以下会整个坏掉")
+
+    def test_pattern_的语义(self):
+        """`**` 跨任意层且可以是零层，`*` / `?` 不跨 `/`，整条路径要全匹配
+
+        这张表是拿 3.14 的 `full_match` 逐条对出来的 —— 换实现时照它比，
+        别凭印象改（"`**/*.py` 要不要匹配根目录下的 a.py" 这种问题，
+        答错一次就是「搜不到自己仓库里的文件」）。
+        """
+        for name in ("a.py", "abc.py", "b.md", "a.c", "x.h",
+                     "sub/c.py", "src/b.py", "src/deep/x.py"):
+            self.write(name, "x")
+        table = {
+            "**/*.py": ["a.py", "abc.py", "src/b.py", "src/deep/x.py", "sub/c.py"],
+            "*.py": ["a.py", "abc.py"],
+            "src/*.py": ["src/b.py"],
+            "src/**/*.py": ["src/b.py", "src/deep/x.py"],
+            "src/**": ["src/b.py", "src/deep/x.py"],
+            "a?c.py": ["abc.py"],
+            "*.[ch]": ["a.c", "x.h"],
+            "**/c.py": ["sub/c.py"],
+        }
+        for pattern, want in table.items():
+            with self.subTest(pattern=pattern):
+                got = self.box.run("list_files", {"pattern": pattern}).content.splitlines()
+                self.assertEqual(sorted(got), want)
+
 
 class TestListSearch(Base):
     def setUp(self):
@@ -373,6 +427,169 @@ class TestBash(Base):
     def test_ssh_agent_要留着(self):
         # 摘掉的话 git push 会断
         self.assertIn("SSH_AUTH_SOCK", tools._SECRET_KEEP)
+
+
+class TestShellState(Base):
+    """export / source / 函数要跨调用保持
+
+    之前每条 bash 是个新进程，只有 cwd 靠「把 pwd 写进文件」跨了过去。
+    `_venv_hint` 那个提示就是为这事加的 —— 它的 docstring 记着实测结果：
+    裸 python 报 ImportError 之后**花了五轮翻环境**。提示是绕，这里是修。
+    """
+
+    def test_export_跨调用保持(self):
+        self.box.run("bash", {"command": "export FOO=bar"})
+        self.assertIn("bar", self.box.run("bash", {"command": "echo $FOO"}).content)
+
+    def test_函数跨调用保持(self):
+        self.box.run("bash", {"command": "greet() { echo hi-$1; }"})
+        self.assertIn("hi-world", self.box.run("bash", {"command": "greet world"}).content)
+
+    def test_source_进来的环境跨调用保持(self):
+        """venv 的 activate 干的就是改 PATH + 设 VIRTUAL_ENV，这里拿个假的量同一件事 """
+        (self.root / "act").write_text(
+            'export VIRTUAL_ENV=/假/venv\nexport PATH="/假/venv/bin:$PATH"\n',
+            encoding="utf-8")
+        self.box.run("bash", {"command": "source act"})
+        out = self.box.run("bash", {"command": "echo $VIRTUAL_ENV; echo $PATH"})
+        self.assertIn("/假/venv", out.content)
+        self.assertIn("/假/venv/bin:", out.content)
+
+    def test_值里有换行也存得回来(self):
+        """**这条守的是实现选择。** dump 时用 `grep -v` 过滤那几个变量会把多行值
+        按行切开，剩下的引号对不上，整份 dump 就 source 不回来 —— 不是这一个变量
+        丢了，是**全部状态一起丢**。所以那几个要在子 shell 里 unset 掉再 export -p。
+        """
+        self.box.run("bash", {"command": "export MULTI=$'a\nb'"})
+        out = self.box.run("bash", {"command": 'printf "[%s]" "$MULTI"; echo; echo 还活着=$?'})
+        self.assertIn("[a\nb]", out.content)
+
+    def test_cd_和_export_互不干扰(self):
+        """dump 里要是把 PWD 带上，下一条命令的 $PWD 就会指到旧地方 ——
+        而 `pwd` 内建读的正是 $PWD，cwd 跟踪会跟着一起错
+        """
+        (self.root / "sub").mkdir()
+        self.box.run("bash", {"command": "export FOO=bar && cd sub"})
+        out = self.box.run("bash", {"command": 'echo "$FOO@$(basename "$PWD")"'})
+        self.assertIn("bar@sub", out.content)
+        self.assertEqual(self.box.cwd, self.root / "sub")
+
+    def test_dump_里没有_PWD(self):
+        """**两种格式都要查。** `export -p` 在 bash 下印 `declare -x FOO=`，
+        在 POSIX 模式（以 sh 的名字起的 bash）下印 `export FOO=` —— 只查一种的话
+        换个 shell 这条就变成假绿的，我第一版正是这么错的。
+        """
+        self.box.run("bash", {"command": "true"})
+        text = Path(self.box.shell_state).read_text(encoding="utf-8")
+        for name in tools._STATE_SKIP:
+            self.assertNotIn("declare -x %s=" % name, text)
+            self.assertNotIn("\nexport %s=" % name, "\n" + text)
+
+    def test_跑的是_bash_不是_POSIX_模式的_sh(self):
+        """工具叫 bash、说明里写的是 shell 命令，那就得真是 bash：
+        POSIX 模式下 `source 相对路径` 不搜当前目录，venv 的 activate 会 file not found
+        """
+        (self.root / "act").write_text("export FROM_SOURCE=yes\n", encoding="utf-8")
+        out = self.box.run("bash", {"command": "source act && echo $FROM_SOURCE"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertIn("yes", out.content)
+
+    def test_reset_把状态清空(self):
+        self.box.run("bash", {"command": "export FOO=bar"})
+        out = self.box.run("bash", {"command": 'echo "[$FOO]"', "reset": True})
+        self.assertIn("[]", out.content)
+
+    def test_状态文件是_0600(self):
+        """里头是整份导出的环境，任务自己 export 的东西也在里面 """
+        self.box.run("bash", {"command": "true"})
+        mode = os.stat(self.box.shell_state).st_mode & 0o777
+        self.assertEqual(mode, 0o600, oct(mode))
+
+    def test_没跑过_bash_就不建文件(self):
+        self.assertIsNone(self.box.shell_state)
+
+    def test_状态文件被删了也不崩(self):
+        self.box.run("bash", {"command": "export FOO=bar"})
+        os.unlink(self.box.shell_state)
+        out = self.box.run("bash", {"command": "echo 还能跑"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertIn("还能跑", out.content)
+
+    def test_命令自己_exit_也要记下状态(self):
+        """**`cd /x; exit 0` 之前是静默丢的。** 收尾那几行写在命令后面，命令一 exit
+        就执行不到 —— cwd 和 export 全不记，而模型以为自己已经进去了。
+        现在挂在 EXIT trap 上。
+        """
+        (self.root / "sub").mkdir()
+        out = self.box.run("bash", {"command": "export A=1; cd sub; exit 7"})
+        self.assertIn("退出码: 7", out.content)       # 退出码不能被 trap 吃掉
+        self.assertEqual(self.box.cwd, self.root / "sub")
+        self.assertIn("A=[1]", self.box.run("bash", {"command": 'echo A=[$A]'}).content)
+
+    def test_set_e_中途失败也要记下状态(self):
+        """同一个根因的另一半：`set -e` 让 shell 在命令中间就中断 """
+        (self.root / "sub").mkdir()
+        out = self.box.run("bash", {"command": "set -e; export B=2; cd sub; false; echo 不该到这"})
+        self.assertTrue(out.is_error)
+        self.assertNotIn("不该到这", out.content)
+        self.assertEqual(self.box.cwd, self.root / "sub")
+        self.assertIn("B=[2]", self.box.run("bash", {"command": 'echo B=[$B]'}).content)
+
+    def test_存状态的那个函数不许漏进状态里(self):
+        """它是实现细节，漏进去会被一轮轮 source 回来，还带着已经删掉的临时文件路径 """
+        self.box.run("bash", {"command": "true"})
+        self.assertNotIn("__feiyu_save",
+                         Path(self.box.shell_state).read_text(encoding="utf-8"))
+
+    def test_半份状态宁可整份不要(self):
+        """`> 文件` 是先截断再写，写一半被 SIGKILL（超时那条路）就留下半份。
+        半份照样非空，`source` 的语法错又被 `2>/dev/null` 吞掉 —— 结果是一部分
+        变量回来了、函数静默没了。**而且会传染**：下一份 dump 从这个缺了的环境里取，
+        缺口就永久焊死。所以宁可整份丢掉。
+        """
+        self.box.run("bash", {"command": "export ZZ=在; f() { echo 函数在; }"})
+        p = Path(self.box.shell_state)
+        lines = p.read_text(encoding="utf-8").splitlines(True)
+        p.write_text("".join(lines[:-3]) + lines[-3][:len(lines[-3]) // 2],
+                     encoding="utf-8")
+        out = self.box.run("bash", {"command": 'echo "ZZ=[$ZZ]"'})
+        self.assertIn("ZZ=[]", out.content)
+
+    def test_哨兵是最后一行(self):
+        """判"完整"靠的就是它在不在最后一行 —— 有函数时 `declare -f` 排在后面，
+        哨兵必须在那之后追加，不然这道闸永远关着
+        """
+        self.box.run("bash", {"command": "g() { echo x; }"})
+        text = Path(self.box.shell_state).read_text(encoding="utf-8")
+        self.assertEqual(text.splitlines()[-1], tools._STATE_END)
+
+    def test_reset_和_background_一起给时_reset_不能被吃掉(self):
+        self.box.run("bash", {"command": "export A=1"})
+        self.box.run("bash", {"command": 'echo "A=[$A]" > out.txt',
+                              "background": True, "reset": True})
+        seen = self.root / "out.txt"
+        for _ in range(100):
+            if seen.is_file() and seen.read_text(encoding="utf-8").strip():
+                break
+            time.sleep(0.05)
+        self.assertEqual(seen.read_text(encoding="utf-8").strip(), "A=[]")
+
+    def test_后台任务继承状态但不写回(self):
+        """前面刚 activate 了 venv，挂后台跑的 pytest 也该在那个 venv 里；
+        但后台跟后面的命令是并行的，它 export 的东西不该漏给它们
+        """
+        self.box.run("bash", {"command": "export FOO=bar"})
+        self.box.run("bash", {
+            "command": 'echo "$FOO" > seen.txt; export LEAKED=yes',
+            "background": True})
+        seen = self.root / "seen.txt"
+        for _ in range(100):
+            if seen.is_file() and seen.read_text(encoding="utf-8").strip():
+                break
+            time.sleep(0.05)
+        self.assertEqual(seen.read_text(encoding="utf-8").strip(), "bar")
+        out = self.box.run("bash", {"command": 'echo "[$LEAKED]"'})
+        self.assertIn("[]", out.content)
 
 
 class TestWebGuards(Base):
@@ -1413,3 +1630,69 @@ class TestOddFiles(Base):
     def test_普通文件照旧读得动(self):
         self.write("ok.txt", "一行\n")
         self.assertIn("读取", self._in_child("read_file", {"path": "ok.txt"}))
+
+
+class TestDiagnose(Base):
+    """改完立刻知道语法坏没坏 —— 不然要等模型自己去跑测试，那至少一整轮往返
+
+    两条边界是这块的全部设计：
+    1. **只查语法，不报语言服务器的诊断**（A/B 量出来是负收益）。
+    2. **报「你把它弄坏了」，不是「它是坏的」** —— 本来就解析不了的文件
+       （半截的、模板、故意写的片段）这次没弄更坏，就不该赖在它头上。
+    """
+
+    def test_写出语法错的文件要当场拦下(self):
+        out = self.box.run("write_file", {"path": "a.py", "content": "def f(:\n"})
+        self.assertTrue(out.is_error, out.content)
+        self.assertIn("语法错误", out.content)
+        self.assertIn("第 1 行", out.content)
+
+    def test_写对的文件不该报任何东西(self):
+        out = self.box.run("write_file", {"path": "a.py", "content": "x = 1\n"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertNotIn("语法错误", out.content)
+        self.assertNotIn("⚠", out.content)
+
+    def test_本来就坏的文件_这次没弄更坏就不赖模型(self):
+        """夹具、半截文件、模板都可能解析不了 —— 让它去修一个它没造成的问题是错的 """
+        self.write("a.py", "def f(:\n", seen=True)
+        out = self.box.run("edit_file", {
+            "path": "a.py", "old_str": "def f(:", "new_str": "def g(:"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertNotIn("语法错误", out.content)
+
+    def test_把好文件改坏了要报(self):
+        self.write("a.py", "x = 1\n", seen=True)
+        out = self.box.run("edit_file", {
+            "path": "a.py", "old_str": "x = 1", "new_str": "def f(:"})
+        self.assertTrue(out.is_error, out.content)
+        self.assertIn("语法错误", out.content)
+
+    def test_覆盖写也比对改动前(self):
+        self.write("a.py", "def f(:\n", seen=True)
+        out = self.box.run("write_file", {"path": "a.py", "content": "def g(:\n"})
+        self.assertFalse(out.is_error, out.content)
+
+    def test_非_python_不做本地语法检查(self):
+        out = self.box.run("write_file", {"path": "a.txt", "content": "def f(:\n"})
+        self.assertFalse(out.is_error, out.content)
+
+    def test_不报语言服务器的诊断(self):
+        """**这条是那次 A/B 的结论，别顺手把它改绿。** 整文件的诊断报出来过，
+        12 道题配对比出来轮数 +53%、token +72%、解决率没动 —— 它把模型引去修
+        自己没造成的问题。语法过得去的文件，写完就只该说"写了多少行"。
+        """
+        out = self.box.run("write_file", {
+            "path": "a.py", "content": "def f():\n    return 没定义过的名字\n"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertNotIn("语言服务器", out.content)
+        self.assertNotIn("⚠", out.content)
+
+    def test_不碰语言服务器_所以它挂了也不影响写文件(self):
+        def boom(target):
+            raise RuntimeError("不该走到这里")
+        self.box.lsp.get = boom
+        out = self.box.run("write_file", {"path": "a.py", "content": "x = 1\n"})
+        self.assertFalse(out.is_error, out.content)
+        out = self.box.run("write_file", {"path": "b.py", "content": "def f(:\n"})
+        self.assertTrue(out.is_error, "语法检查该照旧在，它不依赖语言服务器")

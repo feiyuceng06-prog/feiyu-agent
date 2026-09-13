@@ -21,6 +21,7 @@ from feiyu import credits as credits_mod
 from feiyu import enabled, events, keys, permissions, serve, ui
 from feiyu import skills as skills_mod, tools as tools_mod
 from feiyu.agent import Feiyu
+from feiyu.providers import _as_rates
 from pathlib import Path
 
 
@@ -807,6 +808,7 @@ class TestKeys(unittest.TestCase):
             self.busy = False
             self.commands = {}
             self._level = None
+            self.workspace = agent.toolbox.root      # status() 要它
             self.proto = serve.Protocol(out)
 
         def push_status(self): pass
@@ -868,11 +870,58 @@ class TestKeys(unittest.TestCase):
         box = self.box()
         self.add(box, limit="64000")
         box.key_write({"name": "甲", "model": "x/y2"})
-        self.assertEqual(keys.load()["甲"]["price"], [0.1, 1.0, 2.0])
+        self.assertEqual(keys.load()["甲"]["price"], {"hit": 0.1, "input": 1.0, "output": 2.0})
         self.assertEqual(keys.load()["甲"]["limit"], 64000)
         box.key_write({"name": "甲", "model": "x/y2", "price": [], "limit": ""})
         self.assertIsNone(keys.load()["甲"]["price"])
         self.assertIsNone(keys.load()["甲"]["limit"])
+
+    def test_面板填的价要真能算出钱(self):
+        """**存进去的形状得是 `_as_rates` 认的那个。**
+
+        原来面板存的是列表、`/key add` 存的是 dict，而 `_as_rates` 只认后者 ——
+        于是面板上填了价照样 `priced=False`、一分钱不显示（界面上那句提示说的是
+        "不填就只显示 token 数"，填了也一样，看着像坏了）。这条断言从存盘一路
+        走到 `rates`，形状再漂开就会红。
+        """
+        box = self.box()
+        self.add(box)
+        self.assertEqual(_as_rates(keys.load()["甲"]["price"]), (0.1, 1.0, 2.0))
+
+    def test_改别的字段不会把面板读不到的写入价冲掉(self):
+        """面板上没有「缓存写入价」这一格，它不该因为存了一次就消失 """
+        box = self.box()
+        self.add(box)
+        keys.add("甲", base_url="https://a/v1", model="x/y", key="sk-绝密",
+                 price={"hit": 0.1, "input": 1.0, "output": 2.0, "write": 1.25})
+        box.key_write({"name": "甲", "model": "x/y", "price": ["0.1", "1", "2"]})
+        self.assertEqual(_as_rates(keys.load()["甲"]["price"]), (0.1, 1.0, 2.0, 1.25))
+
+    def test_回一趟面板再存回来_价格不丢(self):
+        """push_models 出去的形状，原样送回来必须还是同一个价
+
+        两边形状不一样的时候这条就是**抹掉价格**：表单读不出 dict 里的值，
+        回来是三个空格子，`merged()` 那段注释要防的事故照样发生。
+        """
+        box = self.box()
+        self.add(box)
+        box.push_models()
+        shown = self.rows()[0]["price"]
+        box.key_write({"name": "甲", "model": "x/y", "price": shown})
+        self.assertEqual(_as_rates(keys.load()["甲"]["price"]), (0.1, 1.0, 2.0))
+
+    def test_没填价格时状态里的_cost_是_None(self):
+        """**`round(None)` 会把整个 --serve 带走。**
+
+        `status()` 在每一处 push_status 上，连主循环那道兜底 except 自己都要调它，
+        所以它一抛异常就不只是"这条没处理成"——是进程没了，桌面端表现为窗口不响应。
+        没配价格（`priced=False`）是常态，不是异常输入。
+        """
+        box = self.box()
+        self.add(box, price=[])
+        self.agent.backend.priced = False
+        self.assertIsNone(self.agent.cost)
+        self.assertIsNone(box.status()["cost"])
 
     def test_新配置没有_key_就不给存(self):
         box = self.box()

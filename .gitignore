@@ -28,3 +28,6 @@ models.json
 *.pem
 *.key
 secrets*
+
+# 题库拉下来的数据集缓存 几 MB，重拉一次就有，不进版本库
+evals/.cache/

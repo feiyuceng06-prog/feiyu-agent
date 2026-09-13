@@ -17,7 +17,8 @@ _DIR = os.path.join(
 STORE = os.path.join(_DIR, "models.json")
 STATE = os.path.join(_DIR, "state.json")
 
-FIELDS = ("kind", "base_url", "model", "key", "price", "vision", "max_tokens", "limit")
+FIELDS = ("kind", "base_url", "model", "key", "price", "vision", "max_tokens", "limit",
+          "effort", "thinking")
 
 
 def _write(path: str, data) -> None:
@@ -55,7 +56,7 @@ def save(entries: dict[str, dict]) -> None:
 
 
 def add(name, *, base_url, model, key, kind="openai", price=None, vision=False,
-        max_tokens=None, limit=None) -> None:
+        max_tokens=None, limit=None, effort=None, thinking=None) -> None:
     entries = load()
     entries[name] = {
         "kind": kind,
@@ -66,6 +67,9 @@ def add(name, *, base_url, model, key, kind="openai", price=None, vision=False,
         "vision": bool(vision),
         "max_tokens": int(max_tokens) if max_tokens else None,
         "limit": int(limit) if limit else None,
+        "effort": effort or None,
+        # None = 没表态（按默认走），True/False = 明确开或关
+        "thinking": None if thinking is None else bool(thinking),
     }
     save(entries)
     forget_limit(name)      # 重新填过的配置，之前学到的上限不再作数

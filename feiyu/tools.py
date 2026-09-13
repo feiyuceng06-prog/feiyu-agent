@@ -42,6 +42,8 @@ TOOL_SCHEMAS = [
             "环境变量里带 KEY/TOKEN/SECRET/PASSWORD 字样的不会传进来，读不到也不用去读 "
             "cd 会在多次调用之间保持：一旦 cd 进子目录，后续命令都从那里执行，"
             "不用每次都写 cd x && … 目录不能离开工作区，越界会被弹回 "
+            "export 的变量、source 进来的环境（venv 之类）和定义的函数也一样保持，"
+            "activate 过一次后面就不用再 activate 了 进程状态不保持：后台任务用 background "
             "read_file/write_file/edit_file 的路径始终相对工作区根目录，不受 cd 影响 "
             "过长的输出会被截断 "
         ),
@@ -56,6 +58,10 @@ TOOL_SCHEMAS = [
                 "background": {
                     "type": "boolean",
                     "description": "挂到后台跑，立刻返回一个编号，不等它结束 ",
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": "先把攒下来的变量和函数清空再执行，环境被搞坏了才用 ",
                 },
             },
             "required": ["command"],
@@ -355,21 +361,28 @@ TOOL_SCHEMAS = [
     {
         "name": "symbol",
         "description": (
-            "按语义找一个符号：definition 看它定义在哪，references 看哪些地方用到了它 "
-            "走语言服务器（pyright / clangd / rust-analyzer 等，装了才能用），"
-            "比 search 准：同名的变量、注释、字符串不会混进来 "
-            "跨文件改名、看某个函数被谁调用，优先用这个 "
-            "给出文件和符号名，最好带上它出现的行号；没装对应的服务器时会明说，那就退回 search "
+            "按语义看代码结构 走语言服务器（pyright / clangd / rust-analyzer 等，装了才能用）"
+            "outline 列出一个文件里有哪些类和函数（带行号），**几百行以上的文件先用它定位、"
+            "再用 read_file 的 offset / limit 只读那一段**，比整份读进来省一个数量级 "
+            "definition 看一个符号定义在哪，references 看哪些地方用到了它，比 search 准："
+            "同名的变量、注释、字符串不会混进来 跨文件改名、看某个函数被谁调用优先用它 "
+            "definition / references 要给 name（最好带上行号）；outline 只要 path "
+            "没装对应的服务器时会明说，那就退回 search "
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["definition", "references"]},
-                "path": {"type": "string", "description": "符号出现在哪个文件（相对工作区） "},
-                "name": {"type": "string", "description": "符号名 "},
+                "action": {"type": "string",
+                           "enum": ["outline", "definition", "references"]},
+                "path": {"type": "string", "description": "哪个文件（相对工作区） "},
+                "name": {"type": "string",
+                         "description": "符号名 definition / references 要，outline 不要 "},
                 "line": {"type": "integer", "description": "它出现在第几行（1 起始，可选，给了更准） "},
             },
-            "required": ["action", "path", "name"],
+            # name **不进必填**：outline 不需要它，而 _REQUIRED 是从这里算的，
+            # 留着的话 outline 会被"缺少参数 name"直接挡回去（真挡过一次）。
+            # definition / references 缺 name 由 _tool_symbol 自己报。
+            "required": ["action", "path"],
         },
     },
     {
@@ -437,11 +450,91 @@ TOOL_SCHEMAS = [
 # 列目录的上限 没有上限的话在 ~ 这种地方一跑就是三十多万个文件：
 # 走完要好几秒，拼出来的字符串几 MB，而模型看到的仍然只是被截断的前几十行
 LIST_CAP = 300
+# 补全一份 pattern 匹配 **不能用 `PurePath.full_match`：那是 3.13 才有的**，
+# 而 pyproject / install.sh / README 三处都说支持 3.10 起 —— 用它的那半年里，
+# 3.13 以下的 list_files 整个是坏的（一句 `'PosixPath' object has no attribute
+# full_match`，本机跑测试看不见，因为本机是 3.14）
+# 语义按 full_match 对齐过（30 个 pattern × 18 条路径逐条比对）：
+# `**` 跨任意层且可以是零层，`*` / `?` 不跨 `/`，整条路径要全匹配
+
+
+def _glob_segment(seg: str) -> str:
+    """一段（两个 `/` 之间）的通配翻成正则 `*` 和 `?` 都不许跨 `/` """
+    out: list[str] = []
+    i = 0
+    while i < len(seg):
+        ch = seg[i]
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        elif ch == "[":
+            end = seg.find("]", i + 2)      # `[]]` 里头一个 `]` 是字面量
+            if end < 0:
+                out.append(re.escape(ch))
+            else:
+                body = seg[i + 1:end].replace("\\", "\\\\")
+                out.append("[" + ("^" + body[1:] if body[:1] == "!" else body) + "]")
+                i = end
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return "".join(out)
+
+
+def glob_re(pattern: str) -> "re.Pattern":
+    """一条 glob → 一个匹配整条相对路径的正则 编一次，别每个文件编一遍 """
+    parts = [p for p in pattern.rstrip("/").split("/") if p] or [""]
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if part == "**":
+            # 末尾的 `**` 要吃掉剩下的一切；中间的连着后面那个 `/` 一起吃，
+            # 吃零层也算数（`**/*.py` 必须匹配得上根目录下的 a.py）
+            out.append(".*" if last else "(?:[^/]+/)*")
+            continue
+        out.append(_glob_segment(part))
+        if not last:
+            out.append("/")
+    return re.compile("".join(out) + r"\Z", re.S)
 SEARCH_CAP = 200          # 最多列这么多处 到顶了必须告诉模型，不能装作搜全了
 GIT_LOG_N = 15
 GIT_TIMEOUT = 60
 # diff 超过这么多字符就只给 --stat 加开头一段，让它按文件分次看
 GIT_DIFF_CAP = 12_000
+
+# 写完立刻查一遍语法，**这一刻就知道**。不查的话要等模型自己去跑测试才发现，
+# 而那至少是一整轮往返（本仓库中位 4.1 秒加整段历史重发）。
+#
+# 查到哪为止是量出来的：语法错要查（零成本、一定是它的锅），
+# 整文件的语言服务器诊断不要（A/B 负收益，理由在 `_diagnose` 的 docstring 里）。
+
+# 评测用的 A/B 开关：`FEIYU_ASSIST=off` 把 0.68.0 加的那几样"帮忙的东西"全关掉
+# （写盘前查语法、动手前先复现、symbol 的 outline）。
+#
+# **为什么要有它**：要证明这几样有用，就得拿同一批题跑两遍对比。而"改动之前"
+# 那份代码在工作区里已经不存在了，靠 git 分也分不干净（同一批改动里还混着
+# 0.67.2 的修复）。同一个二进制跑两遍、只翻这一个开关，才是能说清的对照。
+#
+# 平时不要用它。它只在 `evals/` 里出现。
+def assist_on() -> bool:
+    return os.environ.get("FEIYU_ASSIST", "").strip().lower() not in ("off", "0", "no")
+
+
+def _syntax_error(path: Path, text: str) -> str:
+    """Python 的语法错本地就能查，**不用起语言服务器** —— `ast.parse` 是标准库，
+    零成本，而语法错又是写文件最容易犯、最该当场知道的一种 """
+    if path.suffix.lower() not in (".py", ".pyi"):
+        return ""
+    import ast
+    try:
+        ast.parse(text)
+    except SyntaxError as exc:
+        return "第 %s 行：%s" % (exc.lineno or "?", exc.msg)
+    except ValueError as exc:
+        return str(exc)     # 源码里有空字节这类
+    return ""
+
 SEARCH_TIMEOUT = 30
 _MAX_OUTPUT = 30_000
 _WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -510,6 +603,57 @@ def _sandbox_note(out: str, level: str) -> str:
                 "走 ssh 的 git 远端会这样失败 让用户自己跑这条，或者换 https 远端、"
                 "或者 /sandbox off ）")
     return ""
+
+
+# shell 状态跨调用保持：每条命令跑完把导出的变量和函数 dump 到一个文件，
+# 下一条命令开头 source 回来
+#
+# **不是常驻 shell 进程。** 常驻进程得自己做取帧、僵尸回收，而且超时时只能杀
+# 前台不能杀 shell —— 杀了状态全丢。dump/restore 走的是现成那条路（cd 本来就靠
+# `pwd > 文件` 跨调用），超时、沙箱、kill 全部照旧能用，没新增失败面。
+#
+# 代价是**进程状态不跨调用**：shell 里挂的后台任务、开着的 REPL 都不留。
+# 后台任务有 background/job 那套管着，REPL 在这条路上本来也开不起来。
+_STATE_SKIP = ("PWD", "OLDPWD", "SHLVL", "_")
+# dump 的最后一行 **写完才追加**，所以它在就说明这份 dump 是完整的
+#
+# 为什么需要：`> 文件` 是先截断再写，写到一半被 SIGKILL（超时那条路）就留下半份。
+# 半份照样 `-s` 非空，`source` 时的语法错又被 `2>/dev/null` 吞掉 —— 结果是
+# **一部分变量回来了、另一部分和函数静默没了**。更糟的是它会传染：下一条命令的
+# dump 是从这个已经缺了的环境里取的，缺口就永久焊死了，而谁都看不见。
+# 没有 export，所以它自己不会进下一份 dump。
+_STATE_END = "__feiyu_end=1"
+
+
+def _state_restore(path: str) -> str:
+    quoted = shlex.quote(path)
+    return '[ "$(tail -n1 %s 2>/dev/null)" = %s ] && . %s 2>/dev/null\n' % (
+        quoted, shlex.quote(_STATE_END), quoted)
+
+
+def _save_trap(pwd_file: str, state: str) -> str:
+    """把"记下 pwd 和 shell 状态"挂到 EXIT trap 上
+
+    **不能写在命令后面当最后几行。** 命令自己 `exit`、或者 `set -e` 中途失败时，
+    后面的行根本执行不到 —— 那样 cd 和 export 会**静默丢掉**（`cd /x; exit 0`
+    之后 cwd 还是老的，而模型以为自己已经进去了）。挂在 EXIT 上三种收尾都覆盖：
+    正常跑完、显式 exit、set -e 中断；退出码也照样原样带出去。
+
+    信号杀掉的那种收不到（超时走的是 SIGKILL），那时候状态丢掉反而更安全。
+
+    **过滤那几个变量不能用 `grep -v`** 值里带换行的变量会被按行切开，剩下的引号
+    对不上，整份 dump 就 source 不回来了 在子 shell 里 unset 再 `export -p`，
+    引号由 bash 自己管，多行值也是对的
+    """
+    return (
+        "__feiyu_save() {\n"
+        "  pwd > %s 2>/dev/null\n"
+        "  ( unset -v %s 2>/dev/null; unset -f __feiyu_save 2>/dev/null;"
+        " export -p; declare -f ) > %s 2>/dev/null"
+        " && echo %s >> %s 2>/dev/null\n"
+        "}\ntrap __feiyu_save EXIT\n"
+    ) % (shlex.quote(pwd_file), " ".join(_STATE_SKIP), shlex.quote(state),
+         shlex.quote(_STATE_END), shlex.quote(state))
 
 
 def _child_env() -> dict:
@@ -1136,9 +1280,37 @@ class Toolbox:
         # bash 改的文件（sed -i、脚本）看不见，退不了，README 里说明了
         self.undo_stack: list[tuple[Path, bytes | None]] = []
         self.lsp = lsp.Pool(self.root)  # 语言服务器，按需起、退出时杀
+        # bash 的 shell 状态（导出的变量、函数）第一次用到才建，退出时删
+        self.shell_state: str | None = None
         # 技能：名字 -> Skill 由 agent 在载入时写进来（项目那份要先经用户同意）
         self.skills: dict[str, skills_mod.Skill] = {}
         self.mcp = mcp.Registry(self.root)  # 外部 MCP 服务器的工具，启动时载入
+
+    def _diagnose(self, target: Path, text: str, before: str | None = None) -> tuple[str, bool]:
+        """写完之后这个文件的语法还成立吗 返回 (给模型看的话, 算不算写失败)
+
+        只查语法，`ast.parse`，标准库，零成本。**出任何问题都返回空** ——
+        这是个帮忙的东西，不该让它把写文件弄失败。
+
+        **语言服务器的诊断不往这里报。** 一度报过整个文件的，12 道题配对 A/B
+        量出来是负收益：轮数 +53%、token +72%、解决率没动。整文件的诊断会把它
+        引去修它没造成的问题（大文件里早就存在的类型错、未定义名）；当初特意设成
+        「不标 is_error、只报文字」也没挡住，文字本身就足够带偏。
+        取诊断的那套（`diagnose` / `drain`）也一并从 `lsp.py` 删了 —— 留着就是
+        没人调、没用例盯的死代码。真要重做，得是**只报它改过的那几行**，
+        那需要改动行号，跟原来那个整文件的签名本来就不是一回事。
+
+        **而且要报「你把它弄坏了」，不是「它是坏的」。** `before` 给了就先看
+        改之前能不能解析：本来就解析不了的（半截文件、模板、故意写的片段），
+        这次编辑没让它更坏，就不该赖在模型头上 —— 那会让它去修一个它没造成、
+        也未必该由它修的问题。
+        """
+        if not assist_on():
+            return "", False
+        bad = _syntax_error(target, text)
+        if bad and (before is None or not _syntax_error(target, before)):
+            return "⚠ 语法错误，这个文件现在是坏的：%s" % bad, True
+        return "", False
 
     def _hint_once(self, kind: str) -> bool:
         """这种提示还没说过就返回 True，并记下说过了
@@ -1215,6 +1387,10 @@ class Toolbox:
 
     def _tool_bash(self, args: dict) -> ToolResult:
         command = args["command"]
+        # **reset 要在 background 上面。** 反过来的话 `background + reset` 一起给时
+        # 直接从 background 那条路返回了，reset 被默默吃掉 —— 模型以为环境清干净了
+        if args.get("reset"):
+            self.shell_reset()
         if args.get("background"):
             return self._start_job(command)
         timeout = int(args.get("timeout", 120))
@@ -1222,18 +1398,15 @@ class Toolbox:
         # 走文件而不是 stdout，免得污染给模型看的输出
         fd, pwd_file = tempfile.mkstemp(prefix="feiyu-pwd-")
         os.close(fd)
-        wrapped = "%s\n__feiyu_rc=$?\npwd > %s 2>/dev/null\nexit $__feiyu_rc" % (
-            command,
-            shlex.quote(pwd_file),
-        )
-        # 沙箱里的 /tmp 是自己的 tmpfs，记 pwd 的那个文件得单独放行写入，
-        # 否则外面读不到，cd 就跨不了调用
+        state = self._shell_state_path()
+        wrapped = _state_restore(state) + _save_trap(pwd_file, state) + command
+        # 沙箱里的 /tmp 是自己的 tmpfs，记 pwd 和 shell 状态的那两个文件得单独
+        # 放行写入，否则外面读不到，cd 和 export 就都跨不了调用
         boxed = sandbox.wrap(wrapped, workspace=self.root, cwd=self.cwd,
-                             writable=[pwd_file])
+                             writable=[pwd_file, state])
         try:
             proc = subprocess.run(
-                boxed if boxed else wrapped,
-                shell=boxed is None,
+                boxed or [sandbox.SHELL, "-c", wrapped],
                 cwd=None if boxed else self.cwd,
                 capture_output=True,
                 text=True,
@@ -1279,11 +1452,16 @@ class Toolbox:
         )
 
     def _start_job(self, command: str) -> ToolResult:
-        """挂后台 不记 pwd：它跟后面的命令是并行的，cd 跟着它走只会串味 """
-        boxed = sandbox.wrap(command, workspace=self.root, cwd=self.cwd)
+        """挂后台 **继承 shell 状态但不写回**：它跟后面的命令是并行的，
+        cd 和 export 跟着它走只会串味；而继承是必要的 —— 前面刚 activate 了 venv，
+        挂后台跑的 pytest 也该在那个 venv 里
+        """
+        state = self.shell_state
+        script = (_state_restore(state) + command) if state else command
+        boxed = sandbox.wrap(script, workspace=self.root, cwd=self.cwd,
+                             writable=[state] if state else ())
         proc = subprocess.Popen(
-            boxed if boxed else command,
-            shell=boxed is None,
+            boxed or [sandbox.SHELL, "-c", script],
             cwd=None if boxed else self.cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1350,6 +1528,30 @@ class Toolbox:
             summary="超时（%d 秒）" % timeout,
             detail=_peek(lines[-4:], 4),
         )
+
+    def _shell_state_path(self) -> str:
+        """装 shell 状态那个文件，第一次用到才建 `mkstemp` 给的就是 0600 ——
+        里头是整份导出的环境，权限必须是私有的
+        """
+        if self.shell_state is None:
+            fd, path = tempfile.mkstemp(prefix="feiyu-shell-")
+            os.close(fd)
+            self.shell_state = path
+        return self.shell_state
+
+    def shell_reset(self) -> None:
+        """把攒下来的 shell 状态丢掉 退出时收尾，也是 bash 的 reset 参数的出口
+
+        **必须有这个出口**：状态跨调用保持的代价是一条命令能把后面全搞坏
+        （`export PATH=` 这种），没法退回去的话这个会话就废了
+        """
+        if self.shell_state is None:
+            return
+        try:
+            os.unlink(self.shell_state)
+        except OSError:
+            pass
+        self.shell_state = None
 
     def _track_cwd(self, pwd_file: str) -> None:
         """命令跑完后更新 cwd 走出工作区的一律弹回根目录 """
@@ -1471,10 +1673,15 @@ class Toolbox:
             return ToolResult("%s 已经是%s了，不是普通文件，写它会把整个进程挂住 "
                               % (args["path"], odd), is_error=True, summary="不是普通文件")
         existed = target.is_file()
+        before = None
         if existed:
             blocked = self._check_fresh(target, args["path"])
             if blocked is not None:
                 return blocked
+            try:
+                before = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                before = None
         self._snapshot(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         content = args["content"]
@@ -1483,15 +1690,24 @@ class Toolbox:
             with open(target, "a", encoding="utf-8") as f:
                 f.write(content)
             self.files.record(target, target.read_bytes())
-            total = target.read_text(encoding="utf-8").count("\n") + 1
+            whole = target.read_text(encoding="utf-8")
+            total = whole.count("\n") + 1
             n = content.count("\n") + 1
-            return ToolResult(f"已追加 {n} 行到 {args['path']}，现在共 {total} 行",
-                              summary=f"追加 {n} 行")
+            bad, broken = self._diagnose(target, whole, before=before)
+            return ToolResult(
+                f"已追加 {n} 行到 {args['path']}，现在共 {total} 行"
+                + ("\n\n" + bad if bad else ""),
+                is_error=broken,
+                summary=f"追加 {n} 行" + ("，但有错" if bad else ""))
         target.write_text(content, encoding="utf-8")
         self.files.record(target, content.encode("utf-8"))
         n = content.count("\n") + 1
         verb = "覆盖" if existed else "新建"
-        return ToolResult(f"已写入 {n} 行到 {args['path']}", summary=f"{verb} {n} 行")
+        bad, broken = self._diagnose(target, content, before=before)
+        return ToolResult(
+            f"已写入 {n} 行到 {args['path']}" + ("\n\n" + bad if bad else ""),
+            is_error=broken,
+            summary=f"{verb} {n} 行" + ("，但有错" if bad else ""))
 
     def _tool_edit_file(self, args: dict) -> ToolResult:
         target = self._resolve(args["path"])
@@ -1534,14 +1750,18 @@ class Toolbox:
         self.files.record(target, updated.encode("utf-8"))
         head = (f"已编辑 {args['path']}，{len(edits)} 处改动、替换 {total} 处" if len(edits) > 1
                 else (f"已编辑 {args['path']}，替换 {total} 处" if total > 1 else f"已编辑 {args['path']}"))
+        bad, broken = self._diagnose(target, updated, before=text)
         return ToolResult(
-            head + ("\n" + "\n".join(notes) if notes else ""),
-            summary=f"已修改 {total} 处",
+            head + ("\n" + "\n".join(notes) if notes else "")
+            + ("\n\n" + bad if bad else ""),
+            is_error=broken,
+            summary=f"已修改 {total} 处" + ("，但有错" if bad else ""),
             detail=_diff(text, updated),
         )
 
     def _tool_list_files(self, args: dict) -> ToolResult:
         pattern = args.get("pattern", "**/*")
+        rx = glob_re(str(pattern))
         matches = []
         capped = False
         # 走 os.walk 而不是 glob，是为了在**目录一级**剪掉 .venv / node_modules：
@@ -1551,10 +1771,10 @@ class Toolbox:
             dirnames[:] = sorted(d for d in dirnames if d not in files.IGNORE_DIRS)
             here = Path(dirpath).relative_to(self.root)
             for name in sorted(filenames):
-                rel = here / name if str(here) != "." else Path(name)
-                if not rel.full_match(pattern):
+                rel = str(here / name) if str(here) != "." else name
+                if not rx.match(rel):
                     continue
-                matches.append(str(rel))
+                matches.append(rel)
                 if len(matches) >= LIST_CAP:
                     capped = True
                     break
@@ -1991,11 +2211,14 @@ class Toolbox:
 
     def _tool_symbol(self, args: dict) -> ToolResult:
         action = args.get("action")
-        if action not in ("definition", "references"):
-            return ToolResult("action 只能是 definition 或 references ", is_error=True)
+        if action not in ("definition", "references", "outline"):
+            return ToolResult("action 只能是 definition / references / outline ",
+                              is_error=True)
         target = self._resolve(args["path"])
         if not target.is_file():
             return ToolResult(f"{args['path']} 不存在 ", is_error=True, summary="文件不存在")
+        if action == "outline":
+            return self._outline(target, args["path"])
         name = str(args.get("name") or "").strip()
         if not name:
             return ToolResult("name 是空的 ", is_error=True)
@@ -2039,6 +2262,46 @@ class Toolbox:
             body += "\n\n…（只列了前 %d 处，还有更多）" % lsp.MAX_RESULTS
         return ToolResult(body, summary="%d 处%s%s" % (len(rows), label, "（已截断）" if capped else ""),
                           detail=_peek(rows))
+
+    def _outline(self, target: Path, shown: str) -> ToolResult:
+        """文件骨架：类 / 函数 / 方法 + 行号
+
+        **给的是路标，不是内容。** 一个 2476 行的文件整份读进来是一万六千多
+        token，而且每一轮都要重发；骨架只有几百。看完再用 read_file 的
+        offset/limit 读那一段 —— 系统提示里"大文件先定位再读"一直缺的就是这个。
+        """
+        if lsp.server_for(target) is None:
+            return ToolResult(
+                "这种文件没有可用的语言服务器（%s 认的是 %s） 退回用 search 找 " % (
+                    target.suffix or "无后缀",
+                    "、".join(sorted({v[0] for v in lsp.SERVERS.values()}))),
+                is_error=True, summary="没有语言服务器")
+        text = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            rows = self.lsp.get(target).outline(target, text)
+        except (OSError, RuntimeError) as exc:
+            return ToolResult("语言服务器出错：%s 退回用 search 找 " % exc,
+                              is_error=True, summary="语言服务器出错")
+        total = len(text.splitlines())
+        if not rows:
+            return ToolResult(
+                "%s 里没找到类或函数（共 %d 行） 可能它还没分析完，或者这份文件"
+                "本来就没有结构 —— 直接 read_file 看吧 " % (shown, total),
+                summary="没有结构")
+        lines = ["%s（共 %d 行）的结构，**这是路标不是内容** —— "
+                 "找到要看的那一处，再用 read_file 的 offset / limit 读那一段：" % (shown, total)]
+        for r in rows[:lsp.MAX_OUTLINE]:
+            lines.append("%s%s %s  第 %d 行" % (
+                "  " * r["depth"], r["kind"] or "?", r["name"], r["line"]))
+        capped = len(rows) > lsp.MAX_OUTLINE
+        if capped:
+            lines.append("…（只列了前 %d 项，还有 %d 项）"
+                         % (lsp.MAX_OUTLINE, len(rows) - lsp.MAX_OUTLINE))
+        return ToolResult(
+            "\n".join(lines),
+            summary="%d 项结构 / 共 %d 行%s" % (
+                min(len(rows), lsp.MAX_OUTLINE), total, "（已截断）" if capped else ""),
+            detail=_peek(lines[1:], 4))
 
     def _tool_search(self, args: dict) -> ToolResult:
         regex = args["regex"]

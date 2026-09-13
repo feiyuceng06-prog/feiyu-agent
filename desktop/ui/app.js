@@ -33,6 +33,8 @@ let busy = false;
    不能追加 DOM —— markdown 的记号会跨 delta。 */
 let saying = null;
 let sayingText = "";
+let sayingTimer = 0;    // 攒着还没画的那一次重绘，见 scheduleSaying
+let sayingPainted = 0;  // 上次画完的时刻
 let commands = [];
 let seenAsk = new Set();
 /* 这次的 help 事件要不要画出来。连上时我们自己发一次去取补全清单，
@@ -165,7 +167,9 @@ function md(src) {
       out.push(`<pre><code>${esc(body.join("\n"))}</code></pre>`);
       continue;
     }
-    if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) { out.push("<hr>"); i++; continue; }
+    // `-{3,}` 不是 `---`：四个以上连字符也是分隔线（markdown 就这么定的），
+    // 只认三个的话 `----` 会掉到下面的段落兜底里去，那儿原来会死循环
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { out.push("<hr>"); i++; continue; }
 
     const head = /^(#{1,6})\s+(.*)$/.exec(line);
     if (head) {
@@ -222,6 +226,13 @@ function md(src) {
            && !bullet.test(lines[i]) && !isRow(lines[i])) {
       para.push(lines[i++]);
     }
+    /* **这一行是死循环的唯一出口，别删。** 上面那个 while 的停止条件里有几种情况
+       前面所有分支都不认，最常见的是**没有分隔行的表格行**（`| a | b |`）——
+       模型流式吐一张表时，表头落地、分隔行还没到的那一瞬间就是这个形状。
+       那时 para 是空的、i 一步没动，外层 while 就原地转圈往 out 里塞 <p></p>：
+       CPU 100%、内存无上限地涨，**实测 70 秒吃掉 16 G**，整个窗口卡死。
+       兜成一段普通正文是对的（GitHub 对孤立表格行也是当段落渲染）。 */
+    if (!para.length) para.push(lines[i++]);
     out.push(`<p>${inline(para.join("\n"))}</p>`);
   }
   return out.join("");
@@ -349,10 +360,40 @@ function setStatus(s) {
   }
 }
 
+/* 流式正文**不能每个 delta 画一次**。一个 token 一个 delta，而每次都要把整条消息
+   重跑一遍 md() 再整块 innerHTML 重写（markdown 的记号跨 delta，追加 DOM 对不上，
+   所以必须整份重渲染）——实测约 4.6 ms 一次，日志里真实出现过的 6696 token 那一轮
+   就是三十秒主线程全占：窗口不重绘、点不动，看着就是卡死。
+   合并到每帧最多画一次，几千份降到几百份，md() 那侧的累计开销也一起降下来。 */
+const SAYING_GAP = 80;   // 两次重绘之间至少隔这么久（毫秒）
+
+function paintSaying() {
+  sayingTimer = 0;
+  sayingPainted = performance.now();
+  if (!saying) return;
+  saying.innerHTML = `<div class="prose">${md(sayingText)}<span class="cursor"></span></div>`;
+}
+
+/* **按固定间隔节流，不是按帧。** 一次重绘的代价随这条消息变长而线性上涨，
+   按帧画的话一条流了一分钟的长消息要画几千次，加起来照样是十几秒的主线程；
+   钉死 12.5 次/秒之后，总开销只跟"流了多久"有关，跟 delta 有多少无关。
+   80 ms 的延迟人眼看不出来（光标还在闪）。 */
+function scheduleSaying() {
+  if (sayingTimer) return;
+  const wait = Math.max(0, SAYING_GAP - (performance.now() - sayingPainted));
+  sayingTimer = setTimeout(paintSaying, wait);
+}
+
 /* 一块正文写完了：重渲染一次去掉光标。
    **两个地方都要调** —— turn_end 是一种收尾，中途起了个工具调用也是一种，
-   只管前者的话被打断的那块会一直留着一个闪的光标。 */
+   只管前者的话被打断的那块会一直留着一个闪的光标。
+   **必须先把攒着的那一帧撤掉**：不撤的话它会在 saying 被置空之后才跑，
+   要么什么都不画（还好），要么把光标又加回一块已经收尾的正文上。 */
 function closeSaying() {
+  if (sayingTimer) {
+    clearTimeout(sayingTimer);
+    sayingTimer = 0;
+  }
   if (saying) {
     saying.innerHTML = `<div class="prose">${md(sayingText)}</div>`;
     fillShots(saying);
@@ -536,8 +577,7 @@ function handle(ev) {
         sayingText = "";
       }
       sayingText += ev.delta;
-      // 每次整份重渲染：markdown 的记号会跨 delta，追加 DOM 是对不上的
-      saying.innerHTML = `<div class="prose">${md(sayingText)}<span class="cursor"></span></div>`;
+      scheduleSaying();
       break;
 
     case "note":

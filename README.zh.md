@@ -131,7 +131,7 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑完一个任务就退出
 
 | 工具 | 说明 |
 |---|---|
-| `bash` | 跑 shell 命令。`cd` 在多次调用之间保持；长命令可以挂后台 |
+| `bash` | 跑 shell 命令。`cd`、export 的变量、source 进来的环境（venv）和定义的函数都在多次调用之间保持；长命令可以挂后台 |
 | `read_file` `write_file` `edit_file` | 读、写、精确替换。路径相对工作区根目录。`edit_file` 能一次改同一文件的多处，对不上时会指出最接近的位置；`write_file` 可以追加 |
 | `list_files` `search` | 按通配符列文件、按正则搜内容 |
 | `symbol` | 走语言服务器找定义和引用（pyright、clangd、rust-analyzer、typescript-language-server、gopls、lua-language-server，装了才能用） |
@@ -259,6 +259,19 @@ verify: npm test
 ```
 
 之后它每次写完或改完文件都会跑这条命令，没过就把报错交给它自己修。报错会先给一份要点（哪个用例挂了、断言是什么、编译错在哪行），再附原文。
+
+**长任务的两道闸。** 同一份约定文件里，另起一行：
+
+```
+max-rounds: 0
+budget: 5
+```
+
+`max-rounds` 是连续调多少轮工具之后停下来问一句（出厂 25，**0 是不限**）。出厂那个数是给交互用的：改一行、编译、看报错、再改这种循环几百轮起步，事先给不出一个对的数字。
+
+**放开轮数就得把 `budget` 填上。** 非交互场景（管道、一次性任务）没人回答那句问话，轮数不设闸时钱是唯一那道闸；而没填过价格的模型算不出花了多少，那时两道闸一道都不在。
+
+命令行的 `--max-rounds` / `--budget` 比约定文件优先，`/context` 重载也不会把它盖回去。
 
 **钩子。** 全局写在 `~/.config/feiyu/hooks.json`，项目写在 `.feiyu/hooks.json`：
 

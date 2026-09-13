@@ -51,9 +51,17 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 
 - **版本号每次改完就 bump**。单一真源是 `feiyu/__init__.py` 的 `__version__`，
   `pyproject.toml` 用 `[tool.setuptools.dynamic]` 读过来。小改动进 patch，加功能进 minor。
+- **桌面端那三处版本号手抄的，要跟着一起改**：`desktop/Cargo.toml`、
+  `desktop/Cargo.lock`（`feiyu-desktop` 那条）、`desktop/tauri.conf.json`。
+  漂了不报错，只是窗口状态栏显示错版本 —— 0.69.1 发现它们已经漂了两代，
+  现在 `tests/test_cli.py::TestVersionSync` 盯着。
 - **README 有中英两份**（英文 `README.md` 是默认展示的那份，中文 `README.zh.md`），互相链接，改一份必须改另一份。
 - 不引新依赖来解决小问题。现有依赖只有 `anthropic`、`pillow`、`prompt_toolkit`，
   `openai` 是可选 extra。
+- **最低 Python 是 3.10**（`pyproject` / `install.sh` / README 三处都这么写）。
+  本机是 3.14，所以**用了新版本才有的 stdlib API，测试照样全绿** —— 0.26.2 的
+  `PurePath.full_match`（3.13+）就这么把 `list_files` 在 3.12 上坏了一年多。
+  拿不准就 `uv venv --python 3.11 /tmp/p311` 建一个跑一遍，二十秒的事。
 - 注释只写代码本身表达不了的约束，不要解释「这段在干什么」。
 
 ## 改 ui.py 前必读
@@ -294,8 +302,10 @@ ods 还要处理 `number-columns-repeated`（连续空列会被压成一个单�
 
 ## 平台
 
-POSIX only。Windows 原生跑不了的四处：`install.sh`（bash）、`_tool_bash` 的 cd 保持
-（`$?`/`pwd`/`exit $var` 是 POSIX sh）、`EscInterrupt`（termios，`os.name` 已判断所以是静默失效）、
+POSIX only。Windows 原生跑不了的四处：`install.sh`（bash）、`_tool_bash` 的状态保持
+（0.69.0 起要的是**真 bash**：`export -p` / `declare -f` / `unset -v`，不再只是 POSIX sh；
+`sandbox.SHELL` 找不到 bash 会退回 `/bin/sh`，那时候 `source 相对路径` 和状态保持都打折）、
+`EscInterrupt`（termios，`os.name` 已判断所以是静默失效）、
 `ui.confirm`（guard 没启用时一律返回 "no"，**等于 confirm 模式在 Windows 上全拒**）。
 另外 `0o600` 在 Windows 上是空操作，密钥文件没保护。macOS 全部可用。
 
@@ -903,6 +913,105 @@ schema 里只留"怎么用"。**加新工具时，先问一句：系统提示里
   既有那条用例原样通过，说明非交互行为没变。
 - **用户在那儿自由输入的话要带给模型**（`_stop_runaway(said=)`）：
   丢掉的话他下一句得把同样的话再说一遍。
+
+### 0.68.2：桌面端卡死的真凶是 `md()` 的死循环
+
+0.68.1 修的重绘开销是真的（78.5% → 6.0%），**但用户装了修复之后还是卡死**。
+这次是当场逮的：`WebKitWebProcess` 瞬时 CPU 100%+、RSS 从 250 MB 一路涨到
+**24 GB**（机器一共 31 G），而 agent 那侧日志停在一条 `calls` 字段为空的
+`turn`（纯文本收尾）之后一片安静。**这个形状是死循环，不是渲染慢**：
+渲染慢不会漏内存，也不会在 agent 静止时继续烧 CPU。
+
+`md()` 的外层 `while (i < lines.length)` 靠每个分支自己推进 `i`，而**段落兜底那个
+分支在一次循环都跑不动时不推进**：
+
+```js
+const para = [];
+while (… && !bullet.test(lines[i]) && !isRow(lines[i])) para.push(lines[i++]);
+out.push(`<p>…</p>`);          // para 为空时 i 没动 → 原地转圈
+```
+
+进得到这里、又过不了 while 条件的输入有两类，**都是天天出现的**：
+
+1. **没有分隔行的表格行**（`| a | b |`）。表格分支要求下一行是 `|---|`，
+   而模型流式吐一张表时，表头落地、分隔行还没到的那一瞬间就是这个形状 ——
+   也就是说**每画一张表都会撞一次**，只是有时下一个 delta 来得快、有时不。
+   `> | a | b |` 同样中招（blockquote 递归调 `md()`）。
+2. **不是整行的 `---`**（`--- 分隔`）。顺带把 hr 的正则从 `---` 放宽成 `-{3,}`，
+   `----` 本来就该是分隔线。
+
+修法是一行：`if (!para.length) para.push(lines[i++]);` —— 兜成一段普通正文，
+跟 GitHub 对孤立表格行的处理一致。
+
+**新夹具 `desktop/dev/md_check.mjs`**（12 条真实形状，`node dev/md_check.mjs <页面地址>`）：
+
+- 为什么 `fuzz_ui.mjs` 抓不到：它灌的是畸形**事件**，而这里坏的是一条合法事件里的
+  一段**合法 markdown**。两个夹具都要跑。
+- 判据靠 `Runtime.evaluate` 的 `timeout` —— 它能打断同步死循环（V8 的
+  TerminateExecution），所以死循环在夹具里是「超时」而不是「夹具自己也挂住」。
+- **CDP 超时回的是 `{error}` 不是 `{result}`**。第一版的 `call()` 只取 `m.result`，
+  于是真撞上死循环时夹具自己在 `out.exceptionDetails` 上 TypeError 崩掉 ——
+  判据在最该报警的那一刻反而废了。收 `m` 整条，`m.error` 和
+  `m.result.exceptionDetails` 都算「转不出来」。
+- 报了失败之后要 `Page.navigate` 重载：被 terminate 过的 JS 上下文未必还能用，
+  不重载的话后面每条都跟着假失败。
+- 回退验证：撤掉那一行之后 4 条真的转不出来（其中「四个连字符」因为 hr 正则那处
+  独立的修改仍然通过——两处修的是两个触发点）。
+
+### 0.68.1：流式重绘吃掉 78.5% 的主线程（**但这不是「卡死」的原因，见 0.68.2**）
+
+用户报窗口会卡死。**不是死锁，是前端把主线程占满了。** `case "text"` 每来一个 delta
+就把整条消息重跑一遍 `md()` 再整块 `innerHTML` 重写，而这条链上从头到尾没有合并：
+provider 一个 token 一个 chunk → `ui.py` 的 `events.emit("text", delta=…)` →
+stdio 一行 JSON → 前端一次全量重渲染。
+
+怎么量的（headless Chrome 接 devserver，灌真实 `handle()`，200 个工具块当背景、
+1734 个 DOM 节点，6700 个 delta / 16400 字按三十秒的真实速度喂）：
+
+| | 主线程忙 | 占比 |
+|---|---|---|
+| 改之前 | 23537 ms | **78.5%** |
+| 现在 | 1799 ms | 6.0% |
+
+6700 token 那一轮是日志里真实出现过的（09-12 04:16，`out=6696`）。
+`md()` 本身不是瓶颈——同样的量累计只有 526 ms，开销全在 `innerHTML` 和重排上，
+而重排代价还跟整个 transcript 的 DOM 体积成正比（transcript 里的块从来不删）。
+
+- **按固定间隔节流，不是按帧。** 一次重绘的代价随消息变长线性上涨，`requestAnimationFrame`
+  按帧画的话，一条流一分钟的长消息要画几千次，加起来照样十几秒。`SAYING_GAP = 80`
+  把重绘钉死在 12.5 次/秒之后，总开销只跟「流了多久」有关，跟 delta 有多少无关。
+- **`closeSaying` 必须先 `clearTimeout`**：不撤的话那次攒着的重绘会在 `saying` 被置空
+  之后才跑，要么白跑，要么把光标又加回一块已经收尾的正文上。
+- **滚动语义一个字没动**：`case "text"` 本来就不跟着滚（只有 `block()` 创建时跟），
+  顺手加上等于改行为，不在这次范围里。
+- 改完按规矩跑了 `dev/fuzz_ui.mjs`（102 条畸形事件全接住）。
+  **`devserver` 用 `include_str!` 把 `ui/` 编进二进制**，改前端之后要
+  `cargo build --release --bin feiyu-devserver` 才能用夹具看到新代码。
+
+顺带记一条排查手法：`serve.py` 的 `REPLY_TIMEOUT = 600.0` 会造成**另一种**「看着像死了」——
+agent 要问话时阻塞整整十分钟，超时后静默停掉。trace 日志里认它很容易：
+空档正好是 600.0 秒，而那条 `round_limit` 没有 `answer` 字段。两周日志里只有 4 次。
+
+### 0.68.0：两道闸都能写进约定文件，`max-rounds: 0` 是不限
+
+`verify:` 已经在约定文件里了，闸却只能从命令行给——意味着「这个项目的活本来就要几百轮」
+这件事没地方记，每次起会话都得重敲 `--max-rounds`。现在 `max-rounds:` / `budget:`
+跟 `verify:` 同一个机制（`ROUNDS_LINE` / `BUDGET_LINE` + `find_limits`）。
+
+- **`find_limits` 返回的 dict 里没写的键不出现，不要用 0 表示"没配"**：0 是"不限"这个
+  明确的选择。混起来的话，约定文件里只写了 `max-rounds` 就会把命令行给的 `budget` 清成 0。
+- **`__main__` 里判的是 `is not None` 不是真值**：默认值从 0 改成了 None，
+  否则 `--max-rounds 0`（显式要求不限）会被当成没给，约定文件里那个数原样留着。
+- **`limit_cli` 记住命令行显式给过哪几项**，`/context` 重载时跳过：
+  用户敲了 `--max-rounds` 就是要这个数，不该被仓库里的一行改掉。
+- **`max_rounds == 0` 时闸整个不判**（`if self.max_rounds and rounds >= ...`）。
+  这一条要跟预算那道一起看：`_over_budget` 在**没填价格时返回空串**（`self.cost` 是 None），
+  所以「`max-rounds: 0` + 没填价格的模型 + 非交互」是**一道闸都没有**的组合。
+  README 两份都写明了这一点，代码里不拦——拦的话就等于替用户决定他不能跑无人值守的长任务。
+
+判据这次是这么定的：新用例在把改动撤掉之后必须真的挂（撤掉后 8 条挂了），
+而 `test_不设闸也还有预算那道` 要断言**预算那道**的措辞（"到了你设的上限"）——
+轮数那道的话里也有"我先停下"，只断这三个字的话，闸没关它照样绿。
 
 ## 已知问题（未修，用户知情）
 
@@ -2704,3 +2813,469 @@ agent 那半边修好之后，剩下的就是这半边。`bridge_log()` 把它�
 
 改成等 `commands.length > 0` 再清一次 `stream` 才开灌。`input.mjs` 里那句
 「**要等 agent 回话，不是等 DOM**」早就写着了，这边一直漏着。连跑四次全干净。
+
+## 0.67.2：一次专门的找 bug，六处
+
+用户让"检查一下有没有 bug，有的话就修复"。这轮的查法跟 0.65.1 / 0.67.0 换了个面：
+**把代码逐个模块读一遍**（lint 只报出 37 条，全是风格项，一个真 bug 都没有），
+外加**换一个 Python 版本把整套用例跑一遍**——最值钱的那条就是这么掉出来的。
+
+### 1. `list_files` 在 3.13 以下整个是坏的（最要紧的一处）
+
+0.26.2 改成 `PurePath.full_match()` 剪枝，而**那是 3.13 才有的方法**。
+`pyproject` 写 `requires-python = ">=3.10"`、`install.sh` 会挑 `python3.10`、
+README 写「Needs Python 3.10 or newer」——三处都在说支持，而装在 3.12 上的话
+`list_files` 每次都回一句 `'PosixPath' object has no attribute 'full_match'`
+（被 `Toolbox.run` 那道兜底 except 接住，所以是**模型收到一句怪话**，不是崩）。
+
+本机是 3.14，所以 1069 条用例全绿。**建个 3.11 的 venv 跑一遍，5 挂 5**。
+
+现在是自己翻的 `glob_re()`：`**` 跨任意层且可以是零层、`*` / `?` 不跨 `/`、
+整条路径全匹配。语义拿 3.14 的 `full_match` **逐条比对过**（30 个 pattern × 18 条
+路径，零分歧），那张表原样进了 `test_pattern_的语义`。另有一条 `test_pattern_匹配不靠
+_3_13_才有的_API` 直接拿替身盯着「不许再碰那个方法」——**语义对不对和用没用那个 API
+是两件事，前者在新 Python 上永远绿**。
+
+**教训：本机 Python 比 `requires-python` 新的时候，绿灯是假的。**
+往后用任何 3.11 之后加的 stdlib API 之前，先想一遍这三处声明。
+（`uv venv --python 3.11` 建一个跑一遍，二十秒的事。）
+
+### 2. 并行那一批把图丢了
+
+`read_file` 在 `PARALLEL_SAFE` 里，所以「读一张图 + 读一个文件」走并行 ——
+而 `_run_parallel` 拼 `ToolOutput` 时**没抄 `image`**（串行那条抄了）。
+模型收到的只有「（下面是 a.png，1024×768）」这句话，图根本没发出去。
+同一次 `read_file`，**看不看得见图取决于它旁边有没有别的调用**，而且一个报错都没有。
+
+同一个形状还有两处：`_note_jobs` 和 `_after_tools` 会**重建**最后那条结果
+（往上面补一句「后台命令结束了」或者「校验没过」），重建时字段也没抄全。
+后台命令刚好在读图那轮结束，图就没了。
+
+**重建 dataclass 时字段要抄全** —— 这类漏字段全是静默的。
+
+### 3. 没填价格的模型能把整个 `--serve` 弄死
+
+`serve.Server.status()` 里 `cost=round(agent.cost, 6)`，而 `agent.cost`
+**会是 None**（`priced=False`，也就是这条配置没填价格 —— 界面上那句提示写的正是
+"不填就只显示 token 数"，所以这是常态不是异常输入）。`round(None)` 抛 TypeError。
+
+要命的是 `status()` 在**每一处** `push_status` 上，连主循环那道兜底 `except`
+自己都要调它 —— 于是它抛出来不是"这条没处理成"，是 `run()` 整个退出、
+桌面端窗口不响应。终端那半边一直是对的（`if spent:`），前端也早就判了
+`typeof s.cost === "number"`，**就中间这一层没判**。
+
+### 4. 面板里填的价格算不出钱，还会把终端填的价抹掉
+
+`/key add` 把价格存成 `{"hit","input","output"}`，`providers._as_rates` **只认这个形状**；
+而桌面端面板存的是 `[0.1, 1, 2]` 一个列表。后果两条：
+
+- 面板里填了价照样 `priced=False`，一分钱不显示 —— 看着像坏了（顺带就是上面第 3 条）；
+- 拿面板改一条**终端加的**配置时，表单读不出 dict 里的值、回来是三个空格子，
+  于是**把原来的价抹掉** —— 正是 `merged()` 那段注释要防的事故。
+
+存的形状定死成 dict（那是 `/key add` 和 `_as_rates` 的既有形状），
+面板那三个格子在 `serve` 这条边界上来回换一次（`price_row` / `price_dict`）。
+面板上没有的「缓存写入价」要留住，不然在面板上动一下别的字段就把它冲掉了。
+用例从存盘一路断言到 `_as_rates` 的返回值 —— **两个前端各存各的形状，只能靠贯通的断言逮住**。
+
+### 5. 一份写坏的存盘能让 feiyu 在这个目录里起不来
+
+0.67.0 给 `listing()` 加了 `_num()` 兜住 `saved_at` 的类型和量级，**但漏了 `describe()`**。
+而它比 `listing()` 更疼：它在**启动路径**上（`__main__` 里 `--resume` 和
+「这个目录有上次的对话」那两句都不带兜底），一抛 TypeError 就是敲 `feiyu` 直接崩，
+**连 `/clear` 都够不着**。
+
+**加防御性兜底时，把同一份数据的所有读法都过一遍**，别只修报上来的那一处。
+
+### 6. `@` 的 20000 字上限封不住
+
+`_listing()` 只按 `MAX_ENTRIES`（80 项）数项数，**一个字都不数**。而文件名最长 255 字，
+八十项就是两万字 —— 正好是 `MAX_CHARS` 的全部。于是 `@某目录 @某文件` 里后面那个
+分到的是**负数预算**，`_numbered` 的 `first[:budget]` 变成从末尾切：
+报出来的话是「只截了前 -509 个字符」，实际贴进去五万字。
+
+两处一起改：`_listing` 也吃预算（截断照旧要说出来），`_one` 里预算不够
+`MIN_SHARE` 就干脆不贴（跟 `expand` 里"一句话里指的东西太多"同一个说法），
+share 那行加 `max(0, left)`。**预算绝不能变成负数** —— 负数会一路传到切片上，
+切出来的东西比不贴还糟。
+
+### 查过但**没改**的
+
+- **lint 没有真 bug**：`ruff --select F,B,E7,PLE,…` 在 `feiyu/` 上 37 条，
+  全是 `PLW0603`（模块级 global，那是 `ui.THEME` / `events._sink` 的设计）
+  和测试里的 F401/F841。**别再指望 lint 找出这个项目的 bug**，第二次确认了。
+- `_parse_args` 回一个非 dict（`"123"`）的话 `Toolbox.run` 的 `key not in args`
+  会 TypeError —— 但那要模型吐出一个合法 JSON 却不是对象，实际不会发生，
+  而且冒出去也只是这一轮报错，不污染历史。记在这儿，别再查第二遍。
+- `session.new_id()` 的撞秒后缀在 `_prune` 的字典序里排在无后缀那份**前面**
+  （`-` < `.`）。`_prune` 本来就是近似的，不值得为它引一个排序键。
+
+### 验证
+
+单测 1085 条（新加 16 条），**3.11 / 3.12 / 3.14 三个版本各跑一遍全绿**；
+回退验证过（`git stash push feiyu/` 之后新加的用例全红，18 条）。
+cargo 22 条、`fuzz_serve`（32 + 110）、`fuzz_ui`（102 条）、`input.mjs` 85/85、
+`shoot.mjs` 13 张、`ui_drive.py` 4 张，全绿。
+
+**`input.mjs` 的工作区要指到这个仓库自己**（`-w $PWD`）：`@` 那七条补的是
+`feiyu/` 和 `README.md`，指到一个空目录会挂 5 条，而那不是产品的毛病。
+
+## 桌面端的行长（0.67.2 顺带）
+
+用户让"美化一下桌面端"。跟 0.67.0 同一套查法：拿 CDP 在真页面上量，再动。
+
+### 一、正文一行 51 个汉字（这轮最实的一处）
+
+`--content: 54rem` 下正文栏 760px，15px 中文是 **51 个字**、拉丁约 95 个字符，
+两个都越过可读上限（中文 35–40、拉丁 45–75）。「你」那句 18px，**42 个字**。
+长行读到行尾回不去，会丢行 —— 这是整个应用最常看的一屏上最贵的一个毛病。
+
+`--content` 不能缩：它就是为 diff 和命令输出定的（"700px 下代码行会折得很碎"）。
+所以**按内容类型分两档**，新加一个 `--measure: 34rem`：
+
+| | 吃哪一档 | 1280px 下 |
+|---|---|---|
+| 段落 / 列表 / 引用 / 标题 / 「你」那句 / 设置右栏的 `.lead` | `--measure` | 544px |
+| 代码块 / diff / 表格 / 图 / 工具输出 | `--content` | 760px |
+
+量出来：正文 51 → **36 字**，「你」42 → **30 字**，代码块照旧 760。
+
+两处用的是**同一个绝对长度**，所以 15px 的正文和 18px 的问句右边缘落在同一条
+竖线上 —— 换成 `em` 会因为字号不同而错开。
+
+### 二、敲进去的字和发出来的字差 64px
+
+`.stream` 和 `.composer__row` 本来就都是 864 居中、左边缘同在 328，可输入框从
+**368** 起（第一列是 `auto`，只有那个 ＋ 那么宽），而正文从 **432** 起。
+同一句话，敲的时候在一处、发完在另一处。
+
+输入区第一列改吃 `--rail`，＋ `justify-self: end` 贴着 rail 那条线（跟左边一列
+的大写标签同一侧），textarea 的文字就落回 432。
+
+**窄屏要把这一列退回 `auto`。** `--rail` 在 46rem 以下是 0，不退的话
+`justify-self: end` 把 ＋ 的右边缘钉在 0 上，整个按钮溢到屏幕外 —— 390px 下
+只剩半个加号。`3_narrow` 那张一眼看见的。
+
+### 三、行高一律是长度，不是比例
+
+设计文档第三条写着"line-height 是长度不是比例"，而代码里有四处比例值：
+`.talk__title` 1.4（19.6px）、`.block--you .block__body` 1.5（27px）、
+`.prose h1/h2/h3` 1.35、`.prose pre code` 1.55。全换成长度（20 / 28 / 24 / 20）。
+`.block--you` 的标签行高要跟着一起改，不然标签浮在正文第一行上面。
+
+### `ui/` 是编进二进制的，改完必须重新 build
+
+devserver 走 `include_str!`，桌面端走 `frontendDist` + `generate_context!` ——
+**两个都不是运行时从磁盘读**。改完 CSS 直接跑夹具会拍到一模一样的画面，
+看着像"改了没生效"，其实是在跑旧二进制。这一轮白拍了一轮才想起来。
+
+**依赖是自动跟踪的，`cargo build` 就够，不用 clean。** 量过：光 `touch ui/app.css`
+或 `touch ui/vendor/xterm.css` 都会触发重编，整个 `frontendDist` 目录的每个文件
+都在 desktop bin 的 fingerprint 里（`generate_context!` 展开成一串 `include_str!`，
+rustc 的 dep-info 就记下了）。
+
+**别拿 build script 的 `rerun-if-changed` 判断这件事**：它只列了
+`tauri.conf.json` 和 `capabilities`，看着像"ui/ 没被跟踪"，结论是反的。
+也**别拿 `strings | grep` 验二进制里的 CSS**：Tauri 把前端资源压缩存了，
+连一直存在的 `--content: 54rem` 都搜不到，搜不到不等于没打进去
+（devserver 那个 `include_str!` 的倒是明文，能搜）。
+
+### 夹具：三条新断言，和一条一直在骗人的旧断言
+
+新加的三条，都是这轮量出来的判据：
+- 行长两档：正文 ≤ 40 字，**且代码块必须明显更宽**（后半条防的是有人把
+  `--content` 一起缩了，那样 diff 会折得很碎）；
+- 输入框的文字起点跟 `.block__body` 差 ≤ 1px；
+- 390px 下 ＋ 的 `x ≥ 0`、宽 ≥ 24。
+
+**顺带修掉一条假绿灯**：「代码块不许画自己的竖线」原来跑在 `9_parallel` 那一屏
+上 —— 那屏全是工具调用，`.prose pre` 一个都没有，`[].some()` 永远是 false。
+绿了很久，一次都没验过。挪到 `1_flow` 之后，并加一条"至少得有一个"的守卫。
+**断言要跟它量的东西在同一屏上**，这条跟 0.51.0 那两个夹具的坑是同一类。
+
+### 复查逮到的三处（头一版交出去之后自己再查一遍）
+
+**1. 「行高换成长度」这一步，换的是比例，值要按各自的字号重算。**
+窄屏那条 `.block__label { line-height: 1.4 }` 我顺手也换了，却套了
+`.talk__title` 的 20px —— 那是给 14px 的字定的，而 `.block__label` 是 **9px**
+（`--text-3xs`）。1.4 在 9px 上是 12.6，换成 20 等于在标签和正文之间凭空
+塞了 8px。改成 **12px**。**比例值一处一个数，不要跨元素抄。**
+
+顺手修掉一处既有的：`.block--you .block__label` 特指度比媒体查询里那条高，
+所以窄屏下它一直吃 27/28px，同样是 9px 的字配一个大行高。也给 12px。
+
+**2. `.clips { padding-left }` 从来没生效过 —— 它写在 `.clips` 主体之前。**
+主体里有 `padding: 0`，两条特指度相同，**后写的赢**。加"补一个属性"的规则时
+要看清它落在主体规则之前还是之后。这条干脆删了：附件条和补全菜单**都**贴
+composer 那条 864 的左边缘（328），输入框的文字对齐正文（432）是另一条线，
+各管各的 —— 两个辅助面板对齐的是这一整块，不是输入框。
+
+**3. `clips` 是 app.js 里的全局变量（待上传的数组），遮住了 id 为 clips 的元素。**
+夹具里写 `clips.innerHTML` 拿到的是那个数组。跟 CLAUDE.md 早记过的
+「裸的 `find` 是 `window.find`」是同一类，**这是第二例** —— 夹具里取元素
+一律 `document.getElementById(...)`，别指望 id 的全局兜底。
+
+**4. 量具自己被 Chrome profile 骗了一次。** profile 目录跨次保留的不只是
+localStorage，**窗口尺寸也留**：上一轮结尾把视口设成 390 就退出了，下一轮
+不显式 `setDeviceMetricsOverride` 就一路在窄屏布局里量，`.clips` 量出 x=16
+（该是 328），看着像"改动没生效"。**每次量之前先把视口设死。**
+
+### 量过但**没改**的
+
+- 8pt 间距阶只有两处不合：`.tab` / `.side__tab` 的 `margin-bottom: -1px`，
+  那是刻意压在分隔线上的。
+- 所有可点的东西都 ≥ 24px（0.67.0 修完之后没再退化）。
+- 大屏下 `.stream` 居中，2560px 时左边空 728px。桌面窗口全屏时居中比左对齐
+  好读，这是取舍不是毛病。
+- 设置右栏 `.opt` 的两列是 `112px 484px`，「默认」两个字占 112 看着空 ——
+  但那一列要装得下「只读」「计划」这类更长的名字，不动。
+
+## 0.68.0–0.68.2：能量出好坏的尺子，和几样冲着解决率去的东西
+
+用户要"超过 DeepSeek Harness"，口径定死在**任务解决率**。这一块当时按版本切成了
+三段（0.68.0 / .1 / .2），但**changelog 一直没补**，0.69.1 才回头一次写清楚 ——
+所以下面按内容分，不按那三个版本号分。
+
+### 为什么先做尺子
+
+原来的题库 21 题全过，**做任何改动都量不出好坏**。不先修这个，后面每条改动
+都只是凭感觉。整套 `evals/` 就是干这个的：
+
+- `swebench.py` 走 HF datasets-server 的 REST 接口拉数据集，**纯 urllib，不引依赖**。
+  数据集要用 `SWE-bench/SWE-bench_Verified`，`princeton-nlp/` 那个没有 `image` 字段。
+- `swedocker.py` 起每实例容器。**容器里 `bash -lc` 进的是 conda base 不是 testbed**，
+  不 `activate testbed` 的话 `import astropy` 和 `pytest` 全失败，agent 会花好几轮
+  去修一个不存在的问题。`_scrub()` 删掉 `.git/logs`，堵住从 reflog 里翻出答案那条路。
+- `swegrade.py` **判分整个交给官方 `swebench.harness.run_evaluation`**（5.0.2）。
+  自己写 FAIL_TO_PASS 解析等于自己给自己打分。`-p gold` 是验判据本身的后门。
+- `report.py` 把"没解决 / 撞上限 / 判不了 / 铺不起来 / 崩了"分开。
+  **「判不了」绝不能算进分母** —— 那是我们这边坏了，算进去等于让自己的 bug
+  拉低分数。这个错犯过两次：`submitted_ids` 含基础设施失败，不等于判过。
+- `run.py` 的 `_isolate()` 补上 `XDG_CONFIG_HOME`（原来只设了 `XDG_STATE_HOME`，
+  **跑一次评测会写用户真实的 `~/.config/feiyu/state.json`**），并把拷过去的
+  models.json 按 0700 目录 + 0600 文件放 —— `shutil.copyfile` 不带权限，
+  第一版把明文 key 摊在 /tmp 的 0644 上。
+
+`sandbox.wrap` 多一档 `FEIYU_EXEC_WRAPPER`：给了就整条走它、不再叠 bwrap，
+SWE-bench 靠它把命令送进实例容器。**它不是安全机制**，`effective()` 会照实说。
+
+### 量出来的结果：尺子饱和了
+
+50 题跑出 **45/46 = 97.8%**。这不是我们厉害，是 SWE-bench Verified 全行业都在
+96–97%。**所以它测不出任何改动的好坏。** 更硬的子集写死在
+`swebench_hard.txt`（45 道 hard）和 `swebench_ab12.txt`（12 道 A/B 用）。
+选题一律按 `difficulty` 分层 + `instance_id` 排序等距取，**不许随机**。
+
+### 轮数和预算两道闸
+
+`MAX_ROUNDS = 25` 原来是写死的，非交互下第 25 轮**硬停** —— SWE-bench 那种题
+量出来的是上限不是能力。现在有 `--max-rounds` / `--budget`，也能写进约定文件
+（`max-rounds: N` / `budget: 5`，跟 `verify:` 一个机制，要求顶格整行）。
+
+**0 是"不限"不是"没写"**，所以命令行那侧用 `is not None` 判而不是真值判，
+`limit_cli` 记住哪几项是命令行给的，`/context` 重载时不被约定文件盖掉。
+放开轮数就必须有另一道闸，否则一道题能烧掉一整轮评测的钱 —— 两道闸在
+`send()` 里同一处收口。`_stop_budget` **必须往历史补一条 assistant**，
+跟 `_stop_runaway` 同理：不补的话角色不再交替，下一轮请求直接 400。
+
+### 推理强度 `/effort`
+
+anthropic 的 `output_config.effort` 五档（low/medium/high/xhigh/max）+
+`thinking`。**xhigh / max 配上「不思考」接口会 400**，所以两个方向都要挡：
+改档位时挡一次，"当前已是 xhigh、现在把思考关掉"是另一条路，也得挡。
+`effort` / `thinking_on` 放**类属性**，因为测试里的替身不走 `__init__`。
+openai 兼容那侧只在显式填过时才发 `reasoning_effort` —— 多数模型不认，乱发会 400。
+
+### 复现优先
+
+第一次写文件之前先跑一遍 `verify:`，把"现在什么是坏的"作为背景附在那次写的结果上，
+一个会话只跑一次。挂在 tool_result 上而不是另起一条 user 消息：两种后端的消息结构
+不通用，tool_result 是唯一两边都能安全追加的地方。
+
+动机是实测的 `django__django-13212`：5 条失败测试全在 `forms_tests` 里，
+而它 52 轮只盯着题面提到的 `core/validators.py`，方向对、改了一半，
+**从头到尾没看见那几个测试名**。
+
+### 写盘前语法检查 + `symbol outline`
+
+语法检查走 `ast.parse`（标准库，零成本），查的是"它刚把这文件写坏了"。
+`outline` 走 `documentSymbol` 出"类/函数 + 行号"，给 django / sympy 那种几千行的
+文件当路标 —— `READ_CAP = 1500` 一次读不完还很贵。骨架里**只留结构，不要参数和
+局部变量**：pyright 把它们也报成 symbol，几千行文件里那是几百条噪音。
+
+`lsp.py` 的 `request()` 补了第三个分支收通知：通知有 `method` 没有 `id`，
+原来两个分支都不 match，**被 `while True` 吃掉**。
+
+### 同一个二进制跑 A/B 的开关
+
+`FEIYU_ASSIST=off` 把上面这几样一起关掉。要证明它们有用就得同一批题跑两遍，
+而"改动之前"那份代码在工作区里已经不存在了，靠 git 也分不干净
+（同一批改动里混着 0.67.2 的修复）。**同一个二进制跑两遍、只翻一个开关**，
+才是能说清的对照。这个开关只在 `evals/` 里出现。
+
+### 桌面端：md() 的死循环和流式重绘
+
+**一、`md()` 会原地死循环。** 外层 `while` 靠每个分支自己推进 `i`，而
+**没有分隔行的表格行**（`| a | b |`，模型流式吐表格时表头落地、分隔行还没到的
+那一瞬间）前面所有分支都不认，`para` 是空的、`i` 一步没动 —— 原地转圈往数组里塞
+`<p></p>`：实测 **70 秒吃掉 16 G**，整个窗口卡死。兜底是 `if (!para.length) para.push(lines[i++]);`，
+**那一行是唯一出口，别删**。顺带 `-{3,}` 也修了：四个以上连字符也是分隔线，
+只认三个的话 `----` 会掉进这个死循环。
+
+**二、流式正文不能每个 delta 画一次。** markdown 的记号跨 delta，追加 DOM 对不上，
+所以每次都要整份重渲染 —— 实测约 4.6 ms 一次，日志里真出现过的 6696 token 那一轮
+就是**三十秒主线程全占**。按固定间隔节流（80 ms，12.5 次/秒）而不是按帧：
+按帧的话一条流了一分钟的长消息还是要画几千次。收尾时**必须先把攒着的那一帧撤掉**。
+
+新夹具 `desktop/dev/md_check.mjs` 专盯这类：`fuzz_ui.mjs` 灌的是畸形**事件**，
+而这里坏的是合法事件里的一段**合法 markdown**。关键是 `Runtime.evaluate` 的
+`timeout` 能打断同步死循环（V8 的 TerminateExecution），所以死循环在夹具里
+表现为"超时"而不是"夹具自己也挂住"。
+
+## 0.69.0：shell 状态跨调用保持，以及把 0.68 的诊断撤掉
+
+### 1. 撤掉「写完报整个文件的 LSP 诊断」——A/B 量出来是负的
+
+0.68 在 `Toolbox._diagnose` 里把语言服务器的诊断并进了 tool_result。想法是
+「早知道错 = 少走弯路」。**拿 12 道 SWE-bench 配对 A/B 量了一遍，方向是反的**：
+
+| 中位 | 关 | 开 | |
+|---|---|---|---|
+| 轮数 | 42 | 64 | +53% |
+| token | 90.5 万 | 155.8 万 | +72% |
+| 花费 | | | +39% |
+
+解决率两边都 12/12，**11 道里 12 道轮数上升**（最惨 `django-16631` 44→87）。
+
+真实机制不是「早知道错 = 少走弯路」，是「**多告诉它一些它没问的事 = 多给它一些事做**」。
+整文件的诊断把它引去修它没造成的问题——大文件里早就存在的类型错、未定义名。
+当初特意设成「不标 `is_error`、只报文字」来防这个，**文字本身就足够带偏**。
+
+留下的是本地语法检查（`ast.parse`，标准库，零成本，查的是「它刚把这文件写坏了」，
+一定是它的锅）。取诊断那套（`diagnose` / `drain` / `self.diagnostics` / 两个常量）在 0.69.1 的
+体检里一并删了——没人调、没用例盯，`self.diagnostics` 还在只写不读地攒东西。
+**要重新接的话只报它改过的那几行**，那需要改动行号，跟原来那个整文件的签名不是一回事。
+`request()` 收通知那个分支留着，它修的是另一件事（通知没有 `id`，两个分支都不 match，
+会被 `while True` 吃掉）。
+`tests/test_tools.py` 里有一条 `test_不报语言服务器的诊断` 守着这个结论。
+
+**这轮最该记的教训不是诊断本身，是我动手前写下了「诊断是最大的一块」、
+然后直接实现了一整轮，没先用小样本验这个前提。** 零成本的自检做得很勤
+（判分链路那几个坑全是自检抓的），但对「这个改动有没有用」本身跳过了验证。
+
+### 2. `export` / `source` / 函数跨调用保持
+
+之前每条 bash 是个新进程，**只有 cwd** 靠「把 `pwd` 写进临时文件」跨了过去。
+所以 `source .venv/bin/activate`、`export`、定义的函数全部不留。
+
+这件事的代价是量过的：`_venv_hint` 那个提示就是为它加的，它的 docstring 记着
+**裸 python 报 ImportError 之后花了五轮翻环境（连 `find /` 都用上了）**。
+提示是绕，这里是修。
+
+做法是把现成那条路扩一格：命令跑完
+`( unset -v PWD OLDPWD SHLVL _; export -p; declare -f ) > 状态文件`，
+下一条命令开头 `[ -s 状态文件 ] && . 状态文件`。
+
+**不是常驻 shell 进程。** 常驻进程要自己做取帧、僵尸回收，而且超时时只能杀前台
+不能杀 shell——杀了状态全丢。dump/restore 复用的是 cd 已经在走的机制，
+超时、沙箱、kill 全部照旧，没新增失败面。代价是**进程状态不跨调用**：
+shell 里挂的后台任务、开着的 REPL 都不留（后台任务有 `background`/`job` 那套管着）。
+
+三个坑：
+
+- **过滤那几个变量不能用 `grep -v`。** 值里带换行的变量会被按行切开，剩下的引号
+  对不上，**整份 dump 就 source 不回来**——不是丢一个变量，是全部状态一起丢。
+  要在子 shell 里 `unset -v` 再 `export -p`，引号交给 bash 自己管。
+- **`PWD` / `OLDPWD` 必须排除。** `pwd` 内建读的就是 `$PWD`，带上旧值的话
+  cwd 跟踪会跟着一起错。
+- **状态文件要 `--bind` 进沙箱**（跟记 pwd 那个文件一样）。沙箱里 `/tmp` 是自己的
+  tmpfs，不放行的话写回的东西外面读不到。
+
+`bash` 工具多一个 `reset` 参数，`Toolbox.shell_reset()` 是它和退出收尾共用的出口。
+**必须有这个出口**：状态跨调用保持的代价是一条命令能把后面全搞坏（`export PATH=`
+这种），退不回去的话整个会话就废了。状态文件是 `mkstemp` 建的 0600——里头是整份
+导出的环境，包括任务自己 `export` 的东西；`_child_env()` 的密钥过滤在它之前生效，
+所以密钥类变量本来就不在里面（有用例盯着）。
+
+### 3. 执行用的 shell 换成真 bash
+
+`subprocess(shell=True)` 和 `sandbox.wrap` 里写死的都是 `/bin/sh`。这台机器上
+`/bin/sh` 就是 bash，**但以 `sh` 的名字起来会进 POSIX 模式**，而模型写的是 bash：
+
+- `source 相对路径` 在 POSIX 模式下**不搜当前目录**（只搜 PATH），直接 `file not found`
+- `export -p` 的输出格式也不一样（`export FOO=` 而不是 `declare -x FOO=`）
+
+工具叫 `bash`、说明里写的是 shell 命令，那就该真给它 bash。现在是
+`sandbox.SHELL = shutil.which("bash") or "/bin/sh"`，两个执行入口都显式给 argv。
+
+**第二条差异还顺手抓出我自己一个假绿的用例**：`test_dump_里没有_PWD` 只查了
+`declare -x PWD=`，在 POSIX 模式下那个字符串永远不出现——**它当时是绿的，
+但什么也没验**。现在两种格式都查。
+
+## 0.69.1：一次专门的找 bug，五处
+
+用户让"检查一下整个 agent 系统，有 bug 就修"。lint 照旧没抓到真 bug
+（4498 条里全是中文全角标点的 RUF001-003），**五条全是读新代码 + 拿运行时探出来的**。
+三个 Python 版本（3.10 声明下限 / 3.12 / 3.14 本机）各跑一遍，这次没有版本相关的。
+
+### 1. `exit` 和 `set -e` 会让 cd 和 shell 状态静默丢掉（最要紧的一处）
+
+收尾那几行（`pwd > 文件`、dump 状态）原来写在命令**后面**。命令自己 `exit`、
+或者 `set -e` 中途失败时，那几行根本执行不到：
+
+```
+cd sub; exit 0        →  cwd 还是老的，而模型以为自己已经进去了
+set -e; cd sub; false →  同上
+```
+
+**cd 那一半是 0.13.0 就有的老 bug**，一直没人发现——因为它不报错。
+现在挂在 `trap __feiyu_save EXIT` 上，三种收尾（跑完 / 显式 exit / set -e 中断）
+全覆盖，退出码照样原样带出去。信号杀掉那种收不到（超时走 SIGKILL），
+那时候状态丢掉反而更安全。
+
+### 2. 半份 dump 会被 source 一半，而且会传染
+
+`> 文件` 是先截断再写。写到一半被 SIGKILL 就留下半份，半份照样 `-s` 非空，
+`source` 时的语法错又被 `2>/dev/null` 吞掉 —— 结果是**一部分变量回来了、
+函数静默没了**。更糟的是它会传染：下一条命令的 dump 是从这个已经缺了的环境里取的，
+缺口就永久焊死，而谁都看不见。
+
+现在 dump 写完才追加一行 `__feiyu_end=1`，restore 前用 `tail -n1` 验一下；
+不完整就**整份丢掉**——宁可没有状态，也不要半份状态。
+
+### 3. `reset` 撞上 `background` 会被默默吃掉
+
+`if background: return _start_job(...)` 在 `if reset:` 上面，两个一起给的时候
+直接从 background 那条路返回了。模型以为环境清干净了，其实没有。换个顺序。
+
+### 4. 钩子和 `verify:` 跟 bash 工具用的不是同一个 shell
+
+**这条是 0.69.0 我自己造的。** 那一版把 bash 工具换成真 bash，但
+`hooks.run` 还是 `shell=True`（即 `/bin/sh`，POSIX 模式）。于是同一条命令
+`source .venv/bin/activate && pytest` 在 bash 工具里跑得起来、写进 `verify:`
+就 `file not found`。两边统一到 `sandbox.SHELL`。
+
+### 5. 子 agent 把图片丢了——**同一个坑的第三处**
+
+`subagent.py` 拼 `ToolOutput` 时没抄 `image`。而 `box.vision` 是按后端能力
+打开的，所以 `read_file` 读图时 content 只有「（下面是 a.png，1×1）」这一句，
+图在 `result.image` 里——子 agent 收到的就只有那句话。
+
+前两处（`_run_parallel`、`_note_jobs`）在 0.68 修过。**修了两次还有第三处，
+说明"手写 ToolOutput"这个动作本身就是坑**：字段一多，抄漏一个不会报错。
+现在三处都有用例盯着。
+
+### 顺带清掉的死代码
+
+0.69.0 撤掉整文件诊断之后，`lsp.py` 里 `diagnose()` / `drain()` /
+`self.diagnostics` / `DIAGNOSE_WAIT` / `MAX_DIAGNOSTICS` 全没了调用者，
+而且没有任何用例盯着；`self.diagnostics` 还在只写不读地攒东西。一并删掉。
+`request()` 收通知那个分支留着，它修的是另一件事：通知有 `method` 没有 `id`，
+两个分支都不 match，会被 `while True` 吃掉。
+
+### 一条方法上的教训
+
+给第 2 条做回退验证时，我用 `sed` 去拆掉哨兵检查，跑出来是**绿的**——
+我差点当成"这条用例没用"。实际是 `sed` 的模式压根没匹配上，改动没落地。
+**回退验证本身也要验证它真的改到了东西**，不然它给的是假的安心。
+后来改成 Python 里 `assert s.count(old) == 1` 再替换，立刻就红了。

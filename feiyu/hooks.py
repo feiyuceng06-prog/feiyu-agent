@@ -26,6 +26,7 @@ import os
 import subprocess
 
 from . import files
+from . import sandbox
 
 EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop")
 
@@ -167,8 +168,10 @@ def run(hook: Hook, payload: dict, cwd) -> Outcome:
     from .tools import _child_env
 
     try:
+        # 用户写的钩子和 `verify:` 是 bash 口味的（`source`、`[[`、数组），
+        # 跟 bash 工具走同一个 shell —— 两边不一致的话同一条命令在钩子里跑不起来
         done = subprocess.run(
-            hook.command, shell=True, cwd=str(cwd),
+            [sandbox.SHELL, "-c", hook.command], cwd=str(cwd),
             input=json.dumps(payload, ensure_ascii=False, default=str),
             capture_output=True, text=True, timeout=hook.timeout,
             env=_child_env(),

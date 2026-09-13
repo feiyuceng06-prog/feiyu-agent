@@ -208,6 +208,108 @@ class TestToolLoop(Base):
         self.assertEqual(b.messages[-1]["role"], "assistant")
         self.assertEqual(len(self.ran), agent_mod.MAX_ROUNDS)
 
+    def test_max_rounds_可以调大(self):
+        """出厂 25 是给交互用的；SWE-bench 那种题几十上百轮，
+        不调大的话量出来的是上限不是能力 """
+        self.agent.max_rounds = 3
+        b = self.use([("", [call("c%d" % i)]) for i in range(6)])
+        self.tools_ok()
+        out = quiet(self.agent.send, "停不下来的任务")
+        self.assertIn("停下来", out)
+        self.assertEqual(len(self.ran), 3, "没按 self.max_rounds 走")
+        self.assertEqual(b.messages[-1]["role"], "assistant")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_max_rounds_写_0_就没有闸(self):
+        """Lean 那种「改一行 → 编译 → 再改」的循环几百轮起步，事先给不出对的数
+        放开轮数之后收口的是 budget，不是轮数 """
+        self.agent.max_rounds = 0
+        n = agent_mod.MAX_ROUNDS * 3
+        script = [("", [call("c%d" % i)]) for i in range(n)]
+        script.append(("做完了", []))
+        b = self.use(script)
+        self.tools_ok()
+        self.agent.ask_user = lambda q, o: self.fail("不该问，闸已经关了")
+        self.assertEqual(quiet(self.agent.send, "很长的任务"), "做完了")
+        self.assertEqual(len(self.ran), n)
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_不设闸也还有预算那道(self):
+        """轮数放开了钱不能放开 否则一道题能烧掉一整轮评测的预算 """
+        self.agent.max_rounds = 0
+        self.agent.budget = 0.01
+        b = self.use([("", [call("c%d" % i)]) for i in range(40)])
+        self.tools_ok()
+        b.priced, b.cost = True, 0.5     # cost 是 property，得从后端那边给
+        out = quiet(self.agent.send, "很贵的任务")
+        # 断言要认准是**预算**那道闸停的：轮数那道的措辞里也有"我先停下"，
+        # 只断这三个字的话，闸没关它照样绿
+        self.assertIn("到了你设的上限", out)
+        self.assertEqual(b.messages[-1]["role"], "assistant")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_max_rounds_调大之后真的多跑(self):
+        """闸是 `rounds >= max_rounds`，**正好在第 n 轮就触发** ——
+        所以要跑满 n 轮还能收尾，上限得比 n 大一。这跟出厂 25 的语义一致。
+        """
+        n = agent_mod.MAX_ROUNDS + 4
+        self.agent.max_rounds = n + 1
+        script = [("", [call("c%d" % i)]) for i in range(n)]
+        script.append(("做完了", []))
+        b = self.use(script)
+        self.tools_ok()
+        self.assertEqual(quiet(self.agent.send, "很长的任务"), "做完了")
+        self.assertEqual(len(self.ran), n, "还是被出厂的 25 挡住了")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_那条空串和_None_的契约(self):
+        """**这条横跨三个函数且是承重的**：`_ask_user_cb` 没装回调时返回 `""`，
+        `_round_limit` 把 `""` 原样传回去，`send()` 只在 `is None` 时清零重跑。
+
+        写成 `if not said` 或者让 `_ask_user_cb` 返回 `None`，非交互那条路
+        就从"硬停"变成**无限续跑** —— 而那不会有任何用例自己红，只会烧钱。
+        """
+        self.agent.ask_user = None
+        self.assertEqual(self.agent._ask_user_cb("问", ["甲"]), "",
+                         "没装回调时必须是空串，不能是 None")
+        self.assertEqual(self.agent._round_limit(9), "", "没人回答要原样返回空串")
+        self.agent.ask_user = lambda q, o: agent_mod.Feiyu.CONTINUE
+        self.assertIsNone(self.agent._round_limit(9), "说接着做才返回 None")
+
+    def test_超预算就停_并补一条_assistant(self):
+        """放开轮数之后这是唯一的另一道闸 """
+        self.agent.max_rounds = 999
+        self.agent.budget = 1.0
+        b = self.use([("", [call("c%d" % i)]) for i in range(5)])
+        self.tools_ok()
+        b.priced = True
+        b.cost = 2.5                       # 已经花超了
+        out = quiet(self.agent.send, "很贵的任务")
+        self.assertIn("上限", out)
+        self.assertEqual(b.messages[-1]["role"], "assistant",
+                         "不补 assistant 的话下一轮请求角色不交替，直接 400")
+        self.assertEqual(len(self.ran), 1, "超了预算还接着跑")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_没配价格时预算这道闸自己让开(self):
+        """`self.cost` 是 None（priced=False）—— 0.67.2 刚因为 round(None) 把
+        --serve 整个弄死过。没有价格就没法谈预算，只能靠轮数那道闸 """
+        self.agent.budget = 1.0
+        b = self.use([("", [call("c1")]), ("做完了", [])])
+        self.tools_ok()
+        b.priced = False
+        self.assertIsNone(self.agent.cost)
+        self.assertEqual(self.agent._over_budget(), "")
+        self.assertEqual(quiet(self.agent.send, "干活"), "做完了")
+
+    def test_没设预算就不管钱(self):
+        self.agent.budget = 0.0
+        b = self.use([("", [call("c1")]), ("做完了", [])])
+        self.tools_ok()
+        b.priced, b.cost = True, 999.0
+        self.assertEqual(self.agent._over_budget(), "")
+        self.assertEqual(quiet(self.agent.send, "干活"), "做完了")
+
     def test_没人能回答照旧停下(self):
         """管道和一次性任务没人看着，空转很贵 """
         b = self.use([("", [call("c%d" % i)]) for i in range(agent_mod.MAX_ROUNDS + 2)])
@@ -446,6 +548,57 @@ class TestVerifyConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "FEIYU.md").write_text("verify: make test\n", encoding="utf-8")
             self.assertEqual(Feiyu(Path(tmp)).verify, "make test")
+
+
+class TestLimitConfig(unittest.TestCase):
+    """`max-rounds:` / `budget:` 跟 verify 同一个机制 出厂 25 是给交互用的，
+    证明、几十个文件的重构这类活本来就要几百轮，项目得能自己定 """
+
+    def test_单起一行才算配置(self):
+        self.assertEqual(agent_mod.find_limits("# 项目\n\nmax-rounds: 400\n"),
+                         {"max_rounds": 400})
+
+    def test_下划线和空格都认(self):
+        self.assertEqual(agent_mod.find_limits("max_rounds: 8"), {"max_rounds": 8})
+        self.assertEqual(agent_mod.find_limits("maxrounds: 8"), {"max_rounds": 8})
+
+    def test_行中间提一嘴不算(self):
+        self.assertEqual(agent_mod.find_limits("上限那条叫 max-rounds: 多少合适？"), {})
+
+    def test_没写的键不出现(self):
+        """0 是"不限"这个明确的选择，不能拿它表示"没配"——
+        混起来的话约定文件里没写 budget 就会把命令行给的 budget 清成 0 """
+        self.assertEqual(agent_mod.find_limits("max-rounds: 0"), {"max_rounds": 0})
+        self.assertEqual(agent_mod.find_limits("什么都没有"), {})
+
+    def test_budget_带不带货币符号都认(self):
+        self.assertEqual(agent_mod.find_limits("budget: 5"), {"budget": 5.0})
+        self.assertEqual(agent_mod.find_limits("budget: ¥2.5"), {"budget": 2.5})
+
+    def test_从约定文件里读出来(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "FEIYU.md").write_text(
+                "verify: make test\nmax-rounds: 400\nbudget: 5\n", encoding="utf-8")
+            a = Feiyu(Path(tmp))
+            self.assertEqual(a.max_rounds, 400)
+            self.assertEqual(a.budget, 5.0)
+
+    def test_没配就用出厂值(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "FEIYU.md").write_text("verify: make test\n", encoding="utf-8")
+            a = Feiyu(Path(tmp))
+            self.assertEqual(a.max_rounds, agent_mod.MAX_ROUNDS)
+            self.assertEqual(a.budget, 0.0)
+
+    def test_命令行给过的不被约定文件盖掉(self):
+        """用户敲了 --max-rounds 就是要这个数，`/context` 重载不该把它改回去 """
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "FEIYU.md").write_text("max-rounds: 400\n", encoding="utf-8")
+            a = Feiyu(Path(tmp))
+            a.max_rounds = 7
+            a.limit_cli.add("max_rounds")
+            a.reload_context()
+            self.assertEqual(a.max_rounds, 7)
 
 
 class TestVerifyLoop(Base):
@@ -1170,3 +1323,99 @@ class TestMentions(Base):
         quiet(self.agent.send, "随便说点什么")
         said = [m["content"] for m in b.messages if m["role"] == "user"][0]
         self.assertEqual(said, "随便说点什么")
+
+
+class TestReproduceFirst(Base):
+    """动手改第一个文件之前，先跑一遍 `verify:` 看现在什么是坏的
+
+    治的是一个实测到的失败：SWE-bench 的 `django__django-13212` 里，
+    5 条该转绿的测试全在 `forms_tests` 那个包，而模型 52 轮只盯着题面提到的
+    `core/validators.py` —— 方向对、改了一半，**从头到尾没看见那几个测试名**。
+    那几个名字就在一条命令之外。
+    """
+
+    def use_verify(self, script, command="跑一下"):
+        self.agent.verify = command
+        return self.use(script)
+
+    def fake_run(self, ok, output):
+        import feiyu.hooks as hooks_mod
+        calls = []
+        def run(hook, payload, cwd):
+            calls.append((hook.command, payload.get("event")))
+            return hooks_mod.Outcome(hook=hook, code=0 if ok else 1, output=output)
+        self.addCleanup(setattr, hooks_mod, "run", hooks_mod.run)
+        hooks_mod.run = run
+        return calls
+
+    def test_第一次写文件之前会跑一遍(self):
+        calls = self.fake_run(False, "FAIL: test_x (forms_tests.tests.test_validators.T)")
+        b = self.use_verify([("", [call("c1", "write_file", path="a.py", content="x")]),
+                             ("好了", [])])
+        quiet(self.agent.send, "修一下")
+        self.assertTrue(any(e == "PreWrite" for _, e in calls), "动手前没跑")
+        got = [m["content"] for m in b.messages if m["role"] == "tool"][0]
+        self.assertIn("你动手之前", got)
+        self.assertIn("forms_tests", got, "失败的测试名没进上下文")
+
+    def test_全绿也要说一声(self):
+        """全绿意味着"没有现成的失败可以照着修"，那多半是加功能不是修 bug ——
+        不说的话模型会去找一个不存在的红灯 """
+        self.fake_run(True, "")
+        b = self.use_verify([("", [call("c1", "write_file", path="a.py", content="x")]),
+                             ("好了", [])])
+        quiet(self.agent.send, "加个功能")
+        got = [m["content"] for m in b.messages if m["role"] == "tool"][0]
+        self.assertIn("全绿", got)
+
+    def test_一个会话只跑一次(self):
+        calls = self.fake_run(False, "FAIL: test_x")
+        self.use_verify([("", [call("c1", "write_file", path="a.py", content="x")]),
+                         ("", [call("c2", "write_file", path="b.py", content="y")]),
+                         ("好了", [])])
+        quiet(self.agent.send, "改两个文件")
+        pre = [c for c in calls if c[1] == "PreWrite"]
+        self.assertEqual(len(pre), 1, "跑了 %d 次，应该只跑一次" % len(pre))
+
+    def test_现场照片只挂在第一次写的结果上(self):
+        self.fake_run(False, "FAIL: test_x")
+        b = self.use_verify([("", [call("c1", "write_file", path="a.py", content="x")]),
+                             ("", [call("c2", "write_file", path="b.py", content="y")]),
+                             ("好了", [])])
+        quiet(self.agent.send, "改两个文件")
+        tools = [m["content"] for m in b.messages if m["role"] == "tool"]
+        self.assertIn("你动手之前", tools[0])
+        self.assertNotIn("你动手之前", tools[1], "第二次写又挂了一遍")
+
+    def test_没配_verify_就什么都不做(self):
+        calls = self.fake_run(False, "x")
+        self.agent.verify = ""
+        self.use([("", [call("c1", "write_file", path="a.py", content="x")]), ("好了", [])])
+        quiet(self.agent.send, "改一下")
+        self.assertEqual([c for c in calls if c[1] == "PreWrite"], [])
+
+    def test_只读的调用不触发(self):
+        """读文件、搜索不该把测试跑起来 —— 那是每轮都要等一次 """
+        calls = self.fake_run(False, "x")
+        self.use_verify([("", [call("c1", "read_file", path="a.py")]), ("好了", [])])
+        quiet(self.agent.send, "看一眼")
+        self.assertEqual([c for c in calls if c[1] == "PreWrite"], [])
+
+    def test_跑不起来也不该挡着干活(self):
+        """**只让动手前那一次抛。** 写成"所有 hook 都抛"是测过头了：
+        写文件成功之后 `_fire` 还要跑 PostToolUse，而那条路径没有 try
+        （`hooks.run` 本身设计成不抛，内部把 OSError 都接住了）。
+        这条要验的是"动手前那次跑挂了，不该把这一轮带走"。
+        """
+        import feiyu.hooks as hooks_mod
+        real = hooks_mod.run
+        def maybe_boom(hook, payload, cwd):
+            if payload.get("event") == "PreWrite":
+                raise RuntimeError("命令不存在")
+            return real(hook, payload, cwd)
+        self.addCleanup(setattr, hooks_mod, "run", real)
+        hooks_mod.run = maybe_boom
+        b = self.use_verify([("", [call("c1", "write_file", path="a.py", content="x")]),
+                             ("好了", [])])
+        self.assertEqual(quiet(self.agent.send, "改一下"), "好了")
+        self.assertEqual(unpaired(b.messages), set())

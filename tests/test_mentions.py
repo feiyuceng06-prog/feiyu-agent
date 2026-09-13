@@ -192,6 +192,58 @@ class Typing(Base):
         self.assertIsNone(mentions.typing("普通一句话"))
 
 
+class Budget(Base):
+    """那道 `MAX_CHARS` 的闸必须真的封得住
+
+    目录列表原来一个字都不数（只按 `MAX_ENTRIES` 数项数），而名字最长能到 255 字：
+    八十项就是两万字，正好是预算的全部。于是后面那个文件分到的是**负数预算**，
+    `_numbered` 里 `first[:budget]` 变成从末尾切 —— 报出来的话是
+    「只截了前 -509 个字符」，实际贴进去的是整整五万字。
+    """
+
+    def big_dir(self, n=80, width=253):
+        d = self.root / "d"
+        d.mkdir()
+        for i in range(n):
+            (d / ("n" * width + "%02d" % i)).write_text("x", encoding="utf-8")
+
+    def test_名字很长的目录加一个大文件_总量不超上限(self):
+        self.big_dir()
+        (self.root / "min.js").write_text("a" * 50_000, encoding="utf-8")
+        note, said = mentions.expand("看 @d 和 @min.js", self.root)
+        self.assertLess(len(note), mentions.MAX_CHARS * 1.2, said)
+
+    def test_不会报出负数的截断长度(self):
+        self.big_dir()
+        (self.root / "min.js").write_text("a" * 50_000, encoding="utf-8")
+        note, _ = mentions.expand("看 @d 和 @min.js", self.root)
+        self.assertNotRegex(note, r"只截了前 -")
+
+    def test_目录吃掉自己那一份就停_后面那个照样有预算(self):
+        """**按份分这条不能因为目录就破掉**：目录超出自己那份就截断，
+        不许挪用后面那个文件的额度（`@目录 @文件` 里用户要的是两样东西）
+        """
+        self.big_dir()
+        (self.root / "min.js").write_text("a" * 50_000, encoding="utf-8")
+        note, said = mentions.expand("看 @d 和 @min.js", self.root)
+        self.assertIn("只列了前", note)
+        self.assertTrue(said[1].startswith("min.js"), said)
+        # 后面那个真的拿到了东西，不是"没贴"
+        self.assertNotIn("未贴", said[1])
+
+    def test_目录列表自己也会说截断(self):
+        self.big_dir(n=200, width=20)
+        note, said = mentions.expand("@d", self.root)
+        self.assertEqual(said, ["d（%d 项）" % mentions.MAX_ENTRIES])
+        self.assertIn("只列了前", note)
+
+    def test_正常目录照旧全列(self):
+        note, said = mentions.expand("@feiyu", self.root)
+        self.assertEqual(said, ["feiyu（1 项）"])
+        self.assertIn("ui.py", note)
+        self.assertNotIn("只列了前", note)
+
+
 if __name__ == "__main__":
     unittest.main()
 

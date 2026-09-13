@@ -337,5 +337,12 @@ def drop(workspace, sid: str | None = None) -> None:
 
 
 def describe(data: dict) -> str:
-    when = time.strftime("%m-%d %H:%M", time.localtime(data.get("saved_at", 0)))
-    return "%s · %d 条消息 · %s" % (data.get("model", "?"), len(data.get("messages", [])), when)
+    # **`saved_at` 也要过 `_num`。** 理由跟 `_summary` 那条一模一样，只是这条更疼：
+    # 它在启动路径上（`__main__` 里 `--resume` / "这个目录有上次的对话" 那两句
+    # 都不带兜底），一份 `saved_at` 是字符串的坏存盘 → `localtime` 抛 TypeError
+    # → **feiyu 在这个目录里根本起不来**，连 /clear 都够不着
+    when = time.strftime("%m-%d %H:%M", time.localtime(_num(data.get("saved_at"))))
+    messages = data.get("messages")
+    return "%s · %d 条消息 · %s" % (
+        data.get("model") if isinstance(data.get("model"), str) else "?",
+        len(messages) if isinstance(messages, list) else 0, when)
