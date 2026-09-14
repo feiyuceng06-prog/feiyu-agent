@@ -296,6 +296,30 @@ Project hooks need your approval the first time they are seen, and again when th
 
 **Independent grading.** `/review` or `--review` opens a second model and shows it only the task and the final diff. It scores 0 to 10 on completeness, bugs and unrequested extras. It costs an extra API call, so it is manual.
 
+## Editors (nvim, VS Code)
+
+When feiyu runs inside a project you have open in an editor, the confirmation for
+`write_file` / `edit_file` moves out of the terminal and into the editor's own
+side-by-side diff. Accept, reject, or **edit the right-hand side first and then
+accept** — what you see is what gets written, not what the model proposed.
+
+```
+nvim       ~/.config/nvim/lua/feiyu_ide.lua     ga accept · gA accept always · gr reject
+VS Code    the "Feiyu IDE Bridge" extension     alt+y   · alt+shift+y       · alt+n
+```
+
+The editor listens on a unix socket and announces itself with a small lock file in
+`$XDG_RUNTIME_DIR/feiyu/ide/`; feiyu finds it by **exact workspace match** and speaks
+newline-delimited JSON over it. No new dependency, nothing listening on a TCP port.
+
+It degrades in one direction only: no editor, a crashed editor, a malformed reply, or
+a slow answer all fall back to the terminal confirmation you already had. The bridge
+can never block the agent. `FEIYU_NO_IDE=1` turns it off; `FEIYU_IDE_TIMEOUT`
+(default 600s) is how long it waits for you before giving up and asking in the terminal.
+
+Diffs only. Everything else — bash, `git commit`, `web_fetch` — is still confirmed in
+the terminal, because there is no diff to show.
+
 ## The desktop app
 
 ```

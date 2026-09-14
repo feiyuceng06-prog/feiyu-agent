@@ -290,6 +290,27 @@ budget: 5
 
 **独立评分。** `/review` 或 `--review` 另开一个模型，只给它看任务和最终 diff，按完成度、有没有 bug、有没有多做没要求的事打 0 到 10 分。要多花一次 API 调用，所以手动触发。
 
+## 编辑器（nvim / VS Code）
+
+在编辑器里开着的项目下跑 feiyu 时，`write_file` / `edit_file` 的确认就从终端里
+那十四行 +/- 变成编辑器原生的左右对照。接受、拒绝，或者**先把右边改成你想要的样子
+再接受** —— 写进文件的是你看到的那份，不是模型原来那份。
+
+```
+nvim       ~/.config/nvim/lua/feiyu_ide.lua     ga 接受 · gA 以后都接受 · gr 拒绝
+VS Code    「Feiyu IDE Bridge」扩展              alt+y  · alt+shift+y   · alt+n
+```
+
+编辑器在 unix socket 上监听，并在 `$XDG_RUNTIME_DIR/feiyu/ide/` 下放一个几百字节的
+lock 文件报到；feiyu 按**工作区完全相同**找到它，在上面说行分隔 JSON。
+不引新依赖，也不监听任何 TCP 端口。
+
+降级只往一个方向：没有编辑器、编辑器崩了、回的东西认不出、答得太慢 —— 一律退回
+原来终端里那套确认。**这座桥不可能挡住 agent。** `FEIYU_NO_IDE=1` 整个关掉；
+`FEIYU_IDE_TIMEOUT`（默认 600 秒）是它等你多久之后放手、回终端问。
+
+只管 diff。bash、`git commit`、`web_fetch` 这些照旧在终端确认 —— 它们没有 diff 可开。
+
 ## 桌面端
 
 ```

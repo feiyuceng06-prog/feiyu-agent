@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import hooks as hooks_mod
+from . import ide as ide_mod
 from . import mcp as mcp_mod
 from . import serve as serve_mod
 from . import skills as skills_mod
@@ -141,7 +142,19 @@ def main() -> int:
     # 一次性任务也要能答应确认 装在早退分支后面的话 approve 一直是 None，
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
     # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
-    agent.approve = lambda name, args: ui.confirm(ui.ask_text(name, args))
+    # 编辑器桥（见 feiyu/ide.py）：在 nvim / VS Code 里跑时，写文件和编辑的确认
+    # 变成编辑器原生的左右对照 diff，接受/拒绝在那边按。连不上就是这行没发生过，
+    # 底下那句终端确认照旧 —— 桥的任何毛病都不该影响 agent 本身。
+    bridge = ide_mod.connect(str(workspace))
+    if bridge is not None:
+        print(ui.notice("已连上 %s：写文件 / 编辑会在编辑器里开成 diff 等你决定"
+                        % bridge.editor), file=sys.stderr)
+
+    def _approve(name, args):
+        answer = ide_mod.route(bridge, name, args, agent.toolbox.root)
+        return answer if answer is not None else ui.confirm(ui.ask_text(name, args))
+
+    agent.approve = _approve
     agent.approve_plan = lambda plan: ui.confirm("按这个方案动手吗？", simple=True) == "yes"
     # 同理装在这里：ask_choice 自己会认出非终端并返回空串，工具收到空串就让模型自己定
     agent.ask_user = ui.ask_choice

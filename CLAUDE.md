@@ -3280,6 +3280,84 @@ set -e; cd sub; false →  同上
 **回退验证本身也要验证它真的改到了东西**，不然它给的是假的安心。
 后来改成 Python 里 `assert s.count(old) == 1` 再替换，立刻就红了。
 
+## 编辑器桥（0.71.0）
+
+`feiyu/ide.py`。agent 要改文件时，确认从终端搬到编辑器里的左右对照 diff。
+nvim 那端是 `~/.config/nvim/lua/feiyu_ide.lua`，VS Code 那端是
+`~/Projects/vscode-feiyu-ide`（扩展 `feiyu.feiyu-ide`）。**三边同一套协议，改一处要想到另两处。**
+
+### 为什么不照抄 Claude Code 的 WebSocket
+
+方向照抄了（**编辑器是 server、CLI 是 client**，lock 文件发现），协议没有：
+本项目硬规矩是不引新依赖，手搓 RFC 6455 的帧和掩码换不来任何东西，
+而 unix socket 两边都是原生的（nvim 有 `vim.uv`，VS Code 有 node 的 `net`）。
+行分隔 JSON 同理，不用自己数长度。顺带**一个 TCP 端口都不听** ——
+0.50.1 那三道门（令牌 / Origin / Host）在这儿一条都不需要。
+
+### 接缝在 `agent.approve`，`agent.py` 一个字没动
+
+`_gate` 里本来就有 `self.approve(call.name, call.input)` 这个回调，`__main__` 塞的是
+`ui.confirm`。现在塞的是「先问编辑器，它不管就走 ui.confirm」。**`args` 就是
+`call.input` 那个 dict 本身**（`_gate` 之后 `toolbox.run(call.name, call.input)` 拿的是同一个对象），
+所以「人在 diff 里改过右边」只要就地改它就生效，不用给工具开特殊路径：
+
+- `write_file` 换 `content`，**并且必须摘掉 `append`** —— 不摘会把整份内容再拼一遍；
+- `edit_file` 换成一处「整份换整份」的 `edits`（old_str 是当前全文，必然唯一匹配）。
+  盘上的内容在这中间被人改过的话 old_str 对不上、`edit_file` 照常报错，那正是该有的行为。
+
+只接 `write_file` / `edit_file`。bash、`git commit` 没有 diff 可开，照旧在终端确认。
+**`new == old` 或者 old_str 对不上时不开 diff** —— 那次调用本来就是空转或者会失败，
+白占一次确认。
+
+### 一条铁律：桥坏了不能影响 agent
+
+连不上、超时、编辑器崩了、回的不是 JSON、action 认不出 —— `route()` 一律返回 `None`，
+调用方退回终端确认。这类退路只在真出事时才走，最容易写完没人验过，所以
+`tests/test_ide.py` 里 `TestDegrades` 把每种坏法都跑一遍，
+**十五条承重行逐条做过回退验证**（拆掉哪一行，哪条用例红）。
+
+### 三个真踩到的坑
+
+**一、`sock.makefile()` 的缓冲读不能配 `settimeout`。** `_recv` 按秒分片等
+（好在编辑器被 kill 时不用等满十分钟），而第一次分片超时之后那个文件对象就废了，
+再 readline 直接抛 OSError → 判定成「编辑器断了」→ **每次都在 1.0 秒上返回 None**。
+假编辑器立刻回话，所以 43 条单测一条都没抓到；是 nvim 那边真按了一次 `ga` 才暴露的。
+现在自己按 `select` + `recv` 攒行。`TestSlowEditor` 那两条盯着它，
+**假编辑器要延迟回话才测得到这条路**（而且 ping 不能跟着延迟，那道超时只有 1.5 秒）。
+
+**二、nvim 侧 diff 的两块 buffer 不能都设 `acwrite`，而且 set_lines 之后要清 `modified`。**
+用户的 `init.lua` 开着 `'confirm'`，切窗口时 nvim 会弹「Save changes to …?」——
+**那个模态框把 libuv 的事件循环整个堵死**，表现是 feiyu 那边等到超时，而 headless
+下连那句提示都看不见。只有右边设 acwrite（要接 `:w` 当接受），左边保持 nofile。
+`settle` 关 tab 之前也要清一次 `modified`，不然人改过右边时 tabclose 又弹一次。
+
+**三、编辑器被 kill 时 `deactivate` / `VimLeavePre` 都不跑**，socket 文件会留在
+lock 目录里。lock 那份靠 `discover()` 的 pid 检查自愈，socket 那份现在一起清 ——
+**但只删 lock 目录里面的**：那个路径是从文件内容里读出来的，照着它删别处是另一回事。
+
+### 验证方式
+
+单测（47 条）之外，这三样都跑过：
+
+```bash
+.venv/bin/python -m unittest tests.test_ide       # 47 条，3.11 / 3.12 / 3.14 各一遍
+cd ~/Projects/vscode-feiyu-ide && npm test        # 14 条纯逻辑（lib/protocol.js）
+```
+
+**真编辑器必须真跑一遍**，单测碰不到 `vscode.diff` / `nvim_open_win` 这一层：
+
+- nvim：`nvim --headless --listen <sock>` 起一个，`nvim --server … --remote-send ga`
+  走真实 keymap，七条路径（ga / gr / gA / 改完再接受 / 关 tab / `:w` / 超时）。
+- VS Code：`code --new-window --user-data-dir <临时> --extensions-dir ~/.vscode/extensions
+  --disable-workspace-trust <工作区>`。判据很干脆：`open_diff` **超时**说明 diff
+  真开起来了在等人，**立刻回 reject** 说明 `openDiff` 抛了。
+  `FEIYU_IDE_DEBUG=<文件>` 让扩展把日志也写进文件 —— Output 面板脚本看不见。
+
+跑 VS Code 判据时踩到的两条：**`--disable-workspace-trust` 不能省**（新 user-data-dir
+打开 `/tmp` 下的目录会进 Restricted Mode，扩展整个不跑）；**`code --wait` 起的实例
+不会自己退**，留着的话后面每次 `--new-window` 都被转发给它，看起来像「扩展没激活」——
+我为这个查了四轮。
+
 ## 0.70.0：接进 Terminal-Bench（Harbor）
 
 SWE-bench Verified 那把尺子饱和了（45/46 = 97.8%，全行业都在 96-97%），
