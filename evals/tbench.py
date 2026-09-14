@@ -240,24 +240,36 @@ class FeiyuAgent(BaseAgent):
         cmd = ("python3 -m feiyu --mode auto -m %s --max-rounds %d --budget %s "
                "-- \"$(cat /tmp/feiyu-task.txt)\""
                % (shlex.quote(MODEL_NAME), rounds, shlex.quote("%g" % budget)))
-        got = await environment.exec(cmd, timeout_sec=timeout, env=env)
-        self.logger.info("feiyu 退出码 %s", got.return_code)
-        if got.stdout:
-            (self.logs_dir / "feiyu-stdout.txt").write_text(got.stdout, encoding="utf-8")
-        if got.stderr:
-            (self.logs_dir / "feiyu-stderr.txt").write_text(got.stderr, encoding="utf-8")
-
-        await self._fill_usage(environment, context)
+        # **用量必须在 finally 里取。** 超时那条路上 `exec` 会抛，原来写在后面的
+        # `_fill_usage` 根本轮不到 —— 十道冒烟里有四道就是这么丢的记录：
+        # 钱在账面上，feiyu 这边一分没记，于是「记的」和「扣的」覆盖的不是同一批题，
+        # 对账怎么算都对不上（这个坑连着踩了三次才找对地方）。
+        try:
+            got = await environment.exec(cmd, timeout_sec=timeout, env=env)
+            self.logger.info("feiyu 退出码 %s", got.return_code)
+            for name, text in (("feiyu-stdout.txt", got.stdout),
+                               ("feiyu-stderr.txt", got.stderr)):
+                if text:
+                    (self.logs_dir / name).write_text(text, encoding="utf-8")
+        finally:
+            try:
+                await self._fill_usage(environment, context)
+            except Exception as exc:      # 取用量失败不该盖掉真正的超时异常
+                self.logger.warning("取用量失败：%s", exc)
 
     async def _fill_usage(self, environment, context: AgentContext) -> None:
         """把 token 和花费填进 context 取不到就留空，别编
 
-        feiyu 的 trace 每行都是**累计值**，所以要的是最后一条 `run_end`，
-        不是把所有行加起来（自己在 0.69.1 的体检里刚踩过这个）。
+        feiyu 的 trace 每行都是**累计值**，所以要的是最后一条，不是把所有行加起来
+        （自己在 0.69.1 的体检里刚踩过这个）。
+
+        **不能只认 `run_end`。** 被 SIGKILL 的那次根本写不到 `run_end`，
+        但它每一轮都写了 `turn`、每条都带累计 `cost` —— 退回去拿最后一条 `turn`，
+        跑飞的题照样有账可查。
         """
         got = await self._sh(environment,
-                             "cat %s/feiyu/logs/*.jsonl 2>/dev/null | tail -400" % REMOTE_STATE)
-        last = None
+                             "cat %s/feiyu/logs/*.jsonl 2>/dev/null | tail -800" % REMOTE_STATE)
+        last = partial = None
         for line in (got.stdout or "").splitlines():
             try:
                 row = json.loads(line)
@@ -265,6 +277,9 @@ class FeiyuAgent(BaseAgent):
                 continue
             if row.get("kind") == "run_end":
                 last = row
+            elif row.get("kind") == "turn" and row.get("cost") is not None:
+                partial = row
+        last = last or partial
         if not last:
             return
         # **token 只往 metadata 放。** feiyu 记的是「累计总量」，而 AgentContext
@@ -276,7 +291,9 @@ class FeiyuAgent(BaseAgent):
                             "feiyu_total_tokens": last.get("tokens"),
                             "feiyu_cost_cny": last.get("cost"),
                             "feiyu_exit_code": last.get("code"),
-                            "feiyu_verified": last.get("verified")}
+                            "feiyu_verified": last.get("verified"),
+                            # run_end 没写（被杀了）就是拿 turn 兜的，标出来
+                            "feiyu_partial": last.get("kind") == "turn"}
 
 
 # ---- 怎么跑 ----
