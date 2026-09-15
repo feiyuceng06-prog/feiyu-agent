@@ -3348,6 +3348,25 @@ lock 目录里。lock 那份靠 `discover()` 的 pid 检查自愈，socket 那�
 `~/.local/bin/feiyu` → `.venv/bin/feiyu`），一份都找不到就弹报错**并且不建终端**。
 nvim 那端没这个问题：它 `jobstart` 走的是自己那个继承了 `.zshrc` 的 shell。
 
+### VS Code 面板的工作区（扩展 0.2.3）
+
+`@路径` 相对**面板起来时那个工作区**算（`mentions.py` 只认工作区里的真实相对路径），
+所以换项目就必须换一个 feiyu。越界时扩展重开面板到这个文件归属的工作区 ——
+包含它的那个根，嵌套取最里面的；一个根都不包含就退回它所在目录（`code 单个文件`）。
+**不静默重开**：面板里那个对话是有上下文的，杀掉它得人点一下；面板本来没活着就不问。
+顺带一个好处：多根工作区里第一次按 `<space>Fb` 从此落在文件自己那个根，不再是 `roots[0]`。
+
+lock 是按**工作区完全相同**匹配的，所以面板的工作区不在已登记的根里时要补一份，
+缺了那个 feiyu 就找不到本窗口。补的时候得先清上一批 —— lock 文件名按下标编号，
+数量变少时旧的会留成孤儿，**而它们指着同一个活 socket，别的 feiyu 照样连得上，
+看起来一切正常**。
+
+另外 `alt+y`/`alt+shift+y`/`alt+n` 要进用户 `settings.json` 的
+`terminal.integrated.commandsToSkipShell`，否则焦点在 feiyu 面板里时这三个键会被
+当字节灌进 prompt_toolkit 的输入区（而 `alt+space`(whichkey) 的 when 是
+`!terminalFocus`，`<space>Fy` 那条路同时也是断的）。keybinding 自带
+`when: feiyuIde.deciding`，只在真有 diff 等着决定时才截。
+
 ### 验证方式
 
 单测（47 条）之外，这三样都跑过：
