@@ -3316,7 +3316,7 @@ nvim 那端是 `~/.config/nvim/lua/feiyu_ide.lua`，VS Code 那端是
 `tests/test_ide.py` 里 `TestDegrades` 把每种坏法都跑一遍，
 **十五条承重行逐条做过回退验证**（拆掉哪一行，哪条用例红）。
 
-### 三个真踩到的坑
+### 四个真踩到的坑
 
 **一、`sock.makefile()` 的缓冲读不能配 `settimeout`。** `_recv` 按秒分片等
 （好在编辑器被 kill 时不用等满十分钟），而第一次分片超时之后那个文件对象就废了，
@@ -3334,6 +3334,19 @@ nvim 那端是 `~/.config/nvim/lua/feiyu_ide.lua`，VS Code 那端是
 **三、编辑器被 kill 时 `deactivate` / `VimLeavePre` 都不跑**，socket 文件会留在
 lock 目录里。lock 那份靠 `discover()` 的 pid 检查自愈，socket 那份现在一起清 ——
 **但只删 lock 目录里面的**：那个路径是从文件内容里读出来的，照着它删别处是另一回事。
+
+**四、VS Code 的面板不能拿裸命令名当 `shellPath`**（扩展 0.2.2 修）。
+`createTerminal({shellPath: "feiyu"})` **不过 shell**，是拿 VS Code 自己进程的 PATH
+去 execvp。从 GNOME 启动器点开的 VS Code 继承的是 systemd user 环境
+（`systemctl --user show-environment`），里头**没有 `~/.local/bin`** —— 用户的 PATH
+是在 `.zshrc` 里 export 的，那是交互式 shell 才读的文件。于是终端一创建就 ENOENT 死掉，
+而 `feiyuIde.panel` 是开关，下次按看见的是个死终端于是又建一个新的，
+**表现成「按了没反应」**。从终端敲 `code .` 起的窗口反倒是好的，所以它看着像时好时坏
+（扩展日志里的判据很干脆：连着几行「起了面板」而中间没有一次关掉 —— 开关命令
+每次都走了「建」那一支，说明每次终端都已经是死的）。
+现在 `lib/which.js` 解析成绝对路径再 spawn（设置 `feiyuIde.command` → PATH →
+`~/.local/bin/feiyu` → `.venv/bin/feiyu`），一份都找不到就弹报错**并且不建终端**。
+nvim 那端没这个问题：它 `jobstart` 走的是自己那个继承了 `.zshrc` 的 shell。
 
 ### 验证方式
 
