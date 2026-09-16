@@ -3367,12 +3367,49 @@ lock 是按**工作区完全相同**匹配的，所以面板的工作区不在�
 `!terminalFocus`，`<space>Fy` 那条路同时也是断的）。keybinding 自带
 `when: feiyuIde.deciding`，只在真有 diff 等着决定时才截。
 
+### 0.71.1：`connect()` 一次不够，换成 `Link`
+
+0.71.0 在 `__main__` 里 `connect()` 一次就完事。**顺序反了整场就没有 diff**：
+先在终端里跑 feiyu、回头才打开 nvim（很常见），这个会话永远连不上。
+而且是**静默的** —— 「已连上 nvim」那句只在连上时打印，连不上什么都不说，
+人以为 diff 会开、实际一直在终端里按 y。编辑器中途重启、被 kill 同理。
+
+`ide.Link` 把「那一次连接」换成「每次要确认写操作时看一眼」：
+
+- **不轮询、没有后台线程。** 一次确认之间什么都不发生。
+- **节流 `RETRY`（5 秒）。** `discover()` 没有 lock 文件时立刻返回空，这条路几乎不花钱；
+  节流兜的是另一种：lock 在、但那个 socket 没人 accept，`connect()` 要在 `CONNECT`
+  上耗掉 1.5 秒。每次确认都撞一下这个的话，人能感觉到卡。
+- **`name not in DIFFABLE` 要先判。** 不然每次 bash 确认都去试重连 —— 而 bash
+  本来就没有 diff 可开，白花那 1.5 秒。
+- **`route()` 之后要再看一眼 `bridge.dead`。** 就是这一次把它用死的（编辑器关了），
+  等下一次确认再发现的话，「退回终端确认」那句就晚了一步。
+- **状态真的变了才 `on_change`**（连上给编辑器名、断了给 None）。不然每次重连失败
+  都要刷一句。`__main__` 拿它打印，所以 `ide.py` 不用 import `ui`。
+
+铁律照旧：`_ensure()` 整段在 `try` 里，`connect()` 自己没接住的异常这层兜着；
+`on_change` 炸了也不能把这次确认带走 —— 它只是打印一句提示。
+
+`TestLink` 七条，**逐条做过回退验证**（拆掉节流 / DIFFABLE 闸 / dead 复查 /
+两处 `except` / `__init__` 里那次连接 / 「已经连着就直接用」，各有一条用例变红）。
+外加真 nvim 跑了一遍「feiyu 先起 → 后开 nvim → 接上 → nvim 退出 → 放手」八条。
+
+**假编辑器夹具同时修了两处**（不修的话上面那条「编辑器重启」根本测不出来）：
+`Server.stop()` 以前只关 listen 那个 socket，已经 accept 出来的连接还在照常答话，
+于是「编辑器关了」的用例看到它若无其事地回 accept；而且**必须 `shutdown` 不能只
+`close`** —— 服务线程那边 `conn.makefile()` 另持一份 fd，只 close socket 对象
+底下的 fd 还开着，对面一点察觉不到。socket 文件名也改成带编号的，
+否则同一个测试里第二个假编辑器 bind 会撞 EADDRINUSE。
+顺带修了 `test_error_reply` 里那个内联假编辑器**会回 id 为 0 的通知**（协议说了别回），
+客户端那时往往已经收摊，write 撞 BrokenPipe —— 跑在 daemon 线程里，
+表现是测试全绿但屏幕上糊两条 traceback。
+
 ### 验证方式
 
-单测（47 条）之外，这三样都跑过：
+单测（55 条）之外，这三样都跑过：
 
 ```bash
-.venv/bin/python -m unittest tests.test_ide       # 47 条，3.11 / 3.12 / 3.14 各一遍
+.venv/bin/python -m unittest tests.test_ide       # 55 条，3.11 / 3.12 / 3.14 各一遍
 cd ~/Projects/vscode-feiyu-ide && npm test        # 14 条纯逻辑（lib/protocol.js）
 ```
 
@@ -3503,3 +3540,4 @@ M 道的账单**。被 SIGKILL 的那些题钱在账面上、记录一个字没�
 它 `import harbor`，而 harbor 不是本项目依赖（走一次性 venv）。主用例集里
 import 它会直接失败。取用量那段的解析逻辑是拿假 environment 在 harbor 的 venv
 里单独验的（三种情况：有 run_end / 只有 turn / 什么都没有）。
+

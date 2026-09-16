@@ -49,10 +49,9 @@ struct Agent {
 /// 找 `feiyu` 那个可执行文件。`FEIYU_BIN` 优先，其次是同一棵源码树里的
 /// `.venv/bin/feiyu`（开发时从 target/ 里跑起来的情况），最后交给 PATH。
 fn feiyu_bin() -> String {
-    if let Ok(explicit) = std::env::var("FEIYU_BIN") {
-        if !explicit.is_empty() {
-            return explicit;
-        }
+    if let Ok(explicit) = std::env::var("FEIYU_BIN")
+        && !explicit.is_empty() {
+        return explicit;
     }
     if let Ok(exe) = std::env::current_exe() {
         for base in exe.ancestors().skip(1).take(6) {
@@ -249,10 +248,9 @@ fn bridge_log(line: &str) {
         return;
     }
     static FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
-    if let Some(handle) = FILE.get_or_init(|| open_log().map(Mutex::new)) {
-        if let Ok(mut f) = handle.lock() {
-            let _ = writeln!(f, "{line}");
-        }
+    if let Some(handle) = FILE.get_or_init(|| open_log().map(Mutex::new))
+        && let Ok(mut f) = handle.lock() {
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -334,12 +332,11 @@ fn stop_agent(state: &Agent) {
     if let Ok(mut guard) = state.stdin.lock() {
         guard.take();
     }
-    if let Ok(mut guard) = state.child.lock() {
-        if let Some(mut old) = guard.take() {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let _ = old.kill();
-            let _ = old.wait();
-        }
+    if let Ok(mut guard) = state.child.lock()
+        && let Some(mut old) = guard.take() {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let _ = old.kill();
+        let _ = old.wait();
     }
 }
 

@@ -32,11 +32,10 @@ impl Term {
         if let Ok(mut m) = self.master.lock() {
             m.take();
         }
-        if let Ok(mut c) = self.child.lock() {
-            if let Some(mut child) = c.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        if let Ok(mut c) = self.child.lock()
+            && let Some(mut child) = c.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

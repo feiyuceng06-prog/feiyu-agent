@@ -52,6 +52,9 @@ CONNECT = 1.5
 # 一条消息的字节上限。整份文件的新旧内容都要过这条线，放宽到 8 MB；
 # 再大的文件在编辑器里做 diff 本身就没意义了
 MAX_BYTES = 8 * 1024 * 1024
+# 没连上时，隔这么久才再试一次（见 Link）。没有后台线程、不轮询，
+# 只在「正要确认一次写操作」的那一刻看一眼
+RETRY = 5.0
 
 
 def lock_dir() -> str:
@@ -390,3 +393,77 @@ def connect(workspace: str):
             continue
         return bridge
     return None
+
+
+class Link:
+    """一次会话里的那座桥 连不上就下次再试
+
+    0.71.0 只在启动那一刻 `connect()` 一次，于是顺序反了就整场没有 diff：
+    先在别的终端里跑 feiyu、再打开 nvim —— 这个会话**永远**连不上。
+    而且连不上是**静默的**（「已连上 nvim」那句只在连上时打印），
+    人不会知道自己这半天一直在裸奔。编辑器中途重启、被 kill 同理：
+    `bridge.dead` 之后再没人管它。
+
+    改成每次要确认写操作时看一眼：已经连着就直接用，断了或从来没连上
+    就隔 `RETRY` 秒再试一次。没有后台线程，也不轮询 —— 一次确认之间
+    什么都不发生。`discover()` 在没有 lock 文件时立刻返回空，这条路几乎不花钱；
+    节流兜的是另一种：lock 在、但那个 socket 没人 accept，`connect()` 要
+    在 `CONNECT` 那道超时上耗掉 1.5 秒。
+
+    状态真的变了才叫 `on_change`（连上给编辑器名字，断了给 None），
+    调用方拿它打印一句。不这样的话每次重连失败都要说一遍。
+    """
+
+    def __init__(self, workspace: str, on_change=None):
+        self.workspace = workspace
+        self.on_change = on_change
+        self.bridge = None
+        self._next = 0.0
+        self._ensure()      # 启动时先试一次，那句「已连上 …」才会当场出现
+
+    def _announce(self, editor) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change(editor)
+        except Exception:
+            pass            # 打印一句提示而已，出事不值得把确认带走
+
+    def _ensure(self):
+        """当下能用的那座桥 没有就返回 None"""
+        bridge = self.bridge
+        if bridge is not None and not bridge.dead:
+            return bridge
+        if bridge is not None:
+            # 上一次用完之后死掉的。说一句，别让人还在编辑器里等 diff
+            self.bridge = None
+            self._announce(None)
+        now = time.monotonic()
+        if now < self._next:
+            return None
+        self._next = now + RETRY
+        try:
+            bridge = connect(self.workspace)
+        except Exception:
+            # 铁律：桥的任何毛病都只意味着「这次没有编辑器」。`connect()` 自己
+            # 已经接住了 OSError，这层兜的是它没想到的那些
+            bridge = None
+        self.bridge = bridge
+        if bridge is not None:
+            self._announce(bridge.editor)
+        return bridge
+
+    def route(self, name: str, args: dict, root):
+        """跟模块级的 `route()` 同一个约定 返回 None 就是退回终端确认"""
+        if name not in DIFFABLE:
+            return None     # bash 这些本来就没 diff 可开，别为它去试重连
+        bridge = self._ensure()
+        if bridge is None:
+            return None
+        answer = route(bridge, name, args, root)    # 模块级那个同名函数
+        if bridge.dead:
+            # 就是这一次把它用死的（编辑器关了 / 半路断开）。等下一次确认再发现的话，
+            # 中间那句「退回终端确认」就晚了一步
+            self.bridge = None
+            self._announce(None)
+        return answer

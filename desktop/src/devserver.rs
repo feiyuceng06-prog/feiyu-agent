@@ -210,10 +210,9 @@ fn parse_args() -> Args {
 /// `FEIYU_BIN` 优先，其次是跟本二进制同一棵源码树里的 `.venv/bin/feiyu`
 /// （从 `web/target/...` 里跑起来的开发场景），最后交给 PATH。
 fn feiyu_bin() -> String {
-    if let Ok(explicit) = std::env::var("FEIYU_BIN") {
-        if !explicit.is_empty() {
-            return explicit;
-        }
+    if let Ok(explicit) = std::env::var("FEIYU_BIN")
+        && !explicit.is_empty() {
+        return explicit;
     }
     if let Ok(exe) = std::env::current_exe() {
         for base in exe.ancestors().skip(1).take(5) {
@@ -323,10 +322,9 @@ async fn client(socket: WebSocket, app: Arc<App>) {
 
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
-            if let Message::Text(text) = msg {
-                if to_agent.send(text.to_string()).is_err() {
-                    break;
-                }
+            if let Message::Text(text) = msg
+                && to_agent.send(text.to_string()).is_err() {
+                break;
             }
         }
     });
@@ -479,12 +477,11 @@ fn percent_decode(raw: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+            out.push(byte);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

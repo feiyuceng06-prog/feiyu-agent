@@ -143,15 +143,20 @@ def main() -> int:
     # `feiyu "改一下 x"` 的每个写操作都会被当成"用户拒绝"（0.11.0 及以前就是这样）
     # 管道模式下 stdin 不是终端，ui.confirm 自己会返回 no——没人能回答
     # 编辑器桥（见 feiyu/ide.py）：在 nvim / VS Code 里跑时，写文件和编辑的确认
-    # 变成编辑器原生的左右对照 diff，接受/拒绝在那边按。连不上就是这行没发生过，
+    # 变成编辑器原生的左右对照 diff，接受/拒绝在那边按。没有编辑器时 route 回 None，
     # 底下那句终端确认照旧 —— 桥的任何毛病都不该影响 agent 本身。
-    bridge = ide_mod.connect(str(workspace))
-    if bridge is not None:
-        print(ui.notice("已连上 %s：写文件 / 编辑会在编辑器里开成 diff 等你决定"
-                        % bridge.editor), file=sys.stderr)
+    # Link 而不是 connect()：编辑器不一定比 feiyu 先起来（先在这个终端里跑 feiyu、
+    # 回头才打开 nvim 是常事），中途还可能重启。只连一次的话那种顺序整场都没有 diff，
+    # 而且是静默的 —— 人不会知道自己在裸奔。它在每次要确认写操作时看一眼，节流重试。
+    def _bridge_changed(editor):
+        print(ui.notice(
+            "已连上 %s：写文件 / 编辑会在编辑器里开成 diff 等你决定" % editor
+            if editor else "编辑器断开了：写文件 / 编辑退回终端确认"), file=sys.stderr)
+
+    link = ide_mod.Link(str(workspace), on_change=_bridge_changed)
 
     def _approve(name, args):
-        answer = ide_mod.route(bridge, name, args, agent.toolbox.root)
+        answer = link.route(name, args, agent.toolbox.root)
         return answer if answer is not None else ui.confirm(ui.ask_text(name, args))
 
     agent.approve = _approve

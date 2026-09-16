@@ -312,6 +312,11 @@ The editor listens on a unix socket and announces itself with a small lock file 
 `$XDG_RUNTIME_DIR/feiyu/ide/`; feiyu finds it by **exact workspace match** and speaks
 newline-delimited JSON over it. No new dependency, nothing listening on a TCP port.
 
+**Start them in either order.** feiyu picks the editor up even if you open it later: it
+looks again before each write confirmation, retrying at most once every five seconds.
+Same if the editor restarts mid-session. It says so when it connects and when it loses
+the editor, so you never have to guess which path a confirmation will take.
+
 It degrades in one direction only: no editor, a crashed editor, a malformed reply, or
 a slow answer all fall back to the terminal confirmation you already had. The bridge
 can never block the agent. `FEIYU_NO_IDE=1` turns it off; `FEIYU_IDE_TIMEOUT`

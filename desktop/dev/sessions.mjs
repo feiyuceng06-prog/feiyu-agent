@@ -4,6 +4,12 @@
  * 切回去真的能把历史捞回来、上传的文件 agent 真的读得到」。要花钱。
  *
  * 用法：node dev/sessions.mjs <页面地址> <输出目录>
+ *
+ * **devserver 必须起在一份干净的会话库上**，否则前三条断言必失败：
+ * 它们数的是侧边栏里有几条对话（要 1、要 2），而 `session.DIR` 认
+ * `XDG_STATE_HOME`，直接跑就会数到这个工作目录攒下的几十条历史会话。
+ *
+ *   XDG_STATE_HOME=$(mktemp -d) desktop/target/release/feiyu-devserver -p 7791
  */
 
 import { spawn } from "node:child_process";

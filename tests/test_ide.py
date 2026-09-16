@@ -7,6 +7,7 @@
    必须是他看到的那份，不是模型原来那份。
 """
 
+import itertools
 import json
 import os
 import socket
@@ -19,6 +20,9 @@ from pathlib import Path
 from feiyu import ide
 
 
+_SEQ = itertools.count()
+
+
 class Server:
     """一个假编辑器：在临时 socket 上应答，按脚本回复
 
@@ -28,11 +32,14 @@ class Server:
 
     def __init__(self, folder, workspace, script, editor="fake", write_lock=True,
                  noise=False, delay=0.0):
-        self.path = os.path.join(folder, "s.sock")
+        # 编号是为了「编辑器重启」那种用例：同一个测试里前后两个假编辑器，
+        # 名字撞上的话第二个 bind 会报 EADDRINUSE（第一个的 socket 文件还在）
+        self.path = os.path.join(folder, "s%d.sock" % next(_SEQ))
         self.script = script
         self.noise = noise      # 回复之前先推一条自己的消息
         self.delay = delay      # 隔这么久才回话（人在编辑器里读 diff 要时间）
         self.seen = []
+        self.conn = None        # accept 出来的那条连接，stop() 要一起关（见下）
         self.workspace = workspace
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(self.path)
@@ -51,6 +58,7 @@ class Server:
             conn, _ = self.sock.accept()
         except OSError:
             return
+        self.conn = conn
         # 客户端先关（正常收尾）时这边的 write 会撞 BrokenPipe；它跑在 daemon 线程里，
         # 不接的话 unittest 结束时会往屏幕上糊一条 traceback
         try:
@@ -98,10 +106,27 @@ class Server:
         return False
 
     def stop(self):
+        """把这个假编辑器整个收掉
+
+        ⚠️ 只关 listen 那个 socket 不算「编辑器关了」：已经 accept 出来的那条连接
+        还在，服务线程照样答话，于是「编辑器重启」的用例会看到它若无其事地回 accept。
+        真正让对面察觉的是把 accept 出来的那条关掉（recv 收到 0 字节）。
+        而且要 `shutdown` 不能只 `close`：服务线程那边 `conn.makefile()` 另持一份
+        fd，只 close 这个 socket 对象底下的 fd 还开着，对面什么都察觉不到。
+        """
         try:
             self.sock.close()
         except OSError:
             pass
+        if self.conn is not None:
+            try:
+                self.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self.conn.close()
+            except OSError:
+                pass
 
 
 class Base(unittest.TestCase):
@@ -550,6 +575,11 @@ class TestDegrades(Base):
                     if not line:
                         return
                     msg = json.loads(line.decode())
+                    # id 为 0 是通知（close_diff），协议说了别回。回了的话客户端
+                    # 这时往往已经收摊，write 撞 BrokenPipe —— 跑在 daemon 线程里，
+                    # 表现是测试全绿但屏幕上糊两条 traceback
+                    if msg.get("id") == 0:
+                        continue
                     if msg.get("method") == "ping":
                         f.write(b'{"id": %d, "result": {"ok": true}}\n' % msg["id"])
                     else:
@@ -577,6 +607,127 @@ class TestDegrades(Base):
                 b, "write_file", {"path": "big.txt", "content": "y" * 500}, self.root))
         finally:
             ide.MAX_BYTES = saved
+
+
+class TestLink(Base):
+    """编辑器不一定比 feiyu 先起来，也可能中途重启
+
+    0.71.0 只在启动那一刻连一次，于是「先跑 feiyu、再开 nvim」整场都没有 diff，
+    而且一声不吭。这一组盯的就是那条路。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.said = []      # on_change 收到的东西，连上给编辑器名、断了给 None
+
+    def make(self, workspace=None):
+        link = ide.Link(workspace or self.ws, on_change=self.said.append)
+        if link.bridge is not None:
+            self.bridges.append(link.bridge)
+        return link
+
+    def write(self, link, text="新\n"):
+        return link.route("write_file", {"path": "a.txt", "content": text}, self.root)
+
+    def test_editor_shows_up_after_feiyu_started(self):
+        self.file("a.txt", "旧\n")
+        link = self.make()                      # 这会儿还没有编辑器
+        self.assertIsNone(link.bridge)
+        self.assertIsNone(self.write(link))
+
+        self.serve({"ping": {"ok": True}, "open_diff": {"action": "accept"}})
+        link._next = 0.0                        # 节流让开，模拟"过了 RETRY 秒"
+        self.assertEqual(self.write(link), "yes")
+        self.bridges.append(link.bridge)
+        self.assertEqual(self.said, ["fake"])
+
+    def test_retry_is_throttled(self):
+        self.file("a.txt", "旧\n")
+        tries = []
+        saved = ide.connect
+        ide.connect = lambda ws: tries.append(ws) or None
+        try:
+            link = self.make()                  # __init__ 里那一次
+            self.assertEqual(len(tries), 1)
+            self.write(link)
+            self.write(link)
+            self.assertEqual(len(tries), 1, "节流没拦住：每次确认都去连一遍")
+            link._next = 0.0
+            self.write(link)
+            self.assertEqual(len(tries), 2)
+        finally:
+            ide.connect = saved
+
+    def test_non_diffable_tool_does_not_retry(self):
+        tries = []
+        saved = ide.connect
+        ide.connect = lambda ws: tries.append(ws) or None
+        try:
+            link = self.make()
+            link._next = 0.0
+            self.assertIsNone(link.route("bash", {"cmd": "ls"}, self.root))
+            self.assertEqual(len(tries), 1, "bash 没有 diff 可开，不该为它去连编辑器")
+        finally:
+            ide.connect = saved
+
+    def test_reconnects_after_the_editor_restarts(self):
+        self.file("a.txt", "旧\n")
+        first = self.serve({"ping": {"ok": True}, "open_diff": {"action": "accept"}})
+        link = self.make()
+        self.assertEqual(self.write(link), "yes")
+        self.assertEqual(self.said, ["fake"])
+
+        first.stop()                            # 编辑器关了
+        os.unlink(first.lock)
+        saved, ide.WAIT = ide.WAIT, 0.6
+        try:
+            self.assertIsNone(self.write(link))
+        finally:
+            ide.WAIT = saved
+        self.assertEqual(self.said, ["fake", None], "断开没说一声")
+        self.assertIsNone(link.bridge)
+
+        self.serve({"ping": {"ok": True}, "open_diff": {"action": "reject"}},
+                   editor="nvim")               # 编辑器又起来了
+        link._next = 0.0
+        self.assertEqual(self.write(link), "no")
+        self.bridges.append(link.bridge)
+        self.assertEqual(self.said, ["fake", None, "nvim"])
+
+    def test_failed_retry_stays_quiet(self):
+        self.file("a.txt", "旧\n")
+        link = self.make()
+        for _ in range(3):
+            link._next = 0.0
+            self.write(link)
+        self.assertEqual(self.said, [], "连不上不该每次都刷一句")
+
+    def test_connect_blowing_up_does_not_escape(self):
+        """铁律：桥的任何毛病都只意味着「这次没有编辑器」"""
+        self.file("a.txt", "旧\n")
+        saved = ide.connect
+        ide.connect = lambda ws: (_ for _ in ()).throw(RuntimeError("炸了"))
+        try:
+            link = self.make()
+            self.assertIsNone(link.bridge)
+            link._next = 0.0
+            self.assertIsNone(self.write(link))
+        finally:
+            ide.connect = saved
+
+    def test_on_change_blowing_up_does_not_escape(self):
+        self.file("a.txt", "旧\n")
+        self.serve({"ping": {"ok": True}, "open_diff": {"action": "accept"}})
+        link = ide.Link(self.ws, on_change=lambda e: 1 / 0)
+        self.bridges.append(link.bridge)
+        self.assertEqual(self.write(link), "yes")
+
+    def test_no_on_change_is_fine(self):
+        self.file("a.txt", "旧\n")
+        self.serve({"ping": {"ok": True}, "open_diff": {"action": "accept"}})
+        link = ide.Link(self.ws)
+        self.bridges.append(link.bridge)
+        self.assertEqual(self.write(link), "yes")
 
 
 class TestLockDir(unittest.TestCase):
