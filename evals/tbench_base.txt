@@ -1,0 +1,28 @@
+# Terminal-Bench 2.0 的基线子集，24 道
+# 按 difficulty 分层 + 层内按题名排序等距取（evals/tbench_pick.py），
+# **不随机**：换台机器、换个时间都是这一批 改这个文件等于换了尺子，
+# 之前跑出来的数就不能跟之后的比了 
+adaptive-rejection-sampler
+bn-fit-modify
+build-pmars
+chess-best-move
+cobol-modernization
+configure-git-webserver
+constraints-scheduling
+custom-memory-heap-crash
+dna-insert
+feal-differential-cryptanalysis
+financial-document-processor
+fix-ocaml-gc
+git-multibranch
+kv-store-grpc
+llm-inference-batching-scheduler
+log-summary-date-ranges
+mcmc-sampling-stan
+modernize-scientific-stack
+multi-source-data-merger
+path-tracing
+polyglot-c-py
+protein-assembly
+pytorch-model-cli
+qemu-startup

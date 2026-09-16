@@ -73,7 +73,10 @@ def render(rows: list[dict]) -> str:
     out = []
     out.append("═" * 66)
     model = rows[0].get("model") or "?"
-    out.append("SWE-bench Verified 子集 · %s · %d 题" % (model, got["total"]))
+    # 题库名字跟着记录走 —— 这套口径现在也给 Terminal-Bench 用（`tbench_report.py`），
+    # 写死"SWE-bench"的话表头会说谎，而表头正是事后翻日志时唯一能认出这是哪批数的东西
+    bench = rows[0].get("bench") or "SWE-bench Verified 子集"
+    out.append("%s · %s · %d 题" % (bench, model, got["total"]))
     out.append("═" * 66)
     if got["judged"]:
         out.append("**解决率 %d/%d = %.1f%%**（分母只算真判过的）" % (
