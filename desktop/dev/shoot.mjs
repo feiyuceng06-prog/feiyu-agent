@@ -9,7 +9,10 @@
  * 拍两组：
  *   1_flow  —— 灌一份编好的事件流（工具调用、diff、markdown、报错），
  *              覆盖到真跑一次未必碰得上的分支
- *   2_ask   —— 停在「要你点头」那张卡上，这是全站唯一用红的结构
+ *   2_ask   —— 停在「要你点头」那张卡上（日常那档，中性灰）
+ *   2b_danger—— 危险操作那档（rm -rf），全站唯一该见红的地方
+ *   0_hello —— 一条消息都没有时的「开始」那块
+ *   13_anthropic—— Anthropic 暖色主题（跟复古并存，底色不能撞）
  *   3_narrow—— 390px 宽，看 meta-rail 塌成单列之后还成不成立
  */
 
@@ -209,6 +212,14 @@ const ASK = [
     target: "feiyu/tools.py", args: { path: "feiyu/tools.py" }, rule: "Update(feiyu/tools.py)" },
 ];
 
+/* 危险那一档。**日常确认和这一档必须一眼分得开** —— 要是两张图看着一样，
+   那就是红又变回背景噪音了，`looksDangerous()` 白写。 */
+const DANGER_ASK = [
+  { kind: "ask", id: 9002, type: "approve", tool: "bash", label: "Bash",
+    target: "", args: { command: "rm -rf build/ dist/ node_modules/" },
+    rule: "Bash(rm:*)" },
+];
+
 const page = await targets();
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = bad; });
@@ -324,6 +335,25 @@ for (const t of ["light", "retro"]) {
 await cdp.eval(`setTheme("light"); true`);
 
 
+// 一条消息都没有时那块「开始」——**这是第一次打开这个应用看到的画面**，
+// 以前它是纯白一片，没有任何东西说明能干什么。
+// **先重新导航**：上面 FLOW 那一串还留在流里，不清掉这块根本不会出现
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await cdp.call("Emulation.setDeviceMetricsOverride", {
+  width: 1280, height: 900, deviceScaleFactor: 2, mobile: false,
+});
+await sleep(300);
+console.log("拍了", await cdp.shot("0_hello", { height: 900, beyond: false }));
+const 例子数 = await cdp.eval(`document.querySelectorAll(".hello__pick").length`);
+if (!例子数) throw new Error("空对话时「开始」那块没出现");
+// 点一下要填进输入框、而且不能直接发出去
+await cdp.eval(`document.querySelector(".hello__pick").click(); true`);
+const 填了 = await cdp.eval(`document.getElementById("input").value`);
+if (!填了) throw new Error("点了例子没填进输入框");
+console.log(`空状态 ${例子数} 个例子，点一下填进去：「${填了.slice(0, 12)}…」`);
+await cdp.eval(`document.getElementById("input").value = ""; true`);
+
 await feed(ASK);
 // 滚的是 .sheet 那个容器，不是 window —— 页面本身不滚，头和尾是钉住的
 await cdp.call("Emulation.setDeviceMetricsOverride", {
@@ -332,6 +362,33 @@ await cdp.call("Emulation.setDeviceMetricsOverride", {
 await sleep(300);
 await cdp.eval(`sheet.scrollTop = sheet.scrollHeight; true`);
 console.log("拍了", await cdp.shot("2_ask", { height: 1000, beyond: false }));
+
+// 两档的底色必须不一样，光看图容易放过去，所以直接量
+const 日常底 = await cdp.eval(
+  `getComputedStyle(document.querySelector(".ask")).backgroundColor`);
+
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await feed(DANGER_ASK);
+await sleep(300);
+await cdp.eval(`sheet.scrollTop = sheet.scrollHeight; true`);
+console.log("拍了", await cdp.shot("2b_danger", { height: 700, beyond: false }));
+const 危险底 = await cdp.eval(
+  `getComputedStyle(document.querySelector(".ask")).backgroundColor`);
+const 有红字 = await cdp.eval(
+  `!!document.querySelector(".ask--danger")`);
+if (日常底 === 危险底) throw new Error(`两档确认卡底色一样（${日常底}）—— 危险分级没生效`);
+if (!有红字) throw new Error("rm -rf 没被判成危险");
+console.log(`确认卡两档：日常 ${日常底} / 危险 ${危险底}`);
+
+// 扩大授权的两个按钮要被顶到右边（`:first-of-type` 那个坑就是这么漏掉的）
+const 顶开 = await cdp.eval(
+  `(() => { const b = document.querySelector(".ask__row .btn--wide");
+            return b ? getComputedStyle(b).marginLeft : "没有"; })()`);
+if (顶开 === "0px" || 顶开 === "没有") {
+  throw new Error(`「本轮都允许」没被顶到右边（margin-left: ${顶开}）`);
+}
+console.log("扩大授权的按钮顶开了", 顶开);
 
 await cdp.call("Page.navigate", { url });
 await sleep(1200);
@@ -694,6 +751,29 @@ if (before.bg === after.bg || before.accent === after.accent) {
 
 await cdp.eval(`document.querySelector('[data-tab="skills"]') && 0; true`);
 console.log("拍了", await cdp.shot("12_retro", { width: 1280, height: 900 }));
+
+/* Anthropic 那套走同一道检查 —— **换主题只换颜色，版面一格不动**。
+   另外量一下它跟复古分不分得开：两套都偏暖，底色要是撞在一起，
+   那就是白加了一套。 */
+await cdp.eval(`setTheme("anthropic"); drawShelf(); true`);
+await sleep(400);
+const anth = JSON.parse(await cdp.eval(`JSON.stringify({
+  bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
+  accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
+  box: (() => { const r = document.querySelector("#shelf-list").getBoundingClientRect();
+    return [Math.round(r.x), Math.round(r.width)]; })(),
+})`));
+if (String(anth.box) !== String(before.box)) {
+  console.error("Anthropic 主题动了版面：", JSON.stringify([before.box, anth.box]));
+  process.exitCode = 1;
+} else if (anth.bg === after.bg || anth.bg === before.bg) {
+  console.error("Anthropic 的底色跟别的主题撞了：", anth.bg);
+  process.exitCode = 1;
+} else {
+  console.log(`Anthropic 主题 ${anth.bg} / ${anth.accent}，版面一格没动`);
+}
+console.log("拍了", await cdp.shot("13_anthropic", { width: 1280, height: 900 }));
+
 await cdp.eval(`setTheme("light"); drawShelf(); true`);
 await sleep(300);
 

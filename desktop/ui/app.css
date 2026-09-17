@@ -140,6 +140,48 @@
 /* 白底上那只狗是纯黑剪影，压在泛黄的纸上太硬 —— 调到跟墨色同一档 */
 :root[data-theme="retro"] .bar__mark { opacity: 0.72; filter: sepia(0.35); }
 
+/* ── Anthropic ──────────────────────────────────────────────
+   用户整台机器（kitty / GTK / 壁纸 / nvim）都是这套配色，桌面端跟上。
+
+   **跟「复古」不是一回事**，虽然都偏暖：复古是泛黄的纸（#fbf6ea）+ 赭色，
+   做旧；这套是近乎白的暖中性（#FBF9F5）+ 陶土橘（#D87756），干净。
+   两套并存，别把谁当谁的变体。
+
+   墨色照旧单一色相构造式（`rgba(38, 34, 30, α)`）—— 暖灰，跟这张纸同温。
+
+   **α 是量出来的，不是照抄默认那套。** 这张纸比纯白暗一点点，照搬 0.56/0.44
+   会掉到 3.69:1 / 2.66:1，两个都够不着。按 panel 那一侧（更难的那面）反解：
+     --muted 0.67 → 纸 5.19:1 / panel 4.63:1（正文 AA 4.5）
+     --faint 0.53 → 纸 3.40:1 / panel 3.03:1（非文本与大字 AA 3.0）
+   要再动先把这两个数重新量一遍。
+
+   **`--accent` 就是 #D87756，而它对这张纸只有 2.98:1** —— 够不着任何文字标准。
+   这不是问题，因为这套系统里 accent 「只做线和面，永远不做字」，那条规矩
+   在这儿反而成了安全网。`--plus`（diff 加号）单独走墨绿：整页暖色，
+   加号再用陶土就跟减号的红糊在一起了（跟复古同一个理由）。 */
+:root[data-theme="anthropic"] {
+  --bg: #fbf9f5;
+  --text: rgba(38, 34, 30, 0.84);
+  --soft: rgba(38, 34, 30, 0.72);
+  --muted: rgba(38, 34, 30, 0.67);
+  --faint: rgba(38, 34, 30, 0.53);
+  --line: rgba(38, 34, 30, 0.12);
+  --line-strong: rgba(38, 34, 30, 0.24);
+  --accent: #d87756;
+  --plus: #2f6b58;
+  --link-line: #e0a184;
+  --panel: rgba(38, 34, 30, 0.06);
+  --code-bg: rgba(38, 34, 30, 0.05);
+  --selection: rgba(216, 119, 86, 0.18);
+  /* 陶土橘本身就偏红，第二色必须压得更深才分得开 —— 不然「需要你动手」
+     跟满页的 accent 混成一片。#a4262c 对这张纸 6.91:1。 */
+  --alert: #a4262c;
+  --alert-wash: rgba(164, 38, 44, 0.06);
+}
+
+/* 纯黑剪影压在暖纸上偏硬，跟复古同一个处理，但这张纸更白所以收得轻一点 */
+:root[data-theme="anthropic"] .bar__mark { opacity: 0.78; filter: sepia(0.18); }
+
 * { box-sizing: border-box; }
 
 /* **`hidden` 必须压得住 `display`。** `[hidden]` 的 UA 样式是 `display:none`，
@@ -585,12 +627,23 @@ body[data-side="off"] .side { border-right: 0; }
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-6) var(--space-5) var(--space-8);
+  /* **内容不满一屏时贴着输入框，不要顶在天花板上。**
+     原来短对话是顶对齐的，下面留一大片空白直到输入框 —— 一问一答之后
+     那片空洞比对话本身还高，看着像"没在工作"。聊天的重心在最新那条，
+     让它待在眼睛和手都在的地方。满屏之后这条不起作用，照常从上往下滚。 */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
 .stream {
   max-width: var(--content);
   margin: 0 auto;
   position: relative;
+  /* flex 容器里这条才是"把内容推到底"的那一下；`margin: 0 auto` 那半边
+     负责居中，所以这里只补上下两个方向 */
+  margin-top: auto;
+  width: 100%;
 }
 
 /* meta-rail 的竖线**整条贯通**，不是每块各画一段。
@@ -653,6 +706,47 @@ body[data-side="off"] .side { border-right: 0; }
  * 改成靠**字号和位置**分层，不靠装饰 —— 这是这套系统一贯的做法：
  * 用户那句是节的开头（大一档、常规字重、上面一条重线），它说的是正文。
  */
+/* 空对话时那块「开始」。**安静**：不加插画、不加卡片，就是正文 +
+   四个可点的例子。它跟 `.block` 同一套两列网格，纵线不会断。 */
+.hello__lead {
+  margin: 0 0 var(--space-3);
+  color: var(--soft);
+}
+
+.hello__list {
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  list-style: none;
+}
+
+.hello__list li { line-height: var(--leading-body); }
+
+/* 按钮长得像正文里的链接，不像按钮 —— 它是个建议不是个动作 */
+.hello__pick {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  box-shadow: inset 0 -1px 0 var(--link-line);
+}
+
+.hello__pick:hover { box-shadow: inset 0 -1px 0 var(--text); }
+
+.hello__keys {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.hello__keys code {
+  font-family: var(--font-mono);
+  background: var(--code-bg);
+  padding: 0 var(--space-1);
+}
+
 .block--you {
   border-top-color: var(--line-strong);
   padding-top: var(--space-5);
@@ -758,11 +852,34 @@ body[data-side="off"] .side { border-right: 0; }
 .note[data-level="warn"] { color: var(--soft); }
 .note[data-level="error"] { color: var(--alert); }
 
-/* 要你点头的那一块 —— 全站唯一用红的结构。 */
+/* 要你点头的那一块。
+   **日常确认是中性的，只有危险操作吃红。**
+   原来每一次都是红底红杠，包括改一行文件这种一天点几十次的事 —— 天天被红色
+   叫住，红就不再是信号只是噪音，真出现 `rm -rf` 那次反而认不出来。
+   `--alert` 那条规矩说的是「在一屏黑白里让需要你的东西一眼能找到」，
+   前提是它得稀少。危险判定在 app.js 的 `looksDangerous()`。 */
 .ask {
-  border-left: 2px solid var(--alert);
-  background: var(--alert-wash);
+  border-left: 2px solid var(--line-strong);
+  background: var(--panel);
   padding: var(--space-3) var(--space-4);
+}
+
+.ask--danger {
+  border-left-color: var(--alert);
+  background: var(--alert-wash);
+}
+
+/* 危险那张卡加一行明说 —— 光靠颜色不够：约 8% 的男性有红绿色觉障碍，
+   而这正是「点下去就回不来」的那一次。 */
+.ask--danger .ask__q::before {
+  content: "回不去的操作";
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-2xs);
+  font-weight: var(--w-regular);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--alert);
 }
 
 .ask__q {
@@ -797,7 +914,21 @@ body[data-side="off"] .side { border-right: 0; }
 
 .ask__row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
+/* 扩大授权的那两个（本轮都允许 / 永久允许）推到右边、字更淡。
+   **点错它们的代价跟点错「同意一次」不是一个量级** —— 后者最多白跑一步，
+   前者是以后再也不问了。原来四个按钮并排、宽度样式都一样，手快很容易点到。
+   第一个 `--wide` 顶开，后面的跟着它走。 */
+.btn--wide { color: var(--muted); }
+/* 第一个 `--wide` 顶开，后面的跟着它。
+   **不能用 `:first-of-type`** —— 它问的是"父元素里同标签的第一个"，
+   而那是「同意一次」（它没有 --wide 类），于是整条规则永不命中。
+   相邻兄弟才对：前一个不是 wide、自己是 wide，那就是第一个 wide。 */
+.btn:not(.btn--wide) + .btn--wide { margin-left: auto; }
+
 .ask--done { border-left-color: var(--line-strong); background: none; }
+/* 答完了就不再是"需要你"，那行红字跟着降下来（留着字是为了事后看得出
+   当时它是危险那一档） */
+.ask--done.ask--danger .ask__q::before { color: var(--muted); }
 
 .ask__answer {
   margin: 0;

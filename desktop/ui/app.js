@@ -66,8 +66,52 @@ function block(label, cls) {
   el.className = "block" + (cls ? " " + cls : "");
   el.innerHTML = `<div class="block__label">${esc(label)}</div><div class="block__body"></div>`;
   streamEl.append(el);
+  syncHello();
   keepBottom(wasDown);
   return el.querySelector(".block__body");
+}
+
+/* ── 一片空白的时候说点什么 ─────────────────────────────────
+   原来第一次打开是：左边「还没有历史对话」，中间纯白，除了输入框里那句
+   「我们要做什么？」再没有别的。**能干什么、该怎么开口，全靠猜。**
+
+   写成跟 `.block` 一样的两列（记号列 + 正文列），这样刊头那条纵线不会断。
+   例子是**可点的**：点一下填进输入框但不发出去 —— 让人能改，别替他做决定。
+   `@` 和 `/` 那行是这里唯一该教的两个记号，别列成快捷键大全。 */
+const HELLO = [
+  "这个项目是做什么的？我该从哪看起",
+  "跑一遍测试，失败的顺手修掉",
+  "把 @ 里那段重复的抽成一个函数",
+  "最近这次改动有什么风险？",
+];
+
+function syncHello() {
+  const has = streamEl.children.length > 0;
+  let el = $("hello");
+  if (has) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement("div");
+  el.id = "hello";
+  el.className = "block hello";
+  el.innerHTML = `<div class="block__label">开始</div><div class="block__body">`
+    + `<p class="hello__lead">问它点什么，或者直接把要做的事说出来。</p>`
+    + `<ul class="hello__list">`
+    + HELLO.map((t) => `<li><button type="button" class="hello__pick">${esc(t)}</button></li>`).join("")
+    + `</ul>`
+    + `<p class="hello__keys"><code>@</code> 提一个文件　<code>/</code> 斜杠命令　`
+    + `<code>Ctrl N</code> 新建会话</p>`
+    + `</div>`;
+  el.querySelectorAll(".hello__pick").forEach((b) => {
+    b.onclick = () => {
+      const box = $("input");
+      box.value = b.textContent;
+      box.focus();
+      // 光标落到末尾，而不是选中整句 —— 多半是要接着改的
+      box.setSelectionRange(box.value.length, box.value.length);
+      box.dispatchEvent(new Event("input"));
+    };
+  });
+  streamEl.append(el);
 }
 
 /* ── markdown ───────────────────────────────────────────────
@@ -342,11 +386,19 @@ function setStatus(s) {
   const modes = { default: "默认", auto: "自动", plan: "计划", readonly: "只读" };
   $("s-mode").textContent = modes[s.mode] || s.mode || "—";
   $("s-mode").style.color = s.mode === "auto" ? "var(--alert)" : "";
+  // **数字要带上它是什么。** 状态栏原来写「默认 · 23% · ¥0.0684 · v0.73.0」——
+  // 23% 是什么的 23% 没人知道（是上下文占用），而四位小数是机器的精度不是人的：
+  // 看一眼要判断的是"贵不贵"，不是"几厘几毫"。精确值留在 title 里，想查得到。
   if (s.context_limit) {
-    $("s-ctx").textContent = Math.round((s.context / s.context_limit) * 100) + "%";
+    const pct = Math.round((s.context / s.context_limit) * 100);
+    $("s-ctx").textContent = "上下文 " + pct + "%";
+    $("s-ctx").title = `${s.context} / ${s.context_limit} token`;
   }
   if (typeof s.cost === "number") {
-    $("s-cost").textContent = s.cost ? "¥" + s.cost.toFixed(4) : "¥0";
+    // 不到一分钱显示「<¥0.01」，别写一串 0 —— 那串 0 看着像精度，其实是噪音
+    $("s-cost").textContent =
+      !s.cost ? "¥0" : s.cost < 0.01 ? "<¥0.01" : "¥" + s.cost.toFixed(2);
+    $("s-cost").title = "这段对话累计 ¥" + s.cost.toFixed(4);
   }
   drawCredits(s.credits);
   if (s.version) $("s-ver").textContent = "v" + s.version;
@@ -630,6 +682,7 @@ function handle(ev) {
     case "cleared":
       // 只清对话。刊头那条启动信息说的是环境，跟聊了什么无关，留着
       streamEl.replaceChildren();
+      syncHello();
       break;
 
     case "paths":
@@ -663,25 +716,60 @@ function handle(ev) {
 
 let pendingPreview = null;
 
+/* 这次确认危不危险 —— **决定它画不画成红的**。
+ *
+ * 红在这套设计里只有一个意思：「在一屏黑白里，需要你的东西一眼能找到」
+ * （见 app.css 里 `--alert` 那段注释）。而原来**每一次确认都是红的**，
+ * 包括改一行文件这种一天要点几十次的事。天天被红色叫住，红就不再是信号，
+ * 只是背景噪音 —— 真出现 `rm -rf` 那次反而认不出来了。
+ *
+ * 所以只有「做了就回不去」的才吃红：删除、覆盖式的 git 操作、提权、写设备。
+ * 判断放前端，跟 `ui.py` 那条分层原则一致：后端只给结构化事实，怎么画归这边。
+ * **宁可漏判不可错判**：漏了只是少一次红，错了是天天见红、回到原点。
+ */
+const DANGER = [
+  /\brm\s+-[a-z]*[rf]/,            // rm -rf / rm -f
+  /\brmdir\b|\bunlink\b/,
+  /\bgit\s+(push|reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s)/,
+  /\bsudo\b|\bsu\s+-/,
+  /\bmkfs|\bdd\s+if=|\bshred\b/,
+  /\bchmod\s+-R|\bchown\s+-R/,
+  /\b(drop|truncate)\s+table\b/i,
+  /:\s*>\s*\/dev\/|>\s*\/dev\/sd/,
+  /\bkill(all)?\s+-9\b/,
+  /\bnpm\s+publish\b|\bcargo\s+publish\b/,
+];
+
+function looksDangerous(ev) {
+  if (ev.type !== "approve") return false;
+  const cmd = String((ev.args && ev.args.command) || "");
+  return DANGER.some((re) => re.test(cmd));
+}
+
 function askCard(ev) {
   if (seenAsk.has(ev.id)) return;      // 回放会把同一条 ask 再送一遍
   seenAsk.add(ev.id);
   const body = block("要你点头", "block--ask");
   const card = document.createElement("div");
-  card.className = "ask";
+  card.className = looksDangerous(ev) ? "ask ask--danger" : "ask";
 
   let question = "";
   let choices = [];
   if (ev.type === "approve") {
     question = `要 ${ev.label}${ev.target ? " " + ev.target : ""} 吗？`;
+    // **按「点错了会怎样」排，不按「多常用」排。**
+    // 点错「同意一次」最多白跑一步；点错「永久允许」是以后再也不问了 ——
+    // 这两个原来并排、样式一样宽，手快很容易点到后面那个。
+    // 现在前两个是代价最小的（同意这一次 / 拒绝），扩大授权的那两个
+    // 靠 `.ask__row--wide` 推到右边、样式更弱，要点到得有意为之。
     choices = [
       ["yes", "同意一次", "btn--primary"],
       ["no", "拒绝", ""],
       // **写「本轮」不是「本次会话」**：它是 _run_tools 那一批的局部标志，
       // 下一轮照样会问。终端那边的键位提示写的也是「[a] 本轮全放」。
-      ["all", "本轮都允许", ""],
+      ["all", "本轮都允许", "btn--wide"],
     ];
-    if (ev.rule) choices.push(["save", "永久允许", "", ev.rule]);
+    if (ev.rule) choices.push(["save", "永久允许", "btn--wide", ev.rule]);
   } else if (ev.type === "plan") {
     question = "按这个方案动手吗？";
     choices = [["yes", "动手", "btn--primary"], ["no", "还有意见", ""]];
@@ -998,6 +1086,8 @@ const THEME_KEY = "feiyu.theme";
 const THEMES = [
   { key: "light", label: "默认", about: "纯白纸、IBM Blue，国际现代主义那套" },
   { key: "retro", label: "复古", about: "泛黄的纸、暖墨、赭色。只换配色，排版一个字没动" },
+  { key: "anthropic", label: "Anthropic",
+    about: "暖中性的纸、陶土橘。跟这台机器上 kitty / GTK / 壁纸同一套色" },
 ];
 
 function theme() {
@@ -1810,6 +1900,7 @@ async function goDesk(path) {
     const now = await TAURI.core.invoke("switch", { dir: path });
     // 换过去就是另一段对话了：正文、侧栏、附件全部归零
     streamEl.replaceChildren();
+    syncHello();
     clips = [];
     drawClips();
     boots.clear();
@@ -2392,5 +2483,6 @@ document.addEventListener("keydown", (e) => {
 $("send").onclick = submit;
 $("stop").onclick = () => send({ op: "interrupt" });
 
+syncHello();      // 一进来就是空的，这一下把「开始」那块摆上
 connect();
 inputEl.focus();
