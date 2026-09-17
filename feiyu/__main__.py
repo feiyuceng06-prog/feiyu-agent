@@ -1131,10 +1131,17 @@ def _piped(agent: Feiyu, workspace) -> int:
     for line in sys.stdin:
         task = line.strip()
         if task and task != "/exit":
-            # **记住最坏的那次，但照旧把剩下的跑完** —— 中途停掉是另一种行为，
-            # 这里只负责让"有一条没做成"从退出码上看得见
-            worst = max(worst, _run_turn(agent, task))
+            code = _run_turn(agent, task)
+            worst = max(worst, code)
             session.save(workspace, agent, agent.session_id)
+            # **被打断就整个停下，别接着跑下一条。**
+            # 原来这里是一路跑到底的：`cat 活儿.txt | feiyu --mode auto` 中途
+            # 按 ctrl-c，只打断了当前这一条，后面几条照样执行 —— 而 auto 模式下
+            # 那意味着它接着改文件、接着跑命令。**人按 ctrl-c 的意思是"全停"。**
+            # 出错（1）不停：一条失败不代表后面几条也做不了，那是另一回事。
+            if code == 130:
+                print(ui.warn("已中断，剩下的任务不再执行"))
+                break
     return worst
 
 

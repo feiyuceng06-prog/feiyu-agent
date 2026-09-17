@@ -308,3 +308,58 @@ class TestExplain402(unittest.TestCase):
         self.assertIn("限流", self.explain(429, "slow down"))
         self.assertIn("key", self.explain(401, "bad key"))
         self.assertEqual(self.explain(418, "我是茶壶"), "")
+
+
+class TestPipedInterrupt(unittest.TestCase):
+    """管道里按 ctrl-c 要整个停下，不是只打断当前这条
+
+    原来是一路跑到底的：`cat 活儿.txt | feiyu --mode auto` 中途按 ctrl-c，
+    只打断了当前这一条，后面几条照样执行 —— 而 auto 模式下那意味着它接着改文件、
+    接着跑命令。**人按 ctrl-c 的意思是"全停"。**
+    """
+
+    def piped(self, 怎么结束):
+        """`怎么结束` 收一个任务名，返回 None 正常、抛 KeyboardInterrupt 打断、
+        抛别的异常算出错"""
+        import types
+        from feiyu import __main__ as M
+        跑过 = []
+
+        class 假Agent:
+            session_id = "x"
+
+            def send(self, task):
+                跑过.append(task)
+                怎么结束(task)
+                return ""
+
+        老 = M.session
+        M.session = types.SimpleNamespace(save=lambda *a, **k: None)
+        self.addCleanup(lambda: setattr(M, "session", 老))
+        老输入 = sys.stdin
+        sys.stdin = io.StringIO("甲\n乙\n丙\n")
+        self.addCleanup(lambda: setattr(sys, "stdin", 老输入))
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = M._piped(假Agent(), "/tmp")
+        return code, 跑过
+
+    def test_打断之后不再跑剩下的(self):
+        def 第一条就打断(task):
+            if task == "甲":
+                raise KeyboardInterrupt
+        code, 跑过 = self.piped(第一条就打断)
+        self.assertEqual(跑过, ["甲"])
+        self.assertEqual(code, 130)
+
+    def test_出错不停_那是另一回事(self):
+        """一条失败不代表后面几条也做不了 """
+        def 第一条报错(task):
+            if task == "甲":
+                raise RuntimeError("接口挂了")
+        code, 跑过 = self.piped(第一条报错)
+        self.assertEqual(跑过, ["甲", "乙", "丙"])
+        self.assertEqual(code, 1)
+
+    def test_全都正常时退出码是零(self):
+        code, 跑过 = self.piped(lambda task: None)
+        self.assertEqual((code, 跑过), (0, ["甲", "乙", "丙"]))

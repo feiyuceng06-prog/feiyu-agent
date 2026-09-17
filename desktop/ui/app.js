@@ -86,8 +86,13 @@ const HELLO = [
 ];
 
 function syncHello() {
-  const has = streamEl.children.length > 0;
   let el = $("hello");
+  // **"有没有内容"不能把这块自己算进去。** 第一版写的是
+  // `streamEl.children.length > 0`，而这块本身就是 streamEl 的孩子 ——
+  // 于是在空对话上连调两次就把它删了（第三次又加回来，来回跳）。
+  // 现在所有调用点恰好都是"先清空/先追加"，所以没露出来；
+  // 加一个调用点就会静默失效，而空状态没了是不会报错的。
+  const has = streamEl.children.length > (el ? 1 : 0);
   if (has) { if (el) el.remove(); return; }
   if (el) return;
   el = document.createElement("div");
