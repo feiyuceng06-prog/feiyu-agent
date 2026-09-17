@@ -988,6 +988,22 @@ stdio 一行 JSON → 前端一次全量重渲染。
   **`devserver` 用 `include_str!` 把 `ui/` 编进二进制**，改前端之后要
   `cargo build --release --bin feiyu-devserver` 才能用夹具看到新代码。
 
+> **改完 `desktop/ui/` 要编两个二进制，不是一个。**
+>
+> ```bash
+> cargo build --release --bin feiyu-devserver   # 夹具看的那个
+> cargo build --release --bin feiyu-desktop     # 你自己在用的那个
+> ```
+>
+> 产品那个也是把前端**编进二进制**的（`tauri.conf.json` 的 `frontendDist: "ui"`，
+> Tauri 打包时嵌进去），`~/.local/bin/feiyu-desktop` 只是个 shim，指向
+> `desktop/target/release/feiyu-desktop`。
+>
+> **这条上面那句只写了 devserver，于是 0.74.0 我自己照着漏了**：夹具里截图全是新的、
+> 断言全绿、commit 也推了，而用户打开桌面端说「好像没变动？」—— 他跑的是五天前
+> 编的那个二进制。**夹具绿不等于产品变了**，这两件事之间隔着一次编译。
+> 编完还要**关掉正在跑的窗口再开**，热重载是没有的。
+
 顺带记一条排查手法：`serve.py` 的 `REPLY_TIMEOUT = 600.0` 会造成**另一种**「看着像死了」——
 agent 要问话时阻塞整整十分钟，超时后静默停掉。trace 日志里认它很容易：
 空档正好是 600.0 秒，而那条 `round_limit` 没有 `answer` 字段。两周日志里只有 4 次。
