@@ -112,6 +112,34 @@ class TestWriteEdit(Base):
         self.assertIn("覆盖", self.box.run(
             "write_file", {"path": "a.py", "content": "新的"}).summary)
 
+    def test_整写提示挂在结果里_开关开时(self):
+        """走真正的 write_file 那条路，不是只测那个纯函数 """
+        import os
+        os.environ["FEIYU_REWRITE_HINT"] = "on"
+        self.addCleanup(lambda: os.environ.pop("FEIYU_REWRITE_HINT", None))
+        旧 = "\n".join("第 %d 行" % i for i in range(200))
+        self.write("big.txt", 旧)
+        out = self.box.run("write_file", {"path": "big.txt", "content": 旧 + "\n补一行"})
+        self.assertIn("edit_file", out.content)
+        self.assertFalse(out.is_error)      # 提示不是错，标了它会去"修"没坏的东西
+        self.assertIn("覆盖", out.summary)   # 摘要照旧，提示只进 content
+
+    def test_新建的文件不提示(self):
+        import os
+        os.environ["FEIYU_REWRITE_HINT"] = "on"
+        self.addCleanup(lambda: os.environ.pop("FEIYU_REWRITE_HINT", None))
+        长的 = "\n".join("第 %d 行" % i for i in range(200))
+        self.assertNotIn("edit_file", self.box.run(
+            "write_file", {"path": "新的.txt", "content": 长的}).content)
+
+    def test_开关关着时一个字都不加(self):
+        import os
+        os.environ.pop("FEIYU_REWRITE_HINT", None)
+        旧 = "\n".join("第 %d 行" % i for i in range(200))
+        self.write("big.txt", 旧)
+        self.assertNotIn("edit_file", self.box.run(
+            "write_file", {"path": "big.txt", "content": 旧 + "\n补一行"}).content)
+
     def test_编辑要求唯一匹配(self):
         self.write("a.py", "x = 1\nx = 1\n")
         out = self.box.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
@@ -1696,3 +1724,49 @@ class TestDiagnose(Base):
         self.assertFalse(out.is_error, out.content)
         out = self.box.run("write_file", {"path": "b.py", "content": "def f(:\n"})
         self.assertTrue(out.is_error, "语法检查该照旧在，它不依赖语言服务器")
+
+
+class Test整写提示(unittest.TestCase):
+    """整写一个已存在的文件、内容跟原文大面积重合时，在结果里说一句改用 edit_file
+
+    依据是 6 道题 157 轮的 trace：墙钟 91-98% 花在等模型，每轮耗时跟输出字数的
+    相关系数 +0.98，而 16 次 write_file 里 7 次「覆盖」共 3315 行（新建的 3 倍），
+    三道题各有一个文件被反复整写。**默认关着**，等 A/B 说它有用再谈默认开。
+    """
+
+    def setUp(self):
+        self.old = os.environ.get("FEIYU_REWRITE_HINT")
+        self.addCleanup(lambda: os.environ.__setitem__("FEIYU_REWRITE_HINT", self.old)
+                        if self.old is not None else os.environ.pop("FEIYU_REWRITE_HINT", None))
+
+    def test_默认是关的(self):
+        os.environ.pop("FEIYU_REWRITE_HINT", None)
+        self.assertFalse(tools.rewrite_hint_on())
+        os.environ["FEIYU_REWRITE_HINT"] = "on"
+        self.assertTrue(tools.rewrite_hint_on())
+
+    def test_大面积重合才提醒(self):
+        old = "\n".join("第 %d 行" % i for i in range(200))
+        加了十行 = old + "\n" + "\n".join("新的 %d" % i for i in range(10))
+        got = tools._mostly_rewrite(old, 加了十行)
+        self.assertIn("edit_file", got)
+        self.assertIn("95%", got)
+
+    def test_几乎全换掉的不提醒(self):
+        """大改本来就该整写，提醒它反而是错的 """
+        old = "\n".join("旧 %d" % i for i in range(200))
+        new = "\n".join("完全不同 %d" % i for i in range(200))
+        self.assertEqual(tools._mostly_rewrite(old, new), "")
+
+    def test_短文件不啰嗦(self):
+        """几十行的文件整写本来就不贵 """
+        old = "\n".join("行 %d" % i for i in range(20))
+        self.assertEqual(tools._mostly_rewrite(old, old + "\n新的"), "")
+
+    def test_按多重集合算不是按集合(self):
+        """同一行重复出现 N 次，只能抵扣 N 次 —— 用 set 的话
+        一份「全是空行」的新内容会被算成 100% 重合
+        """
+        old = "唯一的一行\n" + "\n".join("行 %d" % i for i in range(199))
+        new = "\n".join(["唯一的一行"] * 200)
+        self.assertEqual(tools._mostly_rewrite(old, new), "")

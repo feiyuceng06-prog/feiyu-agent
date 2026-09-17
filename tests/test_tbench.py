@@ -459,3 +459,15 @@ class TestTokenColumn(unittest.TestCase):
         好 = tbench_report._row(_result(reward=1.0, meta={
             "feiyu_total_tokens": 292000, "feiyu_partial": False}))
         self.assertEqual(好["tokens"], 292000)
+
+
+class TestCompare表(unittest.TestCase):
+    def test_花费要留小数位(self):
+        """整张表原来都是 `%10.0f`，一道题几毛钱时 ¥0.365 和 ¥0.912 双双显示成 0 ——
+        那一行看着像"两边都没花钱"，而"变化"那列还写着 -18.3%，自相矛盾得很隐蔽
+        """
+        甲 = [{"suite": "题", "ok": False, "why": "", "cost": 0.365, "rounds": 3}]
+        乙 = [{"suite": "题", "ok": False, "why": "", "cost": 0.912, "rounds": 3}]
+        got = report.compare(甲, 乙)
+        self.assertIn("0.365", got)
+        self.assertIn("0.912", got)

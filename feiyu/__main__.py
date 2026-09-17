@@ -208,19 +208,21 @@ def main() -> int:
     if args.prompt:
         task = " ".join(args.prompt)
         if spec is None:
-            _run_turn(agent, task)
+            code = _run_turn(agent, task)
             session.save(workspace, agent, agent.session_id)
             _print_review(agent, task, args.review)
-            return _finish(agent, tracer, 0)
+            return _finish(agent, tracer, code)
         # schema 模式下 stdout 只能有 JSON，人看的东西整体挪到 stderr
         with contextlib.redirect_stdout(sys.stderr):
-            _run_turn(agent, task)
+            code = _run_turn(agent, task)
             session.save(workspace, agent, agent.session_id)
             _print_review(agent, task, args.review)
             value, problems = agent.finish_json(spec)
-        if problems:
-            print("错误：输出不满足 schema\n  " + "\n  ".join(problems), file=sys.stderr)
-            return _finish(agent, tracer, 1)
+        # 这一轮本来就炸了的话，schema 不满足只是它的后果，报前者更有用
+        if code or problems:
+            if problems:
+                print("错误：输出不满足 schema\n  " + "\n  ".join(problems), file=sys.stderr)
+            return _finish(agent, tracer, code or 1)
         json.dump(value, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
         return _finish(agent, tracer, 0)
@@ -1125,12 +1127,15 @@ def _hit_rate(hit: int, total: int) -> str:
 
 def _piped(agent: Feiyu, workspace) -> int:
     """stdin 不是终端时（管道、脚本）：一行一个任务，不画框 """
+    worst = 0
     for line in sys.stdin:
         task = line.strip()
         if task and task != "/exit":
-            _run_turn(agent, task)
+            # **记住最坏的那次，但照旧把剩下的跑完** —— 中途停掉是另一种行为，
+            # 这里只负责让"有一条没做成"从退出码上看得见
+            worst = max(worst, _run_turn(agent, task))
             session.save(workspace, agent, agent.session_id)
-    return 0
+    return worst
 
 
 # 接口报错时给一句能照着做的话 原样甩 JSON 的话用户只能干瞪眼
@@ -1139,6 +1144,8 @@ def _piped(agent: Feiyu, workspace) -> int:
 # 就会告诉用户"key 过期了"，把人往错方向指（0.26.0 说 404 那次就是这个教训）
 _API_CODES = {
     401: "key 不对或者过期了 /key 看看这条配置，或者 /key add 重新加一条",
+    402: "余额不够了 状态栏那个额度点一下能现查一次，或者 /model 换一条配置\n"
+         "  跑长任务前先看一眼额度：中途烧完的话它当场停，而停在哪一步不会写在任何地方",
     403: "这个 key 没有访问权限，确认一下它开通了这个模型",
     404: "接口说没有这个东西 两种可能：模型 id 不对（各家退役很勤，"
          "去厂商后台看现在叫什么），或者 base_url 多写了一段路径"
@@ -1148,6 +1155,9 @@ _API_CODES = {
 # 这几条本来就是按措辞认的，状态码指望不上（各家把它塞在 400 里）
 _API_WORDS = (
     ("insufficient", "余额不够了 状态栏那个额度点一下能现查一次"),
+    # openrouter 的 402 说的是 "requires more credits"，一个 insufficient 都没有 ——
+    # 402 已经进了 `_API_CODES`，这条是给那些**把它塞进 400** 的接口兜底
+    ("requires more credits", "余额不够了 状态栏那个额度点一下能现查一次"),
     ("exceed the limit", "这一轮发过去的内容超过了模型的上下文上限 "
                          "/compact 压一压，或者 /key add 给这条配置填上 limit"),
     ("Connection", "连不上接口 检查网络，或者这条配置的 base_url 写错了"),
@@ -1175,13 +1185,27 @@ def _explain(exc: Exception) -> str:
     return _API_CODES.get(_status_of(exc), "")
 
 
-def _run_turn(agent: Feiyu, prompt: str) -> None:
+def _run_turn(agent: Feiyu, prompt: str) -> int:
+    """跑一轮，返回退出码：0 做完了，1 出错，130 被打断
+
+    **「没做成」必须能从退出码看出来。** 原来这里把异常接住、打印完就算完，
+    而一次性任务那条路一律 `return _finish(..., 0)` —— 于是接口挂掉
+    （余额耗尽 / key 过期 / 被限流）跟顺利做完，在退出码上一模一样。
+
+    屏幕前有人时无所谓，他看得见那句红字；**没人看屏幕的场景里这个区别就是全部**：
+    0.72.0 那轮 24 道基线跑到一半 openrouter 余额见底，11 次 trial 全部当场退出、
+    退出码 0，于是判分那边把它们记成「没解决」，解决率被白白压低 ——
+    是事后翻 stdout 才发现的，而 stdout 正好是超时那几次没留下的东西。
+
+    130 是 shell 惯例（被 SIGINT 停掉）。交互里这个返回值没人看，REPL 照旧接着转。
+    """
     guard = ui.EscInterrupt()
     try:
         with guard:
             agent.send(prompt)
     except KeyboardInterrupt:
         print(ui.warn("已中断"))
+        return 130
     except Exception as exc:
         hint = _explain(exc)
         if hint:
@@ -1189,6 +1213,8 @@ def _run_turn(agent: Feiyu, prompt: str) -> None:
             print(ui.notice(ui.clip(str(exc), 200)))
         else:
             print(ui.error("出错了：%s" % exc))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

@@ -521,6 +521,55 @@ def assist_on() -> bool:
     return os.environ.get("FEIYU_ASSIST", "").strip().lower() not in ("off", "0", "no")
 
 
+# 整写一个已存在的文件、而内容跟原文大面积重合时，在结果里说一句改用 edit_file。
+#
+# **为什么不是往工具描述里加句子**：`write_file` 的描述里早就写着「如果只是改动已有
+# 文件的一部分，优先用 edit_file」—— 它读到了照样整写。0.48.0 已经把这条记清楚了：
+# 行为指令放系统提示是必要条件不是充分条件，真正见效的是**在它正在用笨办法的当口，
+# 在工具结果里说一句**。
+#
+# **证据**：6 道题 157 轮的 trace 里，墙钟的 91-98% 花在等模型，而每轮耗时跟输出字数的
+# 相关系数是 +0.98。16 次 write_file 里 7 次是「覆盖」、共 3315 行，是「新建」的 3 倍；
+# 三道题各有一个文件被反复整写（`scheduler.py` 249→259→496→596→584 行）。
+#
+# **这一次的提示救不了这一次** —— 那两万字已经发出来了，钱和时间都花完了。
+# 救的是同一个文件的下一次覆盖，而上面那串正说明「下一次」很常见。
+#
+# **默认关着。** 这是个还没被证明的改动，0.69.0 那次"诊断"看着同样合理、A/B 量出来
+# 方向是反的。等 A/B 说它有用再谈默认开。
+REWRITE_MIN_LINES = 80          # 太短的文件整写本来就不贵，别为几行啰嗦
+REWRITE_SAME = 0.6              # 新内容里有六成行原文就有，才算"大面积重合"
+
+
+def rewrite_hint_on() -> bool:
+    return os.environ.get("FEIYU_REWRITE_HINT", "").strip().lower() in ("on", "1", "yes")
+
+
+def _mostly_rewrite(before: str, after: str) -> str:
+    """整写的内容里有多少是原样抄回来的 值得提醒就返回那句话，否则空串
+
+    按**行的多重集合**求交，O(n)：逐行 diff 在几千行的文件上是平方级的，
+    而这里只要一个"重合得多不多"的粗判断，不需要知道具体差在哪。
+    """
+    import collections
+    new_lines = after.splitlines()
+    if len(new_lines) < REWRITE_MIN_LINES:
+        return ""
+    old_count = collections.Counter(before.splitlines())
+    same = 0
+    for line in new_lines:
+        if old_count[line] > 0:
+            old_count[line] -= 1
+            same += 1
+    ratio = same / len(new_lines)
+    if ratio < REWRITE_SAME:
+        return ""
+    return ("这次整写的 %d 行里有 %d 行（%.0f%%）跟原文一模一样 "
+            "下次改这个文件用 edit_file 只发改动的那几处 —— "
+            "重发整份的时间几乎全花在把原样的内容再生成一遍上 "
+            % (len(new_lines), same, 100 * ratio))
+
+
 def _syntax_error(path: Path, text: str) -> str:
     """Python 的语法错本地就能查，**不用起语言服务器** —— `ast.parse` 是标准库，
     零成本，而语法错又是写文件最容易犯、最该当场知道的一种 """
@@ -1704,8 +1753,12 @@ class Toolbox:
         n = content.count("\n") + 1
         verb = "覆盖" if existed else "新建"
         bad, broken = self._diagnose(target, content, before=before)
+        # 提示不是错，别标 is_error —— 标了它会转头去"修"一件没坏的事
+        hint = (_mostly_rewrite(before, content)
+                if existed and before is not None and rewrite_hint_on() else "")
         return ToolResult(
-            f"已写入 {n} 行到 {args['path']}" + ("\n\n" + bad if bad else ""),
+            f"已写入 {n} 行到 {args['path']}" + ("\n\n" + bad if bad else "")
+            + ("\n\n" + hint if hint else ""),
             is_error=broken,
             summary=f"{verb} {n} 行" + ("，但有错" if bad else ""))
 

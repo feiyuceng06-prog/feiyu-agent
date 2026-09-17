@@ -5,6 +5,7 @@
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -214,3 +215,96 @@ class TestEffortCommand(unittest.TestCase):
     def test_进了斜杠命令表(self):
         from feiyu import ui
         self.assertIn("/effort", ui.SLASH)
+
+
+class TestExitCode(unittest.TestCase):
+    """接口挂了，一次性任务的退出码不能还是 0
+
+    0.72.0 那轮 24 道基线跑到一半 openrouter 余额见底，11 次 trial 全部当场退出、
+    **退出码 0**，判分那边于是把它们记成「没解决」，解决率被白白压低 ——
+    是事后翻 stdout 才发现的。屏幕前有人时无所谓（他看得见那句红字），
+    没人看屏幕的场景里这个区别就是全部。
+    """
+
+    def setUp(self):
+        import http.server
+        import json
+        import threading
+
+        class 只会说402(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.dumps({"error": {"message": "requires more credits",
+                                             "code": 402}}).encode()
+                self.send_response(402)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass        # 别往测试输出里糊访问日志
+
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), 只会说402)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.shutdown)
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cfg = os.path.join(self.tmp.name, "feiyu")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "models.json"), "w", encoding="utf-8") as f:
+            # **key 必须是 ASCII**：它会拼进 `Authorization: Bearer …` 这个 HTTP header，
+            # 而 header 不能带非 ASCII —— 第一版写成 "sk-假的"，报出来的是
+            # "'ascii' codec can't encode characters in position 10-11"，
+            # 看着像 feiyu 的编码 bug，其实是夹具自己的
+            json.dump({"假的": {
+                "kind": "openai", "model": "随便",  "key": "sk-not-a-real-key",
+                "base_url": "http://127.0.0.1:%d/v1" % self.srv.server_port}}, f)
+        self.env = {**os.environ, "XDG_CONFIG_HOME": self.tmp.name,
+                    "XDG_STATE_HOME": self.tmp.name, "FEIYU_NO_LOG": "1",
+                    "NO_COLOR": "1"}
+
+    def 跑(self, *args, stdin=None):
+        return subprocess.run(
+            [sys.executable, "-m", "feiyu", "-w", self.tmp.name, "--mode", "auto", *args],
+            capture_output=True, text=True, timeout=120, env=self.env, input=stdin)
+
+    def test_一次性任务接口报错退出码非零(self):
+        done = self.跑("随便什么任务")
+        self.assertEqual(done.returncode, 1, done.stdout[-500:] + done.stderr[-500:])
+
+    def test_管道里也一样(self):
+        done = self.跑(stdin="第一件事\n第二件事\n")
+        self.assertEqual(done.returncode, 1, done.stdout[-500:] + done.stderr[-500:])
+
+    def test_报错本身还是要打出来给人看(self):
+        """退出码是给脚本看的，人还是得看见那句话 —— 两样都要，不是二选一 """
+        done = self.跑("随便什么任务")
+        self.assertIn("余额", done.stdout + done.stderr)
+
+
+class TestExplain402(unittest.TestCase):
+    """402 必须按**状态码**认，不能只靠措辞
+
+    这次实战撞到的是 openrouter，它说的是 "requires more credits" ——
+    一个 `insufficient` 都没有，而 `_API_CODES` 原来也没有 402，
+    于是最常见的计费错误只会甩一坨原始 JSON 给人看。
+    措辞那条也留着，是给**把 402 塞进 400** 的接口兜底。
+    """
+
+    def explain(self, code=None, text=""):
+        from feiyu.__main__ import _explain
+        exc = type("假报错", (Exception,), {"status_code": code})(text)
+        return _explain(exc)
+
+    def test_按状态码认(self):
+        """报错文本里一个线索都没有时，只能靠状态码 """
+        self.assertIn("余额", self.explain(402, "Payment Required"))
+
+    def test_措辞那条给塞进400的接口兜底(self):
+        self.assertIn("余额", self.explain(400, "This request requires more credits"))
+
+    def test_别的码不受影响(self):
+        self.assertIn("限流", self.explain(429, "slow down"))
+        self.assertIn("key", self.explain(401, "bad key"))
+        self.assertEqual(self.explain(418, "我是茶壶"), "")

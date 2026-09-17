@@ -175,11 +175,14 @@ def compare(old: list[dict], new: list[dict], names=("对照", "实验")) -> str
     out.append("            （%d 道样本，差一两道都在噪音里，别当结论）" % len(pairs))
     out.append("")
     out.append("%-12s %10s %10s %10s" % ("中位", names[0], names[1], "变化"))
-    for label, key in (("轮数", "rounds"), ("耗时(秒)", "s"),
-                       ("token", "tokens"), ("花费(元)", "cost")):
+    # **花费要留小数位。** 原来整张表都用 `%10.0f`，一道题几毛钱的时候
+    # ¥0.365 和 ¥0.912 双双显示成 0，那一行看着像"两边都没花钱" ——
+    # 而 `变化` 那列还老老实实写着 -18.3%，自相矛盾得很隐蔽
+    for label, key, digits in (("轮数", "rounds", 0), ("耗时(秒)", "s", 0),
+                               ("token", "tokens", 0), ("花费(元)", "cost", 3)):
         va, vb = _num(a, key), _num(b, key)
         delta = ("%+.1f%%" % (100 * (vb - va) / va)) if va else "—"
-        out.append("%-12s %10.0f %10.0f %10s" % (label, va, vb, delta))
+        out.append("%-12s %10.*f %10.*f %10s" % (label, digits, va, digits, vb, delta))
     out.append("")
     out.append("逐题（轮数 / 是否解决）：")
     for x, y in pairs:

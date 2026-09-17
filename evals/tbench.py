@@ -296,6 +296,14 @@ class FeiyuAgent(BaseAgent):
             "FEIYU_SANDBOX": "off",      # 容器里没有 bwrap，容器本身就是沙箱
             "NO_COLOR": "1",
         }
+        # **A/B 开关要从宿主机转发进容器。** 这个 env 字典原来是写死的，于是
+        # `FEIYU_ASSIST` 压根到不了容器里 —— 它当初是给 SWE-bench 那条路加的
+        # （那条路 feiyu 跑在宿主机，环境变量天然就在），挪到 Harbor 这边就断了，
+        # 而断得很安静：开关照样能设，只是不起作用，两档跑出来一模一样。
+        # Harbor 的 `--agent-env` 也不行，它进不到我们这次 `exec` 的 env 里。
+        for name in ("FEIYU_ASSIST", "FEIYU_REWRITE_HINT"):
+            if os.environ.get(name):
+                env[name] = os.environ[name]
         # 题面是**位置参数**，没有 -p 这个开关（`feiyu [选项] [prompt ...]`）
         #
         # **输出重定向到容器里的文件，不靠 `got.stdout`。** 超时那条路上 `exec` 直接抛，
