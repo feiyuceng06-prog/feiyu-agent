@@ -594,7 +594,9 @@ _WEB_MAX_CHARS_FOR_ASK = 60_000
 # 这些标签里的东西不是正文
 _WEB_CACHE_TTL = 900          # 同一个地址 15 分钟内不重复抓
 _WEB_CACHE_MAX = 32           # TTL 只在读的时候看，不设上限的话过期条目永远不清
-_web_cache: dict[str, tuple[float, str, str, str]] = {}
+# 页面条目是 (时刻, 正文, 最终地址, 类型, 来源)，搜索条目是 (时刻, 结果表, 来源标签, "")
+# 两种形状共用一个字典 键不一样（网址 vs "search:…"），各认各的
+_web_cache: dict[str, tuple] = {}
 _SKIP_TAGS = {"script", "style", "noscript", "svg", "head"}
 
 
@@ -891,6 +893,22 @@ def _blocked_host(host: str) -> str:
     if not ips or not all(_internal_ip(ip) for ip in ips):
         return ""
     return "%s 解析到内网地址 %s" % (host, ips[0])
+
+
+def _blocked_fetch(url: str):
+    """内网拦截 被拦返回 (None, 说明, 短提示)，放行返回 None
+
+    抽出来是因为**走 Firecrawl 也要拦**：自托管实例就在本机，让它替我们去抓
+    169.254.169.254 跟自己抓没有区别
+    """
+    bad = _blocked_host(urllib.parse.urlparse(url).hostname or "")
+    if not bad:
+        return None
+    return (None,
+            "拒绝抓取：%s 这类地址可能是内网服务或云元数据接口，"
+            "被网页内容诱导去抓就会泄露凭据 "
+            "确实要抓本机/内网服务的话，用 FEIYU_ALLOW_LOCAL_FETCH=1 启动 " % bad,
+            "内网地址已拦")
 
 
 # 抓取失败时按状态码补一句人话 **认不出来就一个字不加**——跟 0.47.0 的
@@ -1850,13 +1868,9 @@ class Toolbox:
     def _fetch_raw(self, url: str, *, allow_local: bool = False, headers: dict | None = None):
         """返回 (原文, 最终地址, 类型) 或 (None, 错误信息, 短提示) 不转 Markdown、不进缓存 """
         if not allow_local:
-            bad = _blocked_host(urllib.parse.urlparse(url).hostname or "")
-            if bad:
-                return (None,
-                        "拒绝抓取：%s 这类地址可能是内网服务或云元数据接口，"
-                        "被网页内容诱导去抓就会泄露凭据 "
-                        "确实要抓本机/内网服务的话，用 FEIYU_ALLOW_LOCAL_FETCH=1 启动 " % bad,
-                        "内网地址已拦")
+            blocked = _blocked_fetch(url)
+            if blocked:
+                return blocked
         request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA, **(headers or {})})
         try:
             with _opener.open(request, timeout=_WEB_TIMEOUT) as reply:
@@ -1870,22 +1884,87 @@ class Toolbox:
             return None, f"抓取失败：{exc}", "抓取失败"
         return raw.decode(charset, "replace"), final, ctype
 
+    def _firecrawl_post(self, where: str, key: str, payload: bytes):
+        """POST 一次 Firecrawl 返回 (解好的 JSON, "") 或 (None, 错误原文) """
+        request = urllib.request.Request(
+            where, data=payload,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + key,
+                     "User-Agent": _WEB_UA})
+        try:
+            with _opener.open(request, timeout=FIRECRAWL_TIMEOUT) as reply:
+                raw = json.loads(reply.read(_WEB_MAX_BYTES).decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            # 报错正文要带上 额度用完（402）和 key 不对（401）只看状态码分不清
+            detail = exc.read().decode("utf-8", "replace")[:200] if hasattr(exc, "read") else ""
+            return None, "HTTP %s %s" % (exc.code, " ".join(detail.split()))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return None, "%s" % exc
+        if not isinstance(raw, dict):
+            return None, "回的不是 JSON 对象"
+        return raw, ""
+
+    def _firecrawl_scrape(self, url: str, cfg: dict):
+        """走 Firecrawl 抓 返回 (Markdown, 最终地址, 类型) 或 (None, 错误信息, 短提示)
+
+        它自己就把 HTML 转好了，所以回来的东西**不再进 `_Markdown`**
+        """
+        blocked = _blocked_fetch(url)
+        if blocked:
+            return blocked
+        key = str(cfg.get("key") or "")
+        if not key:
+            return None, "fetch.json 里要走 Firecrawl 但没填 key ", "没配 key"
+        base = str(cfg.get("url") or FIRECRAWL_BASE).rstrip("/")
+        payload = json.dumps({"url": url, "formats": ["markdown"],
+                              "onlyMainContent": True}).encode("utf-8")
+        raw, err = self._firecrawl_post(base + "/v2/scrape", key, payload)
+        if raw is None:
+            return None, "Firecrawl 抓取失败：" + err, _err_short(err)
+        data = raw.get("data")
+        if not isinstance(data, dict):
+            return None, "Firecrawl 没给内容：%s" % json.dumps(raw, ensure_ascii=False)[:200], "没拿到内容"
+        meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        text = str(data.get("markdown") or "").strip()
+        if not text:
+            code = meta.get("statusCode")
+            return (None, "Firecrawl 抓到了但页面没有正文%s " % ("（HTTP %s）" % code if code else ""),
+                    "HTTP %s" % code if code else "没有正文")
+        return text, str(meta.get("sourceURL") or url), "text/markdown"
+
     def _fetch_page(self, url: str):
-        """返回 (正文, 最终地址, 类型) 或 (None, 错误信息, 短提示) HTML 转成 Markdown，进缓存 """
+        """返回 (正文, 最终地址, 类型, 来源) 或 (None, 错误信息, 短提示, 来源)
+
+        HTML 转成 Markdown，进缓存 来源是 "builtin" 或 "firecrawl"，让 summary 说得出
+        这次花没花额度
+        """
         cached = _web_cache.get(url)
         if cached and time.time() - cached[0] < _WEB_CACHE_TTL:
-            return cached[1], cached[2], cached[3]
-        body, final, ctype = self._fetch_raw(url)
+            return cached[1], cached[2], cached[3], cached[4]
+        cfg = fetch_config()
+        via = "builtin"
+        if (cfg.get("provider") or "builtin") == "firecrawl":
+            body, final, ctype = self._firecrawl_scrape(url, cfg)
+            via = "firecrawl"
+        else:
+            body, final, ctype = self._fetch_raw(url)
+            # 反爬和限流是 builtin 治不了的 配了 key 就花一次额度让 Firecrawl 再试一遍
+            # **只在这几种失败上回退**：404 换谁抓都是 404，白花钱
+            if body is None and cfg.get("key") and _retry_worthy(ctype):
+                retry, rfinal, rctype = self._firecrawl_scrape(url, cfg)
+                if retry is None:
+                    final += "\n\n（Firecrawl 回退也没抓下来：%s）" % rctype
+                else:
+                    body, final, ctype, via = retry, rfinal, rctype, "firecrawl"
         if body is None:
-            return body, final, ctype
+            return body, final, ctype, via
         if ctype in ("text/html", "application/xhtml+xml"):
             parser = _Markdown()
             parser.feed(body)
             body = parser.text()
         body = body.strip()
-        _web_cache[url] = (time.time(), body, final, ctype)
+        _web_cache[url] = (time.time(), body, final, ctype, via)
         _prune_web_cache()
-        return body, final, ctype
+        return body, final, ctype, via
 
     def _tool_web_search(self, args: dict) -> ToolResult:
         query = " ".join(str(args.get("query") or "").split())
@@ -1940,8 +2019,22 @@ class Toolbox:
             rows = json.loads(body).get("results") or []
             return [(_one_line(r.get("title")), r.get("url") or "", _one_line(r.get("content")))
                     for r in rows if r.get("url")][:count], "SearXNG"
+        if provider == "firecrawl":
+            if not cfg.get("key"):
+                raise RuntimeError("search.json 里 provider 是 firecrawl 但没填 key")
+            base = str(cfg.get("url") or FIRECRAWL_BASE).rstrip("/")
+            raw, err = self._firecrawl_post(
+                base + "/v2/search", str(cfg["key"]),
+                json.dumps({"query": query, "limit": count}).encode("utf-8"))
+            if raw is None:
+                raise RuntimeError("Firecrawl 搜索失败：" + err)
+            # 结果按来源分组，我们只要 web 那组（还有 images / news）
+            rows = ((raw.get("data") or {}).get("web") or [])
+            return [(_one_line(r.get("title")), r.get("url") or "", _one_line(r.get("description")))
+                    for r in rows if isinstance(r, dict) and r.get("url")][:count], "Firecrawl"
         if provider != "duckduckgo":
-            raise RuntimeError("search.json 里的 provider 只认 duckduckgo / brave / searxng，现在是 %r" % provider)
+            raise RuntimeError("search.json 里的 provider 只认 duckduckgo / brave / searxng / firecrawl，"
+                               "现在是 %r" % provider)
         body, final, _ = self._fetch_raw("https://html.duckduckgo.com/html/?q=" + q)
         if body is None:
             raise RuntimeError("DuckDuckGo 搜索失败：" + final)
@@ -1961,9 +2054,10 @@ class Toolbox:
         hint = ("\n\n（提示：搜东西直接用 web_search 工具，别拿 web_fetch 抓引擎的结果页 "
                 "结果页多半会被反爬拦掉，抓下来也有一多半是筛选菜单 ）") if engine else ""
 
-        body, final, ctype = self._fetch_page(url)
+        body, final, ctype, via = self._fetch_page(url)
         if body is None:
             return ToolResult(final + _fetch_note(ctype) + hint, is_error=True, summary=ctype)
+        mark = "Firecrawl · " if via == "firecrawl" else ""
 
         question = (args.get("prompt") or "").strip()
         if question and self.ask_model:
@@ -1975,7 +2069,7 @@ class Toolbox:
             if answer:
                 return ToolResult(
                     "来自 %s，按「%s」提炼：\n\n%s%s" % (final, question, answer, hint),
-                    summary="读完 %d 字，提炼出 %d 字" % (len(body), len(answer)),
+                    summary="%s读完 %d 字，提炼出 %d 字" % (mark, len(body), len(answer)),
                 )
             # 模型没答上来就退回原文，别把这次抓取浪费掉
 
@@ -1986,7 +2080,8 @@ class Toolbox:
         tail = "\n\n…（已截断，想要更精准可以带 prompt 再抓一次）" if clipped else ""
         return ToolResult(
             head + shown + tail + hint,
-            summary="%s 抓到 %d 字%s" % (ctype or "未知类型", len(shown), "（已截断）" if clipped else ""),
+            summary="%s%s 抓到 %d 字%s" % (mark, ctype or "未知类型", len(shown),
+                                           "（已截断）" if clipped else ""),
         )
 
     def _tool_image_generate(self, args: dict) -> ToolResult:
@@ -2554,6 +2649,50 @@ def search_config() -> dict:
         return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+# 抓取后端的配置 出厂 builtin（自己抓、自己转 Markdown）零配置，不出一分钱：
+#   {"key": "fc-…"}                                  builtin 撞上反爬才回退到 Firecrawl
+#   {"provider": "firecrawl", "key": "fc-…"}         一律走 Firecrawl
+#   {"key": "fc-…", "url": "http://localhost:3002"}  自托管实例
+#
+# **默认是「回退」不是「一律」**：日志里 web_fetch 54 次失败 16 次，一半是 401/403 反爬，
+# 那一半才是 Firecrawl 值钱的地方 抓 raw.githubusercontent / JSON 接口这些 builtin 本来就
+# 抓得到，一律走 Firecrawl 只是每次都慢几秒、还白烧额度
+FETCH_CONFIG = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "feiyu", "fetch.json")
+FIRECRAWL_BASE = "https://api.firecrawl.dev"
+FIRECRAWL_TIMEOUT = 60        # 它可能真起一个浏览器渲染，_WEB_TIMEOUT 那 20 秒不够
+# 只有这几种失败值得花一次额度重抓：反爬、要登录、限流
+FIRECRAWL_RETRY = (401, 403, 429)
+
+
+def fetch_config() -> dict:
+    try:
+        with open(FETCH_CONFIG, encoding="utf-8") as f:
+            raw = json.load(f)
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _retry_worthy(short: str) -> bool:
+    """`HTTP 403` 这种短提示 -> 值不值得花一次 Firecrawl 额度重抓 """
+    parts = short.split()
+    if len(parts) < 2 or parts[0] != "HTTP":
+        return False
+    try:
+        return int(parts[1]) in FIRECRAWL_RETRY
+    except ValueError:
+        return False
+
+
+def _err_short(err: str) -> str:
+    """Firecrawl 的错误原文 -> summary 里那句短的 """
+    parts = err.split()
+    if len(parts) >= 2 and parts[0] == "HTTP":
+        return "HTTP " + parts[1]
+    return "抓取失败"
 
 
 # 出图接口的配置 `~/.config/feiyu/images.json`：

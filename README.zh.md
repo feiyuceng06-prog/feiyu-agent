@@ -191,11 +191,22 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑完一个任务就退出
 
 `web_fetch` 抓网页转成 Markdown。带 `prompt` 参数时模型读完整页只回答那个问题，原文不进上下文。内网地址一律不抓，本机开发服务器要用 `FEIYU_ALLOW_LOCAL_FETCH=1 feiyu`。
 
+**抓不动的站可以挂 [Firecrawl](https://firecrawl.dev) 兜底。** 反爬（Cloudflare、UA 检查）是自带抓取治不了的，
+在 `~/.config/feiyu/fetch.json` 里填个 key，撞上 401 / 403 / 429 时就自动换它再抓一遍：
+
+```json
+{"key": "fc-…"}
+```
+
+只在这几种失败上回退 —— 404 换谁抓都是 404，不值得花额度。想一律走它就加 `"provider": "firecrawl"`，
+自托管实例加 `"url": "http://localhost:3002"`。花了额度的那次，结果行上会写明 `Firecrawl ·`。
+
 `web_search` 出厂走 DuckDuckGo，不用配置。想换后端写 `~/.config/feiyu/search.json`：
 
 ```json
 {"provider": "brave", "key": "…"}
 {"provider": "searxng", "url": "http://localhost:8080"}
+{"provider": "firecrawl", "key": "fc-…"}
 ```
 
 **出图要自己配。** `~/.config/feiyu/images.json` 写上任何一个 OpenAI 兼容的 images 接口：

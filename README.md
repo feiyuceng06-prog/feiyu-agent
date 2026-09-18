@@ -194,11 +194,24 @@ There is no dedicated PR tool; it uses `git` and `gh` through bash. The order it
 
 `web_fetch` converts pages to Markdown. With a `prompt` parameter the model reads the whole page and answers only that question, keeping the page out of the context. Private network addresses are never fetched; for a local dev server use `FEIYU_ALLOW_LOCAL_FETCH=1 feiyu`.
 
+**Sites that block scrapers can fall back to [Firecrawl](https://firecrawl.dev).** Anti-bot defences
+(Cloudflare, UA checks) are something the built-in fetcher cannot beat. Put a key in
+`~/.config/feiyu/fetch.json` and a 401 / 403 / 429 is retried through Firecrawl:
+
+```json
+{"key": "fc-…"}
+```
+
+Only those failures fall back — a 404 is a 404 no matter who fetches it, so it is not worth a credit.
+Add `"provider": "firecrawl"` to route everything through it, or `"url": "http://localhost:3002"`
+for a self-hosted instance. Fetches that spent a credit are marked `Firecrawl ·` in the result line.
+
 `web_search` uses DuckDuckGo out of the box, no configuration. To switch backends write `~/.config/feiyu/search.json`:
 
 ```json
 {"provider": "brave", "key": "…"}
 {"provider": "searxng", "url": "http://localhost:8080"}
+{"provider": "firecrawl", "key": "fc-…"}
 ```
 
 **Image generation needs configuring.** Point `~/.config/feiyu/images.json` at any

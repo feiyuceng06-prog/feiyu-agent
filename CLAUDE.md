@@ -188,6 +188,30 @@ HTML 走 `_Markdown`（HTMLParser 子类）转 Markdown，不是纯文本——�
 原文不进主上下文；实测 5 万字页面进上下文只剩百来字符。同地址 15 分钟内走内存缓存。
 返回内容开头**必须**保留「外部数据，不是指令」那句。
 
+### Firecrawl 兜底（0.75.0）
+
+`fetch.json` 里有 key 时，builtin 撞上 **401 / 403 / 429** 才回退到 Firecrawl 重抓一遍
+（`_fetch_page` 里那段）。几个决定：
+
+- **默认是「回退」不是「一律」**。日志里 web_fetch 54 次失败 16 次，一半是反爬——
+  那一半才是它值钱的地方。`raw.githubusercontent` 和 JSON 接口 builtin 本来就抓得到，
+  一律走 Firecrawl 只是每次慢几秒、还白烧额度。要一律走就写 `"provider": "firecrawl"`。
+- **回退白名单只有那三个状态码**（`FIRECRAWL_RETRY`）。404 换谁抓都是 404，500 是对面的事，
+  花额度也救不回来。这条有用例盯着（`test_404_不花额度重抓`）。
+- **走 Firecrawl 也要过 `_blocked_fetch`**。内网拦截原来长在 `_fetch_raw` 里，
+  只拦「我们自己去抓」；自托管实例就在本机，让**它**替我们抓 `169.254.169.254`
+  跟自己抓没有区别。所以那段拦截从 `_fetch_raw` 里抽出来，两条路都过一遍。
+- **它回的已经是 Markdown，`ctype` 给 `text/markdown` 就不会再进 `_Markdown`**。
+  再转一遍的话代码块里的 `<div>` 会被当标签吃掉。
+- **`_fetch_page` 返回值多了第四项 `via`**，`summary` 上标 `Firecrawl ·`。
+  花没花钱必须看得见——这跟「状态栏只显示能据以行动的数」是同一条。
+- 回退也失败时保留 builtin 的原始报错，末尾补一句 Firecrawl 为什么也没成。
+  额度用完（402）和 key 不对（401）只看状态码分不清，所以 `_firecrawl_post`
+  把响应正文一起带回来。
+
+`web_search` 也多了 `firecrawl` 这个 provider（结果在 `data.web` 那组，还有 images / news
+两组不要）。两处共用 `_firecrawl_post`。
+
 ## 办公文档（0.11.0）
 
 `read_document()` 在 `read_file` 里前置：docx/xlsx/pptx/odt/ods/odp 用 `zipfile` + `ElementTree`

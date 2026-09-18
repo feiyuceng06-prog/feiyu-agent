@@ -693,7 +693,8 @@ class TestSearchUrlHint(Base):
     def test_抓搜索结果页会提示改用_web_search_且只提示一次(self):
         # 真出网会慢也不稳，让 _fetch_page 直接返回失败：提示挂在失败那条路上
         with unittest.mock.patch.object(
-                Toolbox, "_fetch_page", return_value=(None, "HTTP 403 Forbidden", "HTTP 403")):
+                Toolbox, "_fetch_page",
+                return_value=(None, "HTTP 403 Forbidden", "HTTP 403", "builtin")):
             first = self.box.run("web_fetch", {"url": "https://www.google.com/search?q=x"})
             self.assertIn("web_search", first.content)
             self.assertIn("反爬", first.content)          # 403 的说明也在
