@@ -1,4 +1,6 @@
-"""测试用的假 MCP 服务器：stdio、一行一个 JSON 四个工具够覆盖正常 / 出错 / 超时 / 只读 """
+"""测试用的假 MCP 服务器：stdio、一行一个 JSON
+
+五个工具：正常 / 出错 / 超时 / 只读，外加一个 getenv 验环境变量真传进来了 """
 import json
 import sys
 import time
@@ -10,6 +12,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"body": {"type": "string"}}}},
     {"name": "fail", "description": "总是报错", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "slow", "description": "睡两秒", "inputSchema": {"type": "object", "properties": {}}},
+    # 验「env 块里的 ${VAR} 真展开了、真传进子进程了」——只回报一个变量，不是整份环境
+    {"name": "getenv", "description": "回报一个环境变量的值",
+     "annotations": {"readOnlyHint": True},
+     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}},
+                     "required": ["name"]}},
 ]
 
 
@@ -50,6 +57,10 @@ def main():
                 reply(msg, {"content": [{"type": "text", "text": "echo: " + str(args.get("text", ""))}]})
             elif name == "write_note":
                 reply(msg, {"content": [{"type": "text", "text": "写好了"}]})
+            elif name == "getenv":
+                import os
+                got = os.environ.get(str(args.get("name", "")), "（没有这个变量）")
+                reply(msg, {"content": [{"type": "text", "text": got}]})
             elif name == "fail":
                 reply(msg, {"content": [{"type": "text", "text": "坏了"}], "isError": True})
             elif name == "slow":

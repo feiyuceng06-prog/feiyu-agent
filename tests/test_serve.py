@@ -535,6 +535,39 @@ class TestThinking(Base):
         self.assertLessEqual(got[-1]["size"], ui.PROGRESS_STEP * 3 - 50)
         self.assertGreater(got[-1]["size"], ui.PROGRESS_STEP * 2 - 50 - ui.PROGRESS_STEP)
 
+    def test_想的原文跟字数一起报出去(self):
+        stream = ui.Stream()
+        for n in range(1, ui.PROGRESS_STEP * 2 + 1):
+            stream.thinking(n, "想")
+        got = self.sink.find("thinking")
+        # 原文按同一个步长攒着一起发：**每条的 delta 长度要跟字数的增量对得上**，
+        # 两条节流各走各的话这两个数会漂开，前端拿哪个都不对
+        self.assertEqual(sum(len(p["delta"]) for p in got), got[-1]["size"])
+
+    def test_想完最后一截也要出来(self):
+        """只在跨档时报的话，不足一个步长的尾巴永远留在缓冲里 ——
+        而尾巴恰好是「它决定要干什么」那一段。"""
+        stream = ui.Stream()
+        stream.thinking(ui.PROGRESS_STEP + 10, "甲" * (ui.PROGRESS_STEP + 10))
+        stream.thinking(ui.PROGRESS_STEP + 13, "尾巴")
+        self.assertEqual(len(self.sink.find("thinking")), 1)
+        stream.finish()                      # 非 tty 也要冲
+        got = self.sink.find("thinking")
+        self.assertEqual(got[-1]["delta"], "尾巴")
+        self.assertEqual(got[-1]["size"], ui.PROGRESS_STEP + 13)
+
+    def test_开口之前先把想的冲出去(self):
+        """顺序反了的话前端会先收到正文、再收到属于它前面那段的思考。"""
+        stream = ui.Stream()
+        stream.thinking(5, "先想")
+        stream.write("再说")
+        self.assertEqual(self.sink.kinds(), ["thinking", "text"])
+
+    def test_没想过就不报空事件(self):
+        stream = ui.Stream()
+        stream.finish()
+        self.assertEqual(self.sink.find("thinking"), [])
+
     def test_想的字数会到状态行上(self):
         ui._COLOR = False
         stream = ui.Stream()

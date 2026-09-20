@@ -209,13 +209,20 @@ feiyu "给 CLI 加一个 --json 参数"    # 跑完一个任务就退出
 {"provider": "firecrawl", "key": "fc-…"}
 ```
 
-**出图要自己配。** `~/.config/feiyu/images.json` 写上任何一个 OpenAI 兼容的 images 接口：
+**出图要自己配。** `~/.config/feiyu/images.json` 写上一个或多个 OpenAI 兼容的 images 接口：
 
 ```json
-{"base_url": "https://…/v1", "key": "…", "model": "gpt-image-2", "size": "1024x1024"}
+{"default": "nano-banana-2",
+ "models": {
+   "nano-banana-2": {"base_url": "https://openrouter.ai/api/v1", "key": "…",
+                     "model": "google/gemini-3.1-flash-image", "size": "1024x1024"},
+   "gpt-image-2":   {"base_url": "https://…/v1", "key": "…", "model": "gpt-image-2"}
+ }}
 ```
 
-配了才会有 `image_generate` 这个工具 —— 不出图的人不该为它每轮多发一份 schema。
+别名会变成 `image_generate` 的 `model` 参数，于是可以一个便宜一个好，让它按图挑；
+不写就用 `default` 那个。老的扁平形状 `{"base_url": …, "key": …, "model": …}` 照样认，
+算作唯一一个模型。配了才会有 `image_generate` 这个工具 —— 不出图的人不该为它每轮多发一份 schema。
 出来的图落在工作区的 `.feiyu/images/` 下，桌面端会直接画在对话里，终端里只报路径。
 
 ## 权限
@@ -492,11 +499,19 @@ stdout 里只有 JSON，界面和日志全走 stderr。不合 schema 会让它�
 ```json
 {"mcpServers": {
   "fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
-  "db": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "app.db"], "env": {"X": "1"}}
+  "db": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "app.db"], "env": {"X": "1"}},
+  "resume": {"type": "http", "url": "http://localhost:3100/mcp",
+             "headers": {"x-api-key": "${RR_API_KEY}"}}
 }}
 ```
 
-- 只支持 stdio 传输。
+- 两种传输：**stdio**（起一条本地命令）和 **streamable-http**（连一个远端服务器）。
+  没写 `type` 时，有 `url` 的当 http，没有的当 stdio。
+- **`${VAR}` 从环境变量取**，key 不必落在配置文件里：http 那条在 `url` 和 `headers` 里认，
+  stdio 那条在 `env` 块里认。`args` 里刻意不认 —— argv 会被 `/mcp` 原样印出来。
+  （stdio 服务器**拿不到**环境里名字带 KEY/TOKEN 的变量，那些被刻意摘掉了防模型读到，
+  所以要用就得在 `env` 里显式写一条。）
+  变量没设就直接不起这台服务器，不会把字面量 `${VAR}` 发出去换回一个看不懂的 401。
 - 工具以 `mcp_<服务器>_<工具>` 的名字出现，`/mcp` 能看到每个服务器的状态和工具。
 - 项目配置跟项目钩子一样，第一次见到要你点头才启动。
 - 默认模式下每个 MCP 工具都要确认，服务器自报只读的除外。规则 `Mcp(fs:*)` 放行整个服务器，`Mcp(fs read_file)` 放行一个工具。

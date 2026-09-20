@@ -399,8 +399,9 @@ class AnthropicBackend(Billing):
                     on_text(event.delta.text)
                 elif (event.type == "content_block_delta"
                       and event.delta.type == "thinking_delta" and on_think):
-                    thought += len(event.delta.thinking or "")
-                    on_think(thought)
+                    piece = event.delta.thinking or ""
+                    thought += len(piece)
+                    on_think(thought, piece)
                 elif (event.type == "content_block_delta"
                       and event.delta.type == "input_json_delta" and on_tool and name):
                     partial += event.delta.partial_json or ""
@@ -591,7 +592,7 @@ class OpenAICompatBackend(Billing):
                 # 屏幕上一个字都没有 —— 跟死了长得一模一样（实测过一轮 622 秒，
                 # 全在这儿；数据一直在流，所以连超时都不会响）
                 if on_think:
-                    on_think(len(reasoning))
+                    on_think(len(reasoning), delta.reasoning_content)
             for tc in getattr(delta, "tool_calls", None) or []:
                 slot = pending.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                 if tc.id:

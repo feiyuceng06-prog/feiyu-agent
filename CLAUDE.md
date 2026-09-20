@@ -1793,6 +1793,8 @@ Mermaid + CodeMirror）。真正值钱的是它那份 360 行的 `DESIGN.md`—�
 `feiyu/mcp.py`。写法照 `lsp.py`（自己缓冲、`os.read`、服务器反向请求就地回），但
 **MCP 的 stdio 是一行一个 JSON，不是 Content-Length**，两边的 `_read` 不能共用。
 
+（0.76.0 起还有一条 streamable-http 传输，见文末那节。下面这些跟传输无关，两种都适用。）
+
 - **工具名 `mcp_<服务器>_<工具>`**，`safe_name()` 过滤到 `[A-Za-z0-9_-]` 且 ≤ 64——两种后端
   都有这个限制，不过滤的话带点号的工具名一到接口就 400。撞名了加 `_2`。
 - **工具集会变，所以 `tool_schemas()` 动态拼**：`use_model` 建后端时和 `load_mcp()` 载入后
@@ -1808,8 +1810,10 @@ Mermaid + CodeMirror）。真正值钱的是它那份 360 行的 `DESIGN.md`—�
   一律回 -32601——那等于让外部进程借我们的模型说话。图片 / 音频只留一句说明。
 - 服务器并行起（npx 冷启动好几秒）；`_finish` 里 `mcp.close()` 杀进程组并关管道
   （不关管道 unittest 会报 ResourceWarning）。改了配置要重启，没做热加载。
-- 测试用 `tests/mcp_server.py` 假服务器，四个工具覆盖正常 / isError / 超时 / 只读，
+- 测试用 `tests/mcp_server.py` 假服务器，五个工具覆盖正常 / isError / 超时 / 只读，
+  外加 `getenv` 验 `env` 块里的 `${VAR}` 真展开并传进了子进程，
   `echo` 第一次调用时反过来发 `roots/list`，验证客户端会答而不是卡死。
+  HTTP 那套另有 `tests/mcp_http_server.py`，绑 127.0.0.1 的临时端口，一样不出网。
 
 ## 0.43.0：主题、`/undo` 加固、界面两处
 
@@ -3932,3 +3936,91 @@ token 两种来源各一遍。报告链路拿一次真的 `nop` 跑（不花钱�
 
 顺带：起 devserver 要用 `nohup ... & disown`，`( ... &)` 那种写法在这个环境里
 会跟着命令一起没掉，而它死了之后页面是空的、不报错。
+
+## 0.76.0：MCP 的 HTTP 传输，和出图改成多模型
+
+用户要把 Reactive Resume（开源简历工具，自己带 MCP server）接进来，顺带要三个
+OpenRouter 的出图模型。两件事都落在「配置只装得下一种形状」上。
+
+### HTTP 传输：推翻 0.44.0 那条「刻意不做」
+
+`mcp.py` 的开头原话是「HTTP 传输刻意不做：要引依赖或者自己写 SSE，而本机能跑的
+服务器几乎都有 stdio 形态」。**这话的前提是「本机能跑的」**。Reactive Resume 的
+MCP 只有 remote streamable-http 一种形态，前提不成立，所以这条推翻掉。
+
+替代方案 `npx mcp-remote` 当桥**被否掉的理由不是麻烦，是漏 key**：它要
+`--header x-api-key:xxx`，而 1758 行那条记着 `/mcp` 会把 argv 原样印出来 ——
+终端和网页端都看得到。自己写这一百行比漏一把 key 便宜。
+
+- **传输拆成 `_Stdio` / `_Http` 两个类，`Server` 只管 JSON-RPC**。接口是
+  `send(msg, timeout)` / `read(deadline)` / `gone()` / `close()` / `label`。
+- **HTTP 没有「随时会来消息」这回事**：回复只跟在自己那条 POST 后面。所以
+  `_Http.send()` 顺手把回来的消息塞进 `inbox`，`read()` 只是取走 —— 对上面那个
+  `request()` 循环来说两种传输长得一模一样，一行都不用分叉。
+- **回复有两种形状，都得认**：`application/json` 一条（或一个数组），
+  `text/event-stream` 是 SSE。Reactive Resume 开了 `enableJsonResponse` 回前者，
+  但多数服务器默认回后者，只认一种等于只能接一半的服务器。
+- **`initialize` 的回复头里有 `mcp-session-id`，之后每条都要带**，不带的话
+  第二条就 404。协议版本同理（`MCP-Protocol-Version`）。
+- **`${VAR}` 在 `url` 和 `headers` 里展开**，key 就不用落在配置文件里。
+  取不到就**直接不起这台服务器**，不能把字面量 `${RR_API_KEY}` 发出去 ——
+  那样换回来的是一个 401，而用户会以为是 key 写错了。
+- **`label` 只印 url，不印 headers**。`/mcp` 是给人看的，凭证在 headers 里。
+  这正是否掉 mcp-remote 的那个理由，自己写也一样要守。
+- 假服务器 `tests/mcp_http_server.py` 绑 127.0.0.1 的临时端口，不出网。
+  **它记请求头要先把键抹成小写**：urllib 发出来是 `X-api-key`，`dict(headers)`
+  一转就丢了大小写不敏感，断言按字面量取会看不见一个明明送到了的头。
+
+`Server.proc` / `Server.argv` 没了，换成 `server.alive()` / `server.label` ——
+`__main__._mcp` 和 `Registry.call` 两处跟着改。
+
+### 出图：一份配置装多个模型
+
+出图模型之间差得比对话模型还远：实测一张图 nano-banana-2 $0.067、
+nano-banana-pro $0.134、gpt-5.4-image-2 $0.006，有的吃参考图有的不吃。钉死一个不合适。
+
+- **形状照 `models.json`**：`{"default": 别名, "models": {别名: {...}}}`，
+  别名变成 `image_generate` 的 `model` 参数。
+- **旧的扁平形状不作废**：没有 `models` 字段就把整个对象当成唯一那条，别名
+  叫 `default`。老配置一个字都不用动，`test_旧的扁平形状照样认` 盯着。
+- **半份配置（只有 base_url 没有 key）当没配**，不进可选名单 —— 否则模型会挑中
+  一个必然 401 的别名。
+- **enum 在 `agent._with_image_models()` 里填，不能写死在 `TOOL_SCHEMAS` 里**：
+  有哪些模型是运行时才知道的。填在 `tool_schemas()` 里是因为它本来就一会话一次、
+  结果整会话不变（跟 0.55.0 丢 `image_generate` 同一个理由），不会中途作废 prompt cache。
+  **要 deepcopy**：`TOOL_SCHEMAS` 是模块级的一份，就地改了下一个工作区会串味。
+- 门禁从 `cfg.get("base_url") and cfg.get("key")` 换成 `image_models()` 非空，
+  `agent.py` 和 `serve.py` 两处都要改 —— 漏一处的表现是面板上有开关、点了没用。
+
+### 0.76.1 那轮补的四处
+
+写完之后专门回头找了一遍 bug，三个真的，一个是既有的：
+
+- **协议版本取错了源。** `MCP-Protocol-Version` 要报**服务器在 initialize 回复里
+  确认的那个**，我取的是我们自己发过去的。版本是协商出来的，服务器完全可以回一个
+  更老的，这时候还报我们提议的那个，严格的实现会 400。改成 `_initialize` 拿到
+  结果之后回头告诉传输层（`io.negotiated()`，stdio 没这方法，`getattr` 兜一下）。
+- **urllib 默认跟随重定向，而 301/302/303 会把 POST 降成 GET** —— JSON-RPC 的身子
+  就没了。实测服务器收到一个空 GET 回 **501**，错误信息里一个字都没提重定向。
+  现实形态是端点前面挂了 http→https 或者补斜杠的跳转。改成装一个 `_NoRedirect`
+  handler 直接不跟，把 Location 原样报出来。
+- **既有 bug：stdio 的 MCP 服务器拿不到环境里的密钥。** `load_mcp` 传的是
+  `tools._child_env()`，那份把名字里带 KEY/TOKEN/SECRET 的**全摘了**（防模型一句
+  echo 就把密钥读进对话历史）。于是一个指望从环境里拿 `GITHUB_TOKEN` 的 stdio
+  服务器静默拿不到 —— 它自己报一句认证失败，看起来跟 feiyu 毫无关系。
+  **不能把过滤去掉**（那道防线管的是 bash 跑的模型生成的命令），改成
+  **`env` 块里也认 `${VAR}`**，跟 http 那条的 headers 一个规矩。
+  **args 刻意不做这个展开**：argv 会被 `/mcp` 原样印出来，展开进去等于把密钥
+  印给终端和网页端看。
+- `HTTPError` 读完不关是一条 ResourceWarning —— 它也是个响应体。
+
+顺带一条测试自己的教训：验「环境变量传进子进程了」不能比 argv（`proc.args == argv`
+恒真，就算展开成字面量 `"${...}"` 也照样过）。假服务器加了个 `getenv` 工具，
+**问子进程自己手上那个值是什么**，这才算验到。
+
+### OpenRouter 的出图接口
+
+**它有 `/images/generations`，回的就是 `data[0].b64_json`** —— 跟现有解析完全对得上，
+接模型本身一行代码都不用改。动手前我以为它只能走 `/chat/completions` 加
+`modalities: ["image"]`，**打一次真请求比猜省事**。`size` 也认。
+

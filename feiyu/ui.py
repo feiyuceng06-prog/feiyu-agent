@@ -791,6 +791,8 @@ class Stream:
         self._reported = -1     # 参数进度报到第几档了，见 progress()
         self._thought = 0       # 已经想了多少字，见 thinking()
         self._thought_step = -1
+        self._thought_size = 0  # 最近一次报出去的字数，收尾那次要用
+        self._think_buf = ""    # 还没报出去的思考原文
         self._status_at = 0.0
         self._lead = True       # 正文第一行还没开始：开头带一个 ⏺，跟工具行区分开
         self.wrote_text = False
@@ -806,6 +808,9 @@ class Stream:
             return
         self.wrote_text = True
         self.text += text
+        # 开口了 = 这一段想完了。**先把想的尾巴冲出去再说话**，
+        # 顺序反了的话前端会先收到正文、再收到属于它前面那段的思考
+        self._flush_thought()
         # 报的是**原始 markdown**，不是渲染完的 ANSI：怎么画是前端的事
         events.emit("text", delta=text)
         if not self._tty:
@@ -815,22 +820,43 @@ class Stream:
         with self._lock:
             self._buf.append(text)
 
-    def thinking(self, size: int) -> None:
-        """模型正在"想"（reasoning_content / thinking_delta），报个字数出去
+    def thinking(self, size: int, delta: str = "") -> None:
+        """模型正在"想"（reasoning_content / thinking_delta），报出去
 
         **不报的话思考型模型在那儿想十分钟，屏幕上一个字都没有**，跟死了长得一样：
         数据一直在流，所以连超时都不会响。实测过一轮 622 秒全花在这儿。
         跟 progress() 一样按步长报，一个 delta 一条事件会把前端灌死 。
+
+        `delta` 是这一小段想的**原文**（0.76.0 起后端会给）。终端只用字数，
+        原文是给桌面端画思考轨迹的 —— 怎么画是前端的事，这儿只负责报事实。
+        **原文按同一个步长攒着一起发**，不另开一条节流：两条节流各走各的，
+        字数和原文就会对不上，前端拿哪个都不对。老的假后端只传一个参数，
+        所以 `delta` 必须有默认值。
         """
         if events.active():
+            self._think_buf += delta
+            self._thought_size = size
             step = size // PROGRESS_STEP
             if step != self._thought_step:
                 self._thought_step = step
-                events.emit("thinking", size=size)
+                self._flush_thought(size)
         if not self._tty:
             return
         with self._lock:
             self._thought = size
+
+    def _flush_thought(self, size: int = 0) -> None:
+        """把攒着的思考原文发出去。**收尾那一截靠它才出得来** ——
+        只在步长变化时发的话，最后不足 PROGRESS_STEP 的尾巴永远留在缓冲里，
+        轨迹就缺最后一段（而最后一段恰好是"它决定要干什么"）。"""
+        if not events.active():
+            return
+        if not self._think_buf and not size:
+            return
+        events.emit("thinking", size=size or self._thought_size,
+                    delta=self._think_buf)
+        self._thought_size = size or self._thought_size
+        self._think_buf = ""
 
     def progress(self, name: str, partial: str) -> None:
         """工具参数还在流式生成 存下就走：上游每个 delta 都会调一次，
@@ -849,6 +875,9 @@ class Stream:
             self._status = (name, partial)
 
     def finish(self) -> None:
+        # **在 tty 那道早退上面** —— 事件跟终端是不是 tty 没关系，
+        # 放下面的话桌面端（非 tty）永远收不到想的最后一截
+        self._flush_thought()
         if not self._tty:
             return
         with self._lock:

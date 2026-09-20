@@ -102,6 +102,19 @@
   --rise-dist: 8px;
   --rise-dur: 500ms;
   --rise-ease: ease-out;
+
+  /* 动效的第二组：**浮现管"出现"，这几个管"你刚动了它"**。
+     浮现那组（8px / 500ms / ease-out）是小位移长时长，配的是内容进场；
+     按下去、滑过去这类要短、要有一点回弹，不然按上去像没反应。
+       --tap  按压：短促，松手时带一点点过冲
+       --slide 滑动指示器：标准的进出场曲线，不过冲（线跑过头会很跳）
+       --fold  展开 / 收起：比按压长一档，它移动的距离大得多
+     `prefers-reduced-motion` 那段把这三组一起关掉。 */
+  --tap-dur: 220ms;
+  --tap-ease: cubic-bezier(0.2, 1.5, 0.35, 1);
+  --slide-dur: 260ms;
+  --slide-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --fold-dur: 280ms;
 }
 
 /* ── 复古 ───────────────────────────────────────────────────
@@ -445,7 +458,9 @@ body[data-side="off"] .side { border-right: 0; }
   cursor: pointer;
 }
 
-.side__tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+/* 选中那条线不在页签自己身上了，是容器上一条会滑的线（见文末「页签的滑线」）。
+   `border-bottom` 留着当占位，保证选不选中高度一样。 */
+.side__tab[aria-selected="true"] { color: var(--text); }
 
 /* 机器人那一行：名字 + 一句用途，右边一个「改」 */
 .bot__what {
@@ -1109,11 +1124,9 @@ body[data-side="off"] .side { border-right: 0; }
   cursor: pointer;
 }
 
-.tab[aria-selected="true"] {
-  color: var(--text);
-  /* 蓝只做线和面，永远不做字 —— 选中靠这条线，不靠把字染蓝 */
-  border-bottom-color: var(--accent);
-}
+/* 蓝只做线和面，永远不做字 —— 选中靠线不靠把字染蓝。那条线现在画在容器上、
+   会从旧位置滑到新位置（见文末「页签的滑线」）。 */
+.tab[aria-selected="true"] { color: var(--text); }
 
 .tab b {
   font-weight: var(--w-regular);
@@ -1705,4 +1718,339 @@ body[data-side="off"] .scrim { display: none; }
   .stream::before { display: none; }
   .shelf__body { grid-template-columns: minmax(0, 1fr); }
   .shelf__list { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40%; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   动效层与几样新组件（0.77.0）
+
+   参照 beautifului.dev（AI 原生组件的形态）和 beui.dev（动效工程）。
+   **借的是骨架和手感，不是皮**：那两处都是深底、圆角、卡片套卡片，而这套系统
+   是白纸、直角、flat-not-boxed。所以下面没有一个圆角、没有一处阴影、
+   没有一个裸色值 —— 全走上面那些变量。
+
+   动效的底线三条：
+     一、**动的是"你刚动了它"和"它刚出现"，不动已经在那儿的东西。**
+         正文写到一半的那段不上淡入 —— 它本来就看得见，淡入等于闪一下。
+     二、**量出来的数走 CSS 变量**，位置和高度由 JS 喂，过渡由 CSS 做。
+         直接写 `style.left` 的话，下面那条 reduced-motion 关不掉它。
+     三、`prefers-reduced-motion` 一句话全关，见本节末尾。
+   ════════════════════════════════════════════════════════════ */
+
+/* ── 刚出现的东西浮一下 ──────────────────────────────────────
+   跟 `.block` 用同一个 `rise`（8px / 500ms / ease-out），所以一整块进场和
+   块里新长出来的一段是同一个手感。**只给真正新出现的加**（`paintInto`
+   在插入时打的标），正在写的那一段不打。 */
+[data-fresh] { animation: rise var(--rise-dur) var(--rise-ease) both; }
+
+/* 会话列表错开一点点依次进场。**只在清单真的换了时做**，搜索框每敲一个字
+   都重画，那时候再晃五十行就是在闹眼睛（`talksFresh` 管这件事）。 */
+.talk[data-fresh] { animation-delay: calc(var(--n, 0) * 24ms); }
+
+/* ── 按下去要有回应 ──────────────────────────────────────────
+   松手那一下带一点过冲（`--tap-ease`），按上去才像按到了东西。
+   **只给紧凑的控件**：整行宽的导航项缩一下会很夸张。 */
+.chip, .btn, .go, .pick, .win, .hello__pick,
+.fold__more, .code__copy, .to-end, .think__head, .pick-bar button {
+  transition: scale var(--tap-dur) var(--tap-ease),
+              color var(--tap-dur) var(--slide-ease),
+              background var(--tap-dur) var(--slide-ease),
+              border-color var(--tap-dur) var(--slide-ease);
+}
+
+.chip:active, .btn:active, .go:active, .pick:active, .win:active,
+.hello__pick:active, .fold__more:active, .code__copy:active,
+.to-end:active, .pick-bar button:active { scale: 0.94; }
+
+/* 整行宽的那些只动底色，不缩 */
+.nav, .talk, .desk, .side__tab, .tab {
+  transition: background var(--tap-dur) var(--slide-ease),
+              color var(--tap-dur) var(--slide-ease);
+}
+
+/* ── 页签的滑线 ──────────────────────────────────────────────
+   原来是每个页签各自的 `border-bottom-color`，切换时旧的灭新的亮 —— 两者之间
+   没有连续性，眼睛要重新找一次"现在在哪一页"。改成整条容器一条线，
+   位置和宽度由 `slideInd()` 量出来喂进变量。
+   **量到之前不画**（没有 `data-ind` 就藏起来），否则它会从左上角飞过来。 */
+.side__tabs, .tabs { position: relative; }
+
+.side__tabs::after, .tabs::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 2px;
+  width: var(--ind-w, 0);
+  translate: var(--ind-x, 0) 0;
+  background: var(--accent);
+  transition: translate var(--slide-dur) var(--slide-ease),
+              width var(--slide-dur) var(--slide-ease);
+}
+
+.side__tabs:not([data-ind])::after, .tabs:not([data-ind])::after { content: none; }
+
+/* ── 代码块 ──────────────────────────────────────────────────
+   行号在左边一条**不跟着横滚**的槽里（`overflow-x` 只加在 `<pre>` 上），
+   右上角一个复制按钮。两列的 line-height 必须是同一个长度，不然滚到
+   第五十行就错开了。
+
+   照「除图片外全是直角」「Flat, not boxed」：不加边框不加底色，
+   只用一条发丝线跟上文分开 —— 跟 `.shot` 是同一个做法。 */
+.code {
+  /* `<figure>` 默认带 `margin: 1em 40px`，不清掉整块会往右缩一大截 */
+  margin: 0 0 var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.code__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-left: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+  color: var(--faint);
+}
+
+.code__lang { letter-spacing: var(--tracking-caps); text-transform: uppercase; }
+
+.code__copy {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  margin-left: auto;
+  padding: 0 var(--space-2);
+  min-height: 24px;      /* 最小可点边，跟删对话那个叉同一条 */
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.code__copy:hover { color: var(--text); }
+
+.code__body { display: grid; grid-template-columns: auto minmax(0, 1fr); }
+
+.code__nums {
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  line-height: 20px;
+  white-space: pre;
+  text-align: right;
+  color: var(--faint);
+  user-select: none;
+}
+
+/* 行号已经撑出左边那条槽了，`<pre>` 自己不再缩进；下边距归 `<figure>` 管 */
+.prose .code pre { margin: 0; padding-left: 0; }
+
+/* ── 想的过程 ────────────────────────────────────────────────
+   在想的时候展开，想完自己收起来（人点过就听人的）。收放用
+   `grid-template-rows: 0fr → 1fr`，这样不用在 JS 里量高度 ——
+   而想的内容是一直在长的，量出来的数下一帧就过期了。 */
+.think { font-size: var(--text-sm); }
+
+.think__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  appearance: none;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  min-height: 24px;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.think__head:hover { color: var(--text); }
+
+.think__mark {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: var(--line-strong);
+}
+
+/* 还在想的时候记号是活的 —— 跟状态栏那个连接点同一个 pulse，
+   一眼能分清「它正在想」和「它想过了」 */
+.think:not([data-done]) .think__mark {
+  background: var(--accent);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.think__chev::before {
+  content: "›";
+  display: inline-block;
+  transition: rotate var(--fold-dur) var(--slide-ease);
+}
+
+.think[data-open="1"] .think__chev::before { rotate: 90deg; }
+
+.think__wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--fold-dur) var(--slide-ease);
+}
+
+.think[data-open="1"] .think__wrap { grid-template-rows: 1fr; }
+
+.think__body { overflow: hidden; }
+
+/* 想的过程是**过程**不是结论，压一档灰跟正文分开；左边一条线跟引用同一个记号 */
+.think__body .prose {
+  margin-top: var(--space-2);
+  padding-left: var(--space-4);
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+/* ── 什么都还没发生的那一屏 ──────────────────────────────────
+   一轮跑十分钟是真会发生的（实测 622 秒）。状态栏那个秒表是 0.58.0 补的，
+   但眼睛在正文流上，而那儿一个字都没有。九个方块按对角线依次亮一下 ——
+   它唯一的作用是证明「还活着」，所以要一直在动，不能是静止的图案。 */
+.churn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--muted);
+}
+
+.churn__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 3px);
+  grid-auto-rows: 3px;
+  gap: 2px;
+  flex: none;
+}
+
+.churn__grid i { background: var(--line-strong); animation: churn 1.4s ease-in-out infinite; }
+
+.churn__grid i:nth-child(1) { animation-delay: 0ms; }
+.churn__grid i:nth-child(2),
+.churn__grid i:nth-child(4) { animation-delay: 110ms; }
+.churn__grid i:nth-child(3),
+.churn__grid i:nth-child(5),
+.churn__grid i:nth-child(7) { animation-delay: 220ms; }
+.churn__grid i:nth-child(6),
+.churn__grid i:nth-child(8) { animation-delay: 330ms; }
+.churn__grid i:nth-child(9) { animation-delay: 440ms; }
+
+@keyframes churn { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
+
+.churn__clock { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--faint); }
+
+/* ── 长输出折起来 ────────────────────────────────────────────
+   一次 `npm test` 能回几百行，而值得看的通常是头几行和"它挂没挂"——
+   后者已经在 `.tool__note` 那一行上了。**摘要那行不折**，折的只有 detail。
+   上限由 JS 量出来喂（行是会折的，按行数算会把末尾切掉）。 */
+.fold .tool__lines {
+  overflow: hidden;
+  transition: max-height var(--fold-dur) var(--slide-ease);
+}
+
+.fold__more {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0 var(--space-2) 0 var(--space-4);
+  min-height: 24px;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.fold__more:hover { color: var(--text); }
+
+/* ── 划一段交给它 ────────────────────────────────────────────
+   浮在选区上方。这是全站唯一一处"浮起来的东西"，所以它必须有实底和一条边 ——
+   压在正文上没有边界的话两层字会糊在一起。其余照旧：直角、无阴影。 */
+.pick-bar {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  animation: rise 160ms var(--rise-ease) both;
+}
+
+.pick-bar button {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  padding: var(--space-1) var(--space-3);
+  min-height: 28px;
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pick-bar button:first-child { border-left: 0; }
+.pick-bar button:hover { background: var(--panel); color: var(--text); }
+
+/* ── 回到最新 ────────────────────────────────────────────────
+   **摆在 body 那张网格里、跟 `.sheet` 同一格。** 网格项可以重叠，所以它既不
+   参与对话流的排版、也不会跟着内容滚走 —— 放进 `.sheet` 里面的话，要么占掉
+   底下一条空带（显隐时还抖一下），要么 `position: absolute` 跟着滚动内容飘上去。 */
+.to-end {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: end;
+  align-self: end;
+  z-index: 3;
+  margin: 0 var(--space-5) var(--space-3) 0;
+  width: 28px;
+  height: 28px;
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.to-end:hover { color: var(--text); border-color: var(--text); }
+
+@media (max-width: 46rem) {
+  /* 这一档 body 只有一列，`.sheet` 也挪到第一列了 */
+  .to-end { grid-column: 1; }
+}
+
+/* ── 一句话关掉 ──────────────────────────────────────────────
+   **新加动效时记得回来加一条。** 上面那条 `.block { animation: none }`
+   是 0.50.0 就有的，这儿是它的延长线；JS 那侧另有一个 `REDUCED`
+   （量高度、排 requestAnimationFrame 的几处绕过了 CSS）。 */
+@media (prefers-reduced-motion: reduce) {
+  [data-fresh],
+  .pick-bar,
+  .churn__grid i,
+  .think:not([data-done]) .think__mark { animation: none; }
+
+  .chip, .btn, .go, .pick, .win, .hello__pick, .fold__more, .code__copy,
+  .to-end, .think__head, .pick-bar button, .nav, .talk, .desk,
+  .side__tab, .tab, .think__wrap, .think__chev::before,
+  .fold .tool__lines { transition: none; }
+
+  .side__tabs::after, .tabs::after { transition: none; }
 }

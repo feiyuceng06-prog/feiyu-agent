@@ -1,4 +1,6 @@
-"""MCP 客户端 真起一个假服务器（tests/mcp_server.py），不打网络 """
+"""MCP 客户端 真起一个假服务器（tests/mcp_server.py），不打网络
+
+HTTP 那套用 tests/mcp_http_server.py，绑 127.0.0.1 的临时端口，一样不出网 """
 
 import contextlib
 import io
@@ -12,6 +14,7 @@ from pathlib import Path
 from feiyu import enabled, keys, mcp, permissions
 from feiyu.agent import Feiyu
 from feiyu.tools import Toolbox
+from tests import mcp_http_server as http_server
 from tests.fakes import FakeBackend, call
 
 SERVER = str(Path(__file__).resolve().parent / "mcp_server.py")
@@ -55,8 +58,9 @@ class TestRegistry(Base):
     def test_起来_列工具_schema形状(self):
         self.write_global({"fake": spec()})
         reg, note = self.load()
-        self.assertIn("fake（4 个工具）", note)
-        self.assertEqual(set(reg.tools), {"mcp_fake_echo", "mcp_fake_write_note", "mcp_fake_fail", "mcp_fake_slow"})
+        self.assertIn("fake（5 个工具）", note)
+        self.assertEqual(set(reg.tools), {"mcp_fake_echo", "mcp_fake_write_note", "mcp_fake_fail", "mcp_fake_slow",
+                          "mcp_fake_getenv"})
         for s in reg.schemas():
             self.assertEqual(set(s), {"name", "description", "input_schema"})
             self.assertEqual(s["input_schema"]["type"], "object")
@@ -96,7 +100,7 @@ class TestRegistry(Base):
         reg, note = self.load()
         self.assertIn("fake", reg.servers)
         self.assertIn("bad", reg.errors)
-        self.assertIn("只支持 stdio", reg.errors["web"])
+        self.assertIn("传输只认 stdio 和 http", reg.errors["web"])
         self.assertIn("没起来", note)
 
     def test_没配置就什么都不做(self):
@@ -124,14 +128,177 @@ class TestRegistry(Base):
         reg, _ = self.load(approve=lambda path, names: False)
         self.assertEqual(reg.servers, {})
 
+    def test_stdio的env里也认环境变量(self):
+        """`tools._child_env()` 把带 KEY/TOKEN 的变量摘掉了（防模型 echo 出来），
+        于是指望从环境里拿密钥的 stdio 服务器静默拿不到。显式写 ${VAR} 就能拿到 ——
+        密钥既不落配置文件，也不进模型手里。
+        """
+        os.environ["FEIYU_TEST_STDIO_TOKEN"] = "s3cret"
+        self.addCleanup(os.environ.pop, "FEIYU_TEST_STDIO_TOKEN", None)
+        spec_with = dict(spec())
+        spec_with["env"] = {"PASSED_IN": "${FEIYU_TEST_STDIO_TOKEN}"}
+        self.write_global({"fake": spec_with})
+        reg, _ = self.load()
+        self.assertIn("fake", reg.servers)
+        # 摘过密钥的那份环境里没有它 —— 所以不展开的话子进程也拿不到
+        from feiyu import tools as tools_mod
+        self.assertNotIn("FEIYU_TEST_STDIO_TOKEN", tools_mod._child_env())
+        # 问子进程自己：它手上那个值是什么。**这才算验到**，
+        # 光比 argv 的话，就算展开成字面量 "${...}" 也一样会过
+        text, failed = reg.call("mcp_fake_getenv", {"name": "PASSED_IN"})
+        self.assertFalse(failed)
+        self.assertIn("s3cret", text)
+        self.assertNotIn("${", text)
+
+    def test_stdio的env里变量没设就不起(self):
+        os.environ.pop("FEIYU_TEST_STDIO_MISSING", None)
+        spec_bad = dict(spec())
+        spec_bad["env"] = {"X": "${FEIYU_TEST_STDIO_MISSING}"}
+        self.write_global({"fake": spec_bad})
+        reg, _ = self.load()
+        self.assertNotIn("fake", reg.servers)
+        self.assertIn("FEIYU_TEST_STDIO_MISSING", reg.errors["fake"])
+
     def test_关掉之后进程没了(self):
         self.write_global({"fake": spec()})
         reg, _ = self.load()
-        proc = reg.servers["fake"].proc
+        proc = reg.servers["fake"].io.proc
         reg.close()
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.poll())
         self.reg = None
+
+
+class TestHttp(Base):
+    """streamable-http 传输 服务器是本地临时端口上的假货，不出网 """
+
+    def setUp(self):
+        super().setUp()
+        self.fakes = []
+
+    def tearDown(self):
+        for f in self.fakes:
+            f.close()
+        super().tearDown()
+
+    def fake(self, **kw):
+        got = http_server.Fake(**kw)
+        self.fakes.append(got)
+        return got
+
+    def test_json形状的回复(self):
+        server = self.fake()
+        self.write_global({"web": {"type": "http", "url": server.url}})
+        reg, note = self.load()
+        self.assertIn("web", reg.servers)
+        self.assertIn("web（2 个工具）", note)
+        text, failed = reg.call("mcp_web_echo", {"text": "你好"})
+        self.assertFalse(failed)
+        self.assertIn("你好", text)
+
+    def test_sse形状的回复也认(self):
+        server = self.fake(flavor="sse")
+        self.write_global({"web": {"type": "http", "url": server.url}})
+        reg, _ = self.load()
+        text, failed = reg.call("mcp_web_echo", {"text": "流式"})
+        self.assertFalse(failed)
+        self.assertIn("流式", text)
+
+    def test_没写type但有url也当http(self):
+        server = self.fake()
+        self.write_global({"web": {"url": server.url}})
+        reg, _ = self.load()
+        self.assertIn("web", reg.servers)
+
+    def test_isError照样传上来(self):
+        server = self.fake()
+        self.write_global({"web": {"type": "http", "url": server.url}})
+        reg, _ = self.load()
+        text, failed = reg.call("mcp_web_fail", {})
+        self.assertTrue(failed)
+        self.assertIn("炸了", text)
+
+    def test_initialize之后每条都带session(self):
+        server = self.fake()
+        self.write_global({"web": {"type": "http", "url": server.url}})
+        reg, _ = self.load()
+        reg.call("mcp_web_echo", {"text": "x"})
+        # 第一条（initialize）之前还没有 session，之后每条都得带上
+        self.assertNotIn("mcp-session-id", server.seen[0])
+        self.assertTrue(all(h.get("mcp-session-id") == http_server.SESSION
+                            for h in server.seen[1:]))
+
+    def test_headers带上去了_环境变量会展开(self):
+        server = self.fake(api_key="s3cret")
+        os.environ["FEIYU_TEST_KEY"] = "s3cret"
+        try:
+            self.write_global({"web": {"type": "http", "url": server.url,
+                                       "headers": {"x-api-key": "${FEIYU_TEST_KEY}"}}})
+            reg, _ = self.load()
+            self.assertIn("web", reg.servers)
+            self.assertEqual(server.seen[0].get("x-api-key"), "s3cret")
+        finally:
+            del os.environ["FEIYU_TEST_KEY"]
+
+    def test_环境变量没设就不起_并且说是哪个(self):
+        server = self.fake()
+        os.environ.pop("FEIYU_TEST_MISSING", None)
+        self.write_global({"web": {"type": "http", "url": server.url,
+                                   "headers": {"x-api-key": "${FEIYU_TEST_MISSING}"}}})
+        reg, _ = self.load()
+        self.assertNotIn("web", reg.servers)
+        self.assertIn("FEIYU_TEST_MISSING", reg.errors["web"])
+
+    def test_认证不过的说法要能看懂(self):
+        server = self.fake(api_key="right")
+        self.write_global({"web": {"type": "http", "url": server.url,
+                                   "headers": {"x-api-key": "wrong"}}})
+        reg, _ = self.load()
+        self.assertNotIn("web", reg.servers)
+        self.assertIn("不认这个身份", reg.errors["web"])
+
+    def test_连不上的不拖死别的(self):
+        good = self.fake()
+        self.write_global({"web": {"type": "http", "url": good.url},
+                           "dead": {"type": "http", "url": "http://127.0.0.1:1/mcp"}})
+        reg, _ = self.load()
+        self.assertIn("web", reg.servers)
+        self.assertIn("dead", reg.errors)
+
+    def test_重定向不能把POST悄悄变成GET(self):
+        """urllib 默认跟随重定向，302 还会把 POST 降成 GET —— body 就没了。
+
+        真实场景是端点前面挂了个 http→https 或者补斜杠的跳转。**必须报出来**，
+        悄悄降级的话服务器收到一个没有身子的 GET，表现是莫名其妙的挂起或报错。
+        """
+        good = self.fake()
+        server = self.fake(redirect_to=good.url)
+        self.write_global({"web": {"type": "http", "url": server.url}})
+        reg, _ = self.load()
+        self.assertNotIn("web", reg.servers)
+        self.assertIn("重定向", reg.errors["web"])
+
+    def test_url得是http开头(self):
+        self.write_global({"web": {"type": "http", "url": "file:///etc/passwd"}})
+        reg, _ = self.load()
+        self.assertIn("http/https", reg.errors["web"])
+
+    def test_label只印url不印凭证(self):
+        server = self.fake(api_key="s3cret")
+        self.write_global({"web": {"type": "http", "url": server.url,
+                                   "headers": {"x-api-key": "s3cret"}}})
+        reg, _ = self.load()
+        label = reg.servers["web"].label
+        self.assertEqual(label, server.url)
+        self.assertNotIn("s3cret", label)
+
+    def test_关掉会去销会话(self):
+        server = self.fake()
+        self.write_global({"web": {"type": "http", "url": server.url}})
+        reg, _ = self.load()
+        reg.close()
+        self.reg = None
+        self.assertTrue(server.deleted)
 
 
 class TestToolboxAndAgent(Base):

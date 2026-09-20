@@ -1,3 +1,4 @@
+import copy
 import datetime
 import difflib
 import json
@@ -397,6 +398,23 @@ REVIEW_PROMPT = """你是独立的验收人 下面是一个编程 agent 接到�
 REVIEW_MAX_CHARS = 40_000
 
 
+
+def _with_image_models(spec: dict, aliases: list[str]) -> dict:
+    """把配好的出图模型名填进 image_generate 的 enum
+
+    **不能写死在 TOOL_SCHEMAS 里**：有哪些模型是运行时才知道的 填在这儿是因为
+    tool_schemas() 本来就一会话一次、结果整会话不变（跟上面丢 image_generate 同一个理由），
+    不会中途变工具集作废 prompt cache
+    """
+    if spec["name"] != "image_generate" or not aliases:
+        return spec
+    out = copy.deepcopy(spec)
+    field = out["input_schema"]["properties"]["model"]
+    field["enum"] = aliases
+    field["description"] = "用哪个出图模型，可选 不写就用 %s " % aliases[0]
+    return out
+
+
 class Feiyu:
     def __init__(self, workspace: Path, *, model: str = "", trace: Trace | None = None):
         self.toolbox = Toolbox(workspace, ask_model=self._ask_model,
@@ -532,14 +550,15 @@ class Feiyu:
         # 没配出图接口就不挂 image_generate 一百个人里九十九个不出图，
         # 而工具块在请求前缀、每轮都要发 挂在这儿判是因为**一整个会话里它不会变**
         # （改了 images.json 要重启，跟 MCP 一个规矩），中途变工具集会作废整段 prompt cache
-        cfg = tools_mod.image_config()
-        drop = set() if (cfg.get("base_url") and cfg.get("key")) else {"image_generate"}
+        aliases = tools_mod.image_models()
+        drop = set() if aliases else {"image_generate"}
         if not tools_mod.assist_on():
             drop.add("symbol")      # A/B 对照档：连 outline 一起摘掉
         drop |= enabled.disabled("tools")
         drop -= enabled.LOCKED
         off = enabled.disabled("mcp")
-        return ([t for t in TOOL_SCHEMAS if t["name"] not in drop]
+        mine = [_with_image_models(t, aliases) for t in TOOL_SCHEMAS if t["name"] not in drop]
+        return (mine
                 + [t for t in self.toolbox.mcp.schemas()
                    if self.toolbox.mcp.tools.get(t["name"], ("", ""))[0] not in off])
 

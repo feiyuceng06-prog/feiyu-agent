@@ -1,4 +1,4 @@
 from .agent import Feiyu
 
 __all__ = ["Feiyu"]
-__version__ = "0.75.0"
+__version__ = "0.76.1"

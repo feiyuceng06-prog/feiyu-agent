@@ -771,13 +771,14 @@ def _mcp(agent: Feiyu) -> str:
     reg = agent.toolbox.mcp
     if not reg.servers and not reg.errors:
         return ui.notice("没有配置 MCP 服务器 写在 %s 或项目的 %s 里，格式跟 Claude Code 一样："
-                         '{"mcpServers": {"名字": {"command": "…", "args": […]}}}'
+                         '{"mcpServers": {"名字": {"command": "…", "args": […]}}}，'
+                         '远端的写 {"type": "http", "url": "…", "headers": {…}}'
                          % (mcp_mod.GLOBAL, mcp_mod.PROJECT))
     rows = [ui.notice("MCP 服务器")]
     for name, server in reg.servers.items():
-        alive = server.proc.poll() is None
+        alive = server.alive()
         rows.append("   " + (ui.bold(name) if alive else ui.paint("red", name + "（已退出）"))
-                    + ui.paint("grey", "  " + " ".join(server.argv)))
+                    + ui.paint("grey", "  " + server.label))
         for tool in server.tools:
             tag = " 只读" if mcp_mod.safe_name(name, tool["name"]) in reg.readonly else ""
             desc = ui.clip(" ".join(str(tool.get("description") or "").split()), ui.width() - 40)

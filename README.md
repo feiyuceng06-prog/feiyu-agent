@@ -214,15 +214,23 @@ for a self-hosted instance. Fetches that spent a credit are marked `Firecrawl ·
 {"provider": "firecrawl", "key": "fc-…"}
 ```
 
-**Image generation needs configuring.** Point `~/.config/feiyu/images.json` at any
-OpenAI-compatible images endpoint:
+**Image generation needs configuring.** Point `~/.config/feiyu/images.json` at one
+or more OpenAI-compatible images endpoints:
 
 ```json
-{"base_url": "https://…/v1", "key": "…", "model": "gpt-image-2", "size": "1024x1024"}
+{"default": "nano-banana-2",
+ "models": {
+   "nano-banana-2": {"base_url": "https://openrouter.ai/api/v1", "key": "…",
+                     "model": "google/gemini-3.1-flash-image", "size": "1024x1024"},
+   "gpt-image-2":   {"base_url": "https://…/v1", "key": "…", "model": "gpt-image-2"}
+ }}
 ```
 
-The `image_generate` tool only appears once that file exists — people who never
-generate images shouldn't pay for its schema on every turn. Images land in
+The aliases become `image_generate`'s `model` argument, so one model can be cheap
+and another good and the agent picks per picture; leaving it out uses `default`.
+A single flat `{"base_url": …, "key": …, "model": …}` object still works and counts
+as one model. The `image_generate` tool only appears once that file exists — people
+who never generate images shouldn't pay for its schema on every turn. Images land in
 `.feiyu/images/` inside the workspace; the desktop app draws them inline, the
 terminal prints the path.
 
@@ -541,11 +549,20 @@ Tools from external [MCP](https://modelcontextprotocol.io) servers can be used d
 ```json
 {"mcpServers": {
   "fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
-  "db": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "app.db"], "env": {"X": "1"}}
+  "db": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "app.db"], "env": {"X": "1"}},
+  "resume": {"type": "http", "url": "http://localhost:3100/mcp",
+             "headers": {"x-api-key": "${RR_API_KEY}"}}
 }}
 ```
 
-- stdio transport only.
+- Two transports: **stdio** (a local command) and **streamable-http** (a remote
+  server). With no `type`, an entry with a `url` is http and one without is stdio.
+- **`${VAR}` is read from the environment**, so a key need not sit in the config file:
+  http entries expand it in `url` and `headers`, stdio entries in the `env` block.
+  Not in `args` — those are printed verbatim by `/mcp`. (A stdio server does **not**
+  inherit environment variables whose names contain KEY/TOKEN/SECRET; those are stripped
+  so the model cannot read them, so name the one you need in `env` explicitly.) An unset variable fails the server rather than
+  sending the literal `${VAR}` and getting back a puzzling 401.
 - Tools appear as `mcp_<server>_<tool>`; `/mcp` shows each server's status and tools.
 - Project configs, like project hooks, need your approval the first time.
 - In default mode every MCP tool asks, unless the server declares it read-only. `Mcp(fs:*)` allows a whole server, `Mcp(fs read_file)` one tool.

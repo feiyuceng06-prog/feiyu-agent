@@ -1495,6 +1495,74 @@ class TestImageGenerate(Base):
         return unittest.mock.patch.object(
             tools._opener, "open", return_value=_Reply(json.dumps(payload).encode()))
 
+    def many(self, default="甲"):
+        """多模型形状的配置 别名各指一个不同的上游 model """
+        import json
+        (self.root / "images.json").write_text(json.dumps({
+            "default": default,
+            "models": {
+                "甲": {"base_url": "https://a.example/v1", "key": "sk-a", "model": "up-a"},
+                "乙": {"base_url": "https://b.example/v1", "key": "sk-b",
+                       "model": "up-b", "size": "2048x2048"},
+            }}), encoding="utf-8")
+
+    def test_旧的扁平形状照样认(self):
+        self.config(model="gpt-image-2")
+        cfg = tools.image_config()
+        self.assertEqual(list(cfg["models"]), ["default"])
+        self.assertEqual(cfg["default"], "default")
+        self.assertEqual(tools.image_models(), ["default"])
+
+    def test_半份配置不算数(self):
+        import json
+        (self.root / "images.json").write_text(json.dumps({
+            "models": {"没key": {"base_url": "https://a.example/v1", "model": "x"},
+                       "全的": {"base_url": "https://b.example/v1", "key": "k", "model": "y"}}}),
+            encoding="utf-8")
+        self.assertEqual(tools.image_models(), ["全的"])
+
+    def test_默认那个排在名单头一个(self):
+        self.many(default="乙")
+        self.assertEqual(tools.image_models(), ["乙", "甲"])
+
+    def test_default写了个不存在的就退回第一个(self):
+        self.many(default="丙")
+        self.assertEqual(tools.image_config()["default"], "甲")
+
+    def test_不写model就用默认那个(self):
+        import base64, json
+        self.many()
+        payload = {"data": [{"b64_json": base64.b64encode(self.PIXEL).decode()}]}
+        with self.reply(payload) as opened:
+            out = self.box.run("image_generate", {"prompt": "一只狗"})
+        self.assertFalse(out.is_error, out.content)
+        self.assertEqual(opened.call_args[0][0].full_url, "https://a.example/v1/images/generations")
+        self.assertEqual(json.loads(opened.call_args[0][0].data)["model"], "up-a")
+        self.assertEqual(json.loads(out.content)["model"], "甲")
+
+    def test_指名要哪个就换一整套接口(self):
+        import base64, json
+        self.many()
+        payload = {"data": [{"b64_json": base64.b64encode(self.PIXEL).decode()}]}
+        with self.reply(payload) as opened:
+            out = self.box.run("image_generate", {"prompt": "一只狗", "model": "乙"})
+        self.assertFalse(out.is_error, out.content)
+        request = opened.call_args[0][0]
+        # base_url、key、上游 model、size 四样都得跟着别名一起换
+        self.assertEqual(request.full_url, "https://b.example/v1/images/generations")
+        self.assertEqual(request.headers["Authorization"], "Bearer sk-b")
+        sent = json.loads(request.data)
+        self.assertEqual(sent["model"], "up-b")
+        self.assertEqual(sent["size"], "2048x2048")
+        self.assertIn("乙", out.summary)
+
+    def test_没这个别名就把有的报出来(self):
+        self.many()
+        out = self.box.run("image_generate", {"prompt": "一只狗", "model": "丙"})
+        self.assertTrue(out.is_error)
+        self.assertIn("甲", out.content)
+        self.assertIn("乙", out.content)
+
     def test_没配就说去哪儿配(self):
         out = self.box.run("image_generate", {"prompt": "一只狗"})
         self.assertTrue(out.is_error)

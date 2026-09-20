@@ -397,6 +397,8 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "要画什么，越具体越好 "},
+                "model": {"type": "string",
+                          "description": "用哪个出图模型，可选 不写就用默认那个 "},
                 "size": {"type": "string",
                          "description": "尺寸，如 1024x1024 / 1536x1024 / 1024x1536，可选 "},
             },
@@ -2089,18 +2091,26 @@ class Toolbox:
         if not prompt:
             return ToolResult("没写要画什么 ", is_error=True, summary="没写描述")
         cfg = image_config()
-        base = str(cfg.get("base_url") or "").rstrip("/")
-        key = str(cfg.get("key") or "")
-        if not base or not key:
+        models = cfg["models"]
+        if not models:
             return ToolResult(
                 "还没配出图接口 在 %s 里写："
-                '{"base_url": "https://…/v1", "key": "…", "model": "…"} ' % IMAGE_CONFIG,
+                '{"models": {"别名": {"base_url": "https://…/v1", "key": "…", "model": "…"}}} '
+                % IMAGE_CONFIG,
                 is_error=True, summary="没配出图接口")
+        alias = str(args.get("model") or "").strip() or cfg["default"]
+        if alias not in models:
+            return ToolResult(
+                "没有 %s 这个出图模型 配好的是：%s " % (alias, "、".join(image_models())),
+                is_error=True, summary="没有这个模型")
+        one = models[alias]
+        base = str(one.get("base_url") or "").rstrip("/")
+        key = str(one.get("key") or "")
         body = json.dumps({
-            "model": cfg.get("model") or "gpt-image-1",
+            "model": one.get("model") or "gpt-image-1",
             "prompt": prompt,
             "n": 1,
-            "size": str(args.get("size") or cfg.get("size") or "1024x1024"),
+            "size": str(args.get("size") or one.get("size") or "1024x1024"),
         }).encode("utf-8")
         request = urllib.request.Request(
             base + "/images/generations", data=body,
@@ -2160,8 +2170,8 @@ class Toolbox:
         # **形状照 Hermes 的 image_generate**：结果里给一个 image 字段，
         # 界面认这个字段把图画在工具那一格里
         return ToolResult(
-            json.dumps({"image": shown, "prompt": prompt}, ensure_ascii=False),
-            summary="出了一张图 %s（%d KB）" % (shown, len(blob) // 1024),
+            json.dumps({"image": shown, "prompt": prompt, "model": alias}, ensure_ascii=False),
+            summary="%s 出了一张图 %s（%d KB）" % (alias, shown, len(blob) // 1024),
             shows=shown)
 
     def live_skills(self) -> list:
@@ -2708,12 +2718,46 @@ IMAGE_MAX_BYTES = 32 * 1024 * 1024
 
 
 def image_config() -> dict:
+    """归一成 {"default": 别名, "models": {别名: 配置}} 旧的扁平形状照样认
+
+    0.76.0 之前一份配置只能写一个模型 出图模型之间差得比对话模型还远
+    （便宜的一张两分钱、贵的一张一毛，有的能吃参考图有的不能），钉死一个不合适，
+    所以改成跟 models.json 一样按别名存 **旧形状不作废**：没有 models 字段
+    就把整个对象当成唯一那条，别名叫 default —— 老用户不用动配置
+    """
     try:
         with open(IMAGE_CONFIG, encoding="utf-8") as f:
             raw = json.load(f)
-        return raw if isinstance(raw, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return {"default": "", "models": {}}
+    if not isinstance(raw, dict):
+        return {"default": "", "models": {}}
+
+    rows = raw.get("models")
+    if not isinstance(rows, dict):
+        rows = {"default": raw} if raw.get("base_url") else {}
+    models = {}
+    for alias, one in rows.items():
+        if not isinstance(one, dict):
+            continue
+        if not (one.get("base_url") and one.get("key")):
+            continue          # 半份配置等于没配，别让它出现在可选名单里
+        models[str(alias)] = one
+
+    first = str(raw.get("default") or "")
+    if first not in models:
+        first = next(iter(models), "")
+    return {"default": first, "models": models}
+
+
+def image_models() -> list[str]:
+    """配好的别名，默认那个排头 —— 工具 schema 的 enum 和 /image 都用这个顺序 """
+    cfg = image_config()
+    names = sorted(cfg["models"])
+    if cfg["default"] in names:
+        names.remove(cfg["default"])
+        names.insert(0, cfg["default"])
+    return names
 
 
 def _one_line(text) -> str:

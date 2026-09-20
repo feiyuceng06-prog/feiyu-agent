@@ -44,8 +44,15 @@ let wantHelp = false;
 let clips = [];
 /* 启动时那几句环境说明（MCP / 项目钩子 / 项目技能），按来源存一份 */
 const boots = new Map();
+/* 「回到最新」那个钮。**在这儿先占个名**：它是文件末尾才建的，而 `keepBottom`
+   在那之前就可能被调到，而对着还没初始化的 const 连 `typeof` 都会抛。 */
+let toEnd = null;
 
 /* ── 小工具 ─────────────────────────────────────────────────── */
+
+/* 系统里关掉了动效就一个都不做。**JS 里也要问一次** —— CSS 那半边有媒体查询
+   兜着，但用 JS 量高度、排 requestAnimationFrame 的那几处绕过了 CSS。 */
+const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) =>
@@ -58,6 +65,9 @@ function atBottom() {
 /* 只在本来就贴着底的时候才跟着滚。用户往回翻着看的时候把他拽回来是最烦人的。 */
 function keepBottom(wasDown) {
   if (wasDown) sheetEl.scrollTop = sheetEl.scrollHeight;
+  // 没跟着滚 = 底下又长出了没看见的东西，「回到最新」该露面（它在文件末尾建，
+  // 所以这儿必须判一下 —— 对着 TDZ 里的 const 连 typeof 都会抛）
+  if (toEnd) toEnd.hidden = atBottom();
 }
 
 function block(label, cls) {
@@ -198,7 +208,34 @@ function fillShots(root) {
   });
 }
 
-function md(src) {
+/* 代码块：行号在左边一条**不跟着横滚**的槽里，右上角一个复制按钮。
+ *
+ * **行号不能进 `<code>`** —— 那是拿去复制的正文，掺进去的话复制出来每行都顶着
+ * 一个数字。所以它是 `<pre>` 外面的一列，`overflow-x` 只加在 `<pre>` 上。
+ * 两列的 line-height 必须是同一个**长度**（都写 20px），不然滚到第五十行就错开。
+ *
+ * 复制按钮不在这儿绑事件：`md()` 是纯函数，流式时一秒要跑十几次，
+ * 每次绑一遍等于每次都重新建闭包。事件走 `streamEl` 上那一道委托。 */
+const CODE_NUMS = 400;   // 再长就不画行号：几千行的输出画出来也没人数
+
+function codeBlock(text, lang) {
+  const rows = text.split("\n");
+  const nums = rows.length > 1 && rows.length <= CODE_NUMS
+    ? `<span class="code__nums" aria-hidden="true">${rows.map((_, n) => n + 1).join("\n")}</span>`
+    : "";
+  return '<figure class="code">'
+    + '<figcaption class="code__bar">'
+    + `<span class="code__lang">${esc(lang || "")}</span>`
+    + '<button class="code__copy" type="button" data-copy>复制</button>'
+    + "</figcaption>"
+    + `<div class="code__body">${nums}<pre><code>${esc(text)}</code></pre></div>`
+    + "</figure>";
+}
+
+/* **渲染结果按顶层块分开返回。** `md()` 把它拼成一整根字符串给不在乎结构的
+   调用方用；流式那条路要的是这个数组 —— 有了它，`paintInto` 才能不做任何
+   序列化就知道「这一帧只有最后一段变了」。见那个函数的注释。 */
+function mdParts(src) {
   const lines = String(src).split("\n");
   const out = [];
   let i = 0;
@@ -208,12 +245,13 @@ function md(src) {
   while (i < lines.length) {
     const line = lines[i];
 
-    if (/^\s*```/.test(line)) {
+    const fence = /^\s*```\s*([\w+#.-]*)/.exec(line);
+    if (fence) {
       const body = [];
       i++;
       while (i < lines.length && !/^\s*```/.test(lines[i])) body.push(lines[i++]);
       i++;
-      out.push(`<pre><code>${esc(body.join("\n"))}</code></pre>`);
+      out.push(codeBlock(body.join("\n"), fence[1]));
       continue;
     }
     // `-{3,}` 不是 `---`：四个以上连字符也是分隔线（markdown 就这么定的），
@@ -284,8 +322,10 @@ function md(src) {
     if (!para.length) para.push(lines[i++]);
     out.push(`<p>${inline(para.join("\n"))}</p>`);
   }
-  return out.join("");
+  return out;
 }
+
+const md = (src) => mdParts(src).join("");
 
 /* ── 事件 ──────────────────────────────────────────────────── */
 
@@ -354,6 +394,12 @@ function drawWait() {
   setDot(slow && !thoughtSize ? "slow" : "busy",
          slow && !thoughtSize ? `${what} · 比平时慢，还在等 · esc 中断`
                               : `${what} · esc 中断`);
+  if (waitBlock) {
+    waitBlock.querySelector(".churn__clock").textContent = clock(secs);
+    waitBlock.querySelector(".churn__what").textContent =
+      slow ? "等模型回话 · 比平时慢，还在等" : "等模型回话";
+  }
+  thinkHead();
 }
 
 function startWait() {
@@ -369,6 +415,114 @@ function stopWait() {
   waitFrom = 0;
   waitTick = 0;
   thoughtSize = 0;
+  showWait(false);
+  closeThinking();
+}
+
+/* ── 想的过程 ───────────────────────────────────────────────
+   0.58.0 起后端就报「想了多少字」，0.77.0 起连**原文**一起报。字数只能
+   证明它还活着，原文才说得清它在往哪个方向走 —— 而「方向不对」是这类模型
+   最贵的失败，越早看见越好。
+
+   **在想的时候是展开的，想完自己收起来。** 想的过程有用是因为它**正在发生**；
+   事后那一大段横在对话中间只会把真正说的话挤下去。人自己点过就听人的。 */
+let think = null;         // { block, head, body, wrap, text, from, touched }
+let thinkTimer = 0;
+
+function thinkHead() {
+  if (!think) return;
+  const secs = Math.round((Date.now() - think.from) / 1000);
+  think.head.querySelector(".think__what").textContent =
+    think.done ? `想了 ${clock(secs)}` : `在想 ${clock(secs)}`;
+}
+
+function openThinking() {
+  if (think) return;
+  const body = block("在想", "block--think");
+  body.innerHTML =
+    '<div class="think" data-open="1">'
+    + '<button class="think__head" type="button" aria-expanded="true">'
+    + '<span class="think__mark" aria-hidden="true"></span>'
+    + '<span class="think__what"></span>'
+    + '<span class="think__chev" aria-hidden="true"></span>'
+    + "</button>"
+    + '<div class="think__wrap"><div class="think__body"><div class="prose"></div></div></div>'
+    + "</div>";
+  const box = body.firstElementChild;
+  think = {
+    box,
+    head: box.querySelector(".think__head"),
+    prose: box.querySelector(".prose"),
+    text: "",
+    from: Date.now(),
+    done: false,
+    touched: false,      // 人自己点过展开/收起没有
+  };
+  think.head.onclick = () => {
+    think.touched = true;
+    const open = box.dataset.open === "1";
+    box.dataset.open = open ? "0" : "1";
+    think.head.setAttribute("aria-expanded", String(!open));
+  };
+  thinkHead();
+  return think;
+}
+
+function paintThinking() {
+  thinkTimer = 0;
+  if (!think) return;
+  const wasDown = atBottom();
+  paintInto(think.prose, mdParts(think.text));
+  thinkHead();
+  keepBottom(wasDown);
+}
+
+function closeThinking() {
+  if (!think) return;
+  clearTimeout(thinkTimer);
+  thinkTimer = 0;
+  paintInto(think.prose, mdParts(think.text));
+  think.done = true;
+  think.box.dataset.done = "1";      // 记号停下来，见 .think:not([data-done])
+  thinkHead();
+  if (!think.touched) {
+    think.box.dataset.open = "0";
+    think.head.setAttribute("aria-expanded", "false");
+  }
+  think = null;
+}
+
+/* ── 什么都还没发生的那一屏 ─────────────────────────────────
+   一轮跑十分钟是真会发生的（实测 622 秒）。状态栏那个秒表是 0.58.0 补的，
+   但**正文流里仍然一个字都没有** —— 而眼睛在正文流上。
+   不思考的模型更是连「在想」那块都没有，这一块是它唯一的活体证明。 */
+let waitBlock = null;
+let waitArm = 0;
+/* **等一下再画。** 快的模型一秒就开口，立刻画出来就是闪一下；而它真正要治的
+   是"半分钟过去了屏幕上什么都没有"。另外工具是一条跑完接着报下一条的
+   （串行那批 start/result 交替来），不等这一下的话每两条工具之间都会插进来一块。 */
+const WAIT_AFTER = 800;
+
+function armWait() {
+  if (waitArm || waitBlock) return;
+  waitArm = setTimeout(() => { waitArm = 0; showWait(true); }, WAIT_AFTER);
+}
+
+function showWait(on) {
+  if (!on) {
+    clearTimeout(waitArm);
+    waitArm = 0;
+    if (waitBlock) { waitBlock.closest(".block").remove(); waitBlock = null; syncHello(); }
+    return;
+  }
+  if (waitBlock || !busy) return;
+  waitBlock = block("在跑", "block--wait");
+  waitBlock.innerHTML =
+    '<div class="churn"><span class="churn__grid" aria-hidden="true">'
+    + "<i></i>".repeat(9)
+    + '</span><span class="churn__what">等模型回话</span>'
+    + '<span class="churn__clock mono"></span></div>';
+  drawWait();
 }
 
 function shortPath(raw, cap = 46) {
@@ -424,11 +578,66 @@ function setStatus(s) {
    合并到每帧最多画一次，几千份降到几百份，md() 那侧的累计开销也一起降下来。 */
 const SAYING_GAP = 80;   // 两次重绘之间至少隔这么久（毫秒）
 
+/* 把一份新渲染的结果贴到已经画着的那块上，**只动真正变了的那几个顶层块**。
+ *
+ * 0.68.1 把重绘从「每个 delta 一次」压到 12.5 次/秒，治的是总量；这儿治的是
+ * 每一次的形状。整块 `innerHTML` 重写有三个代价，只有最后一个是性能：
+ *
+ *   一、**选区每 80ms 断一次** —— 模型说到一半想把上面那段话选出来复制，
+ *       做不到，DOM 节点已经被换掉了。这是日常最疼的一个。
+ *   二、已经定稿的段落每一帧都重建，所以没法只给**新出现**的那一段上淡入
+ *       （给全部上的话就是每 80ms 全屏闪一次）。
+ *   三、重排的代价跟整条消息的长度成正比，而不是跟这一帧改了多少成正比。
+ *
+ * 判定**不做任何序列化**：`mdParts` 直接给顶层块的字符串数组，跟上一帧缓存的
+ * 那份逐个比即可。读 DOM 的 `outerHTML` 反过来也能比，但那是把整条消息
+ * 重新序列化一遍，等于把刚省下的钱又花掉。
+ *
+ * **尾块就地改，不整个换掉。** 它每一帧都在长，换掉的话它每帧都是"刚出现"，
+ * 淡入会每 80ms 重放一次。标签一样时只换孩子，节点本身留着。 */
+function paintInto(host, parts) {
+  const prev = host.__parts || [];
+  let same = 0;
+  while (same < parts.length && same < prev.length && prev[same] === parts[same]) same++;
+  host.__parts = parts;
+
+  const kids = [...host.children];
+  // 只有最后一块变了、而且标签没变 —— 流式时绝大多数帧走这条
+  if (same === parts.length - 1 && same === kids.length - 1
+      && tagOf(parts[same]) === kids[same].tagName.toLowerCase()) {
+    const box = document.createElement("div");
+    box.innerHTML = parts[same];
+    kids[same].replaceChildren(...box.firstElementChild.childNodes);
+    return;
+  }
+  for (let n = kids.length - 1; n >= same; n--) kids[n].remove();
+  parts.slice(same).forEach((html, n) => {
+    const box = document.createElement("div");
+    box.innerHTML = html;
+    const el = box.firstElementChild;
+    if (!el) return;
+    // 第一块不上淡入：它跟外面那个 .block 的 rise 同时出现，两个动画叠一起
+    if (same + n > 0) el.dataset.fresh = "1";
+    host.append(el);
+  });
+}
+
+const tagOf = (html) => (/^<([a-z0-9]+)/i.exec(html) || ["", ""])[1].toLowerCase();
+
+/* 光标是**同一个节点搬来搬去**，不是每帧重建的 —— 重建的话 blink 那个动画
+   每 80ms 从头开始，看着就是不闪。放进最后一块里面而不是 .prose 末尾：
+   放外面的话「最后一块」永远是光标，`:not(:last-child)` 那条淡入规则就永远
+   把真正的最后一段也算进去。 */
+const cursorEl = document.createElement("span");
+cursorEl.className = "cursor";
+
 function paintSaying() {
   sayingTimer = 0;
   sayingPainted = performance.now();
   if (!saying) return;
-  saying.innerHTML = `<div class="prose">${md(sayingText)}<span class="cursor"></span></div>`;
+  const prose = saying.firstElementChild;
+  paintInto(prose, mdParts(sayingText));
+  (prose.lastElementChild || prose).append(cursorEl);
 }
 
 /* **按固定间隔节流，不是按帧。** 一次重绘的代价随这条消息变长而线性上涨，
@@ -452,8 +661,10 @@ function closeSaying() {
     sayingTimer = 0;
   }
   if (saying) {
-    saying.innerHTML = `<div class="prose">${md(sayingText)}</div>`;
+    cursorEl.remove();
+    paintInto(saying.firstElementChild, mdParts(sayingText));
     fillShots(saying);
+    delete saying.dataset.live;
   }
   saying = null;
   sayingText = "";
@@ -469,6 +680,60 @@ function toolLine(ev) {
     `</div><div class="tool__pending">…</div>`;
   body.append(wrap);
   return wrap;
+}
+
+/* 长输出默认只露头几行，剩下的折起来。
+ *
+ * 一次 `bash npm test` 能回几百行，而**值得看的通常是前几行和"它挂没挂"**
+ * —— 后者已经在 `tool__note` 那一行上了。几百行横在对话中间，上下文全被顶走，
+ * 人得滚半天才找得回自己刚说的话。
+ *
+ * **摘要那行不折** —— 折起来就等于把"发生了什么"藏了。折的只有 detail。
+ * 行数不到 `FOLD_AFTER` 的一个字不动：为十行输出加一个要点的按钮是净损失。 */
+const FOLD_AFTER = 12;
+const FOLD_KEEP = 6;
+
+const SHUT = `calc(${FOLD_KEEP} * var(--leading-body))`;
+
+/* 展开/收起的高度**必须量出来，不能按行数算** —— 行是会折的
+   （`.tool__lines` 是 `pre-wrap` + `overflow-wrap: anywhere`），一条长命令
+   占两行，按行数算出来的上限就会把末尾几行切掉，而且切了不报错。 */
+function setFold(box, list, open) {
+  box.dataset.open = open ? "1" : "0";
+  if (REDUCED) { list.style.maxHeight = open ? "none" : SHUT; return; }
+  list.style.maxHeight = list.scrollHeight + "px";   // 先钉在当前高度，none 过渡不了
+  if (open) {
+    // 动完把上限撤掉：内容之后再变（图加载完之类）不该被钉死在这个数上
+    list.addEventListener("transitionend", function done() {
+      list.removeEventListener("transitionend", done);
+      if (box.dataset.open === "1") list.style.maxHeight = "none";
+    });
+  } else {
+    requestAnimationFrame(() => { list.style.maxHeight = SHUT; });
+  }
+}
+
+function foldLines(list, count) {
+  if (count <= FOLD_AFTER) return list;
+  const box = document.createElement("div");
+  box.className = "fold";
+  box.dataset.open = "0";
+  list.style.maxHeight = SHUT;
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "fold__more";
+  const say = () => {
+    more.textContent = box.dataset.open === "1" ? "收起" : `还有 ${count - FOLD_KEEP} 行`;
+  };
+  more.onclick = () => {
+    const wasDown = atBottom();
+    setFold(box, list, box.dataset.open !== "1");
+    say();
+    keepBottom(wasDown);
+  };
+  say();
+  box.append(list, more);
+  return box;
 }
 
 /* 还没等到结果的那些工具块，**按调用 id 存**。
@@ -511,10 +776,13 @@ function handle(ev) {
       shownShots = new Set();
       closeSaying();
       block("你", "block--you").textContent = ev.text;
+      armWait();
       break;
 
     case "tool_start":
       closeSaying();
+      closeThinking();
+      showWait(false);
       lastTool = ev;
       toolSeen.set(ev.id || "", ev);
       toolBlocks.set(ev.id || "", toolLine(ev));
@@ -522,8 +790,16 @@ function handle(ev) {
 
     case "thinking":
       /* 思考型模型可以想上十分钟一个字都不说。**这条事件是唯一的活体证明** ——
-         数据一直在流，所以连超时都不会响，界面上却什么都没有。 */
+         数据一直在流，所以连超时都不会响，界面上却什么都没有。
+         0.77.0 起它还带着想的原文（`delta`），画成一段可折叠的轨迹。
+         **没有原文的后端照旧只更新秒表** —— 摆一块空轨迹在那儿更让人糊涂。 */
       thoughtSize = ev.size || 0;
+      if (typeof ev.delta === "string" && ev.delta) {
+        showWait(false);
+        const t = think || openThinking();
+        t.text += ev.delta;
+        if (!thinkTimer) thinkTimer = setTimeout(paintThinking, SAYING_GAP);
+      }
       drawWait();
       break;
 
@@ -561,9 +837,10 @@ function handle(ev) {
           li.textContent = row.text;
           list.append(li);
         });
-        target.append(list);
+        target.append(foldLines(list, detail.length));
       }
       if (ev.shows && !ev.is_error) showShot(target, ev.shows);
+      armWait();      // 工具跑完了，接下来又是等模型
       break;
     }
 
@@ -629,8 +906,13 @@ function handle(ev) {
 
     case "text":
       thoughtSize = 0;          // 开口了就不再是"在想"
+      closeThinking();          // 开口 = 上一段想完了，把轨迹收起来
+      showWait(false);
       if (!saying) {
         saying = block("它说");
+        // `.prose` 要一次建好、之后只换它的孩子 —— paintInto 的缓存挂在它身上
+        saying.innerHTML = '<div class="prose"></div>';
+        saying.dataset.live = "1";
         sayingText = "";
       }
       sayingText += ev.delta;
@@ -956,7 +1238,8 @@ function showShelf(on) {
     send({ op: "catalog" });
     send({ op: "profiles" });
     send({ op: "settings" });
-    requestAnimationFrame(() => $("shelf-find").focus());
+    // 藏着的元素量出来的 offsetWidth 是 0 —— 滑线要等它真的摆出来才量得到
+    requestAnimationFrame(() => { $("shelf-find").focus(); syncInds(); });
   }
 }
 
@@ -1169,6 +1452,7 @@ function setSideTab(which) {
   $("side-find-wrap").hidden = which !== "talks";
   [...$("side-tabs").children].forEach((b) =>
     b.setAttribute("aria-selected", String(b.dataset.side === which)));
+  slideInd($("side-tabs"));
   if (which === "bots") send({ op: "bots" });
 }
 
@@ -1185,7 +1469,7 @@ function showBotShop(on) {
   $("botshop").hidden = !on;
   $("sheet").hidden = on;
   $("composer").hidden = on;
-  if (on) { send({ op: "bots" }); drawBotShop(); }
+  if (on) { send({ op: "bots" }); drawBotShop(); requestAnimationFrame(syncInds); }
 }
 
 $("bot-close").onclick = () => showBotShop(false);
@@ -1849,6 +2133,7 @@ $("shelf-tabs").onclick = (e) => {
   shelf.tab = tab.dataset.tab;
   [...$("shelf-tabs").children].forEach((b) =>
     b.setAttribute("aria-selected", String(b === tab)));
+  slideInd($("shelf-tabs"));
   drawShelf();
 };
 
@@ -1955,9 +2240,14 @@ function setPinned(set) {
 let allTalks = [];
 let currentTalk = null;
 
+/* 列表进场只在**清单真的换了**的时候做一次。搜索框每敲一个字都会重画，
+   那时候再让五十行依次浮进来就是在晃人眼睛 —— 筛选是连续动作，不是新内容。 */
+let talksFresh = false;
+
 function drawTalks(rows, current) {
   allTalks = rows || [];
   currentTalk = current;
+  talksFresh = true;
   renderTalks();
 }
 
@@ -1970,20 +2260,28 @@ function renderTalks() {
   const top = keep.filter((r) => pins.has(r.id));
   const rest = keep.filter((r) => !pins.has(r.id));
 
+  const fresh = talksFresh;
+  talksFresh = false;
+
   $("group-pinned").hidden = !top.length;
-  $("pinned").replaceChildren(...top.map((r) => talkRow(r, currentTalk)));
+  $("pinned").replaceChildren(...top.map((r, n) => talkRow(r, currentTalk, fresh && n)));
 
   const list = $("talks");
   if (!rest.length) {
     list.innerHTML = `<li class="side__empty">${needle ? "没有匹配的会话" : "还没有历史对话"}</li>`;
   } else {
-    list.replaceChildren(...rest.map((r) => talkRow(r, currentTalk)));
+    list.replaceChildren(...rest.map((r, n) => talkRow(r, currentTalk, fresh && n)));
   }
 }
 
-function talkRow(row, current) {
+function talkRow(row, current, nth) {
   const li = document.createElement("li");
   li.className = "talk";
+  if (nth !== false) {
+    // 错开一点点依次浮进来。**封顶**：一百条会话的话最后一条要等两秒才出现
+    li.dataset.fresh = "1";
+    li.style.setProperty("--n", Math.min(nth, 12));
+  }
   li.setAttribute("aria-current", row.id === current ? "true" : "false");
   li.innerHTML = `<span class="talk__title">${esc(row.title)}</span>` +
                  `<span class="talk__meta">${esc(row.when)} · ${row.count} 条</span>`;
@@ -2048,6 +2346,8 @@ function setSide(on, remember = true) {
   document.body.dataset.side = on ? "on" : "off";
   $("side-toggle").setAttribute("aria-expanded", on ? "true" : "false");
   $("scrim").hidden = !on;
+  // 收起来时侧栏宽 0，页签量出来也是 0 —— 展开回来要重新量一次
+  if (on) requestAnimationFrame(syncInds);
   // 窄屏那次自动收起**不进记忆**：窗口拉回来时该恢复成你原本的选择
   if (!remember) return;
   try { localStorage.setItem(SIDE_KEY, on ? "on" : "off"); } catch { /* 无痕窗口 */ }
@@ -2488,6 +2788,146 @@ document.addEventListener("keydown", (e) => {
 $("send").onclick = submit;
 $("stop").onclick = () => send({ op: "interrupt" });
 
+/* ── 页签底下那条线会滑 ──────────────────────────────────────
+   原来是每个页签自己的 `border-bottom-color`，切换时旧的灭新的亮 —— 两个页签
+   之间没有连续性，眼睛得重新找一次"现在在哪一页"。改成整条容器一条线，
+   位置和宽度由变量喂进去，CSS 负责在两个位置之间过渡。
+
+   **量出来的数要写进 CSS 变量，不要直接写 style.left** —— 前者能被
+   `prefers-reduced-motion` 那条媒体查询一句话关掉，后者关不掉。 */
+function slideInd(box) {
+  const on = box.querySelector('[aria-selected="true"]');
+  if (!on) return;
+  box.dataset.ind = "1";      // 第一次量到之前不画，免得从左上角飞过来
+  box.style.setProperty("--ind-x", on.offsetLeft + "px");
+  box.style.setProperty("--ind-w", on.offsetWidth + "px");
+}
+
+/* **写成函数声明不是 const** —— `setSide()` 在模块求值时就会跑一次，
+   那时候 const 还在 TDZ 里，取一下就抛。 */
+function syncInds() {
+  document.querySelectorAll(".side__tabs, .tabs").forEach(slideInd);
+}
+window.addEventListener("resize", syncInds);
+// 字体加载完宽度会变一次，那时候线还停在旧位置上
+if (document.fonts) document.fonts.ready.then(syncInds);
+
+/* ── 代码块上那个复制 ────────────────────────────────────────
+   **走委托，不给每个按钮绑。** 流式时 `md()` 一秒跑十几次，每次绑一遍等于
+   每次重建一批闭包；而且 `paintInto` 换节点时绑上去的东西会一起没掉。 */
+streamEl.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-copy]");
+  if (!btn) return;
+  const code = btn.closest(".code").querySelector("code");
+  const said = (ok) => {
+    btn.textContent = ok ? "已复制" : "复制不了";
+    setTimeout(() => { btn.textContent = "复制"; }, 1200);
+  };
+  try {
+    await navigator.clipboard.writeText(code.textContent);
+    said(true);
+  } catch {
+    // webview 里 `navigator.clipboard` 要安全上下文，未必给。退回老办法。
+    const box = document.createElement("textarea");
+    box.value = code.textContent;
+    box.style.cssText = "position:fixed;opacity:0";
+    document.body.append(box);
+    box.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    box.remove();
+    said(ok);
+  }
+});
+
+/* ── 划一段交给它 ────────────────────────────────────────────
+   选中正文里的一段 → 浮出几个动词。点了是**填进输入框**不是直接发出去：
+   跟「开始」那几个例子同一条规矩 —— 让人能改，别替他做决定。
+   多按一下回车换来的是「我还能补一句」，这笔账划得来。 */
+const PICKS = [
+  ["解释", "解释一下这段："],
+  ["改写", "把这段改写得更清楚："],
+  ["缩短", "把这段压短，意思别丢："],
+  ["照着做", "照这段说的做："],
+];
+
+const pickBar = document.createElement("div");
+pickBar.className = "pick-bar";
+pickBar.hidden = true;
+pickBar.innerHTML = PICKS.map(([name]) =>
+  `<button type="button" data-pick="${esc(name)}">${esc(name)}</button>`).join("");
+document.body.append(pickBar);
+
+let picked = "";
+
+function hidePick() {
+  pickBar.hidden = true;
+  picked = "";
+}
+
+function showPick() {
+  const sel = window.getSelection();
+  const text = sel && !sel.isCollapsed ? sel.toString().trim() : "";
+  // 太短的多半是误触（双击一个词也会选中），而输入框里的选中跟这个无关
+  if (text.length < 8 || !sel.anchorNode
+      || !streamEl.contains(sel.anchorNode.parentElement || sel.anchorNode)) {
+    return hidePick();
+  }
+  const box = sel.getRangeAt(0).getBoundingClientRect();
+  if (!box.width && !box.height) return hidePick();
+  picked = text;
+  pickBar.hidden = false;
+  // 先摆出来才量得到自己的尺寸；夹在视口里，别飘到看不见的地方
+  const w = pickBar.offsetWidth;
+  const h = pickBar.offsetHeight;
+  const x = Math.min(Math.max(8, box.left + box.width / 2 - w / 2), innerWidth - w - 8);
+  const y = box.top - h - 8 < 8 ? box.bottom + 8 : box.top - h - 8;
+  pickBar.style.left = Math.round(x) + "px";
+  pickBar.style.top = Math.round(y) + "px";
+}
+
+document.addEventListener("mouseup", (e) => {
+  if (pickBar.contains(e.target)) return;
+  // 选区在 mouseup 这一拍还没定下来，等一帧
+  setTimeout(showPick, 0);
+});
+document.addEventListener("keyup", (e) => { if (e.shiftKey) showPick(); });
+sheetEl.addEventListener("scroll", hidePick);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hidePick(); });
+
+pickBar.onclick = (e) => {
+  const btn = e.target.closest("[data-pick]");
+  if (!btn || !picked) return;
+  const how = (PICKS.find(([name]) => name === btn.dataset.pick) || [])[1] || "";
+  // 引起来，它才分得清哪句是指令哪句是被处理的原文
+  inputEl.value = how + "\n\n" + picked.split("\n").map((l) => "> " + l).join("\n") + "\n\n";
+  hidePick();
+  window.getSelection().removeAllRanges();
+  inputEl.focus();
+  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  inputEl.dispatchEvent(new Event("input"));
+};
+
+/* ── 回到底部 ────────────────────────────────────────────────
+   往回翻着看的时候我们刻意不把人拽回去（`keepBottom`），代价是他得自己滚回来 ——
+   而一轮跑起来之后底下一直在长，滚是滚不到头的。给一个入口。 */
+toEnd = document.createElement("button");
+toEnd.type = "button";
+toEnd.className = "to-end";
+toEnd.title = "回到最新";
+toEnd.hidden = true;
+toEnd.textContent = "↓";
+/* **摆进 body 那张网格里，跟 `.sheet` 同一格。** 网格项是可以重叠的，
+   所以它既不参与对话流的排版、也不会跟着内容滚走 —— 放进 `.sheet` 里面的话，
+   要么占掉底下一条空带（显隐时还会抖一下），要么 `position: absolute`
+   跟着滚动内容飘上去。 */
+document.body.append(toEnd);
+toEnd.onclick = () => {
+  sheetEl.scrollTo({ top: sheetEl.scrollHeight, behavior: REDUCED ? "auto" : "smooth" });
+};
+sheetEl.addEventListener("scroll", () => { toEnd.hidden = atBottom(); });
+
 syncHello();      // 一进来就是空的，这一下把「开始」那块摆上
+syncInds();
 connect();
 inputEl.focus();

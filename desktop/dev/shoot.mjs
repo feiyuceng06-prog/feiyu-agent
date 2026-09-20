@@ -418,6 +418,149 @@ await sleep(1200);
 await feed(TALK);
 console.log("拍了", await cdp.shot("4_talk", { width: 1280, height: 900 }));
 
+/* ── 想的过程 / 等模型 / 长输出折起来（0.77.0）──────────────────
+   这三样都只在**时间维度**上成立：轨迹是边想边长的、等待块是"还什么都没发生"、
+   折叠要点一下才展开。所以这一屏是喂一串事件再点几下，不是摆个静态样子。 */
+const THINK = [
+  { kind: "status", ready: true, mode: "default", busy: true, workspace: "/home/you/blog",
+    model: "deepseek-v4-pro", name: "deepseek-v4-pro",
+    context: 21400, context_limit: 128000 },
+  { kind: "turn_start", text: "这份 build.mjs 为什么在 CI 上比本机慢十倍？" },
+  { kind: "thinking", size: 40, delta: "先想清楚问的是什么。\n\n" },
+  { kind: "thinking", size: 140,
+    delta: "「CI 上慢十倍」有三种常见成因：缓存没命中、并发被限成单核、" },
+  { kind: "thinking", size: 260,
+    delta: "或者它在 CI 上走了另一条代码路径。\n\n先看有没有缓存配置，再看 CPU 配额。" },
+  { kind: "text", delta: "我先看一眼 CI 的配置和这份构建脚本。\n" },
+  { kind: "tool_start", name: "bash", label: "Bash", args: { command: "npm run build" },
+    target: "npm run build" },
+  { kind: "tool_result", summary: "退出码 0 · 38.4s", is_error: false,
+    detail: Array.from({ length: 30 }, (_, n) => ({ kind: "", text: `  building page ${n + 1}/30 …` })) },
+];
+
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 1100, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await feed(THINK);
+await sleep(300);
+
+/* 轨迹必须：在想的时候是**展开**的、想完自己**收起来**、原文真的进去了。
+   收不起来的话事后那一大段横在对话中间，把真正说的话挤下去。 */
+const trace = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const box = document.querySelector(".think");
+  return box ? { open: box.dataset.open, done: box.dataset.done || "",
+                 head: box.querySelector(".think__what").textContent,
+                 chars: box.querySelector(".think__body .prose").textContent.length } : null;
+})())`));
+if (!trace || trace.open !== "0" || trace.done !== "1" || trace.chars < 40) {
+  console.error("想的轨迹不对（该有、该收起来、原文该进去）：", JSON.stringify(trace));
+  process.exitCode = 1;
+} else {
+  console.log(`想的轨迹：${trace.head}，${trace.chars} 字，想完收起来了`);
+}
+
+// 点开来拍，收着拍等于没验
+await cdp.eval(`document.querySelector(".think__head").click(); true`);
+await sleep(500);
+
+/* 长输出默认只露头几行。**折的只能是 detail，摘要那行不许折** ——
+   折起来就等于把"发生了什么"藏了。 */
+const fold = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const box = document.querySelector(".fold");
+  if (!box) return null;
+  const list = box.querySelector(".tool__lines");
+  const shut = list.getBoundingClientRect().height;
+  box.querySelector(".fold__more").click();
+  return { shut: Math.round(shut), rows: list.children.length,
+           note: !!document.querySelector(".tool__note").offsetHeight,
+           more: box.querySelector(".fold__more").textContent };
+})())`));
+await sleep(500);
+const opened = await cdp.eval(
+  `Math.round(document.querySelector(".fold .tool__lines").getBoundingClientRect().height)`);
+if (!fold || !fold.note || fold.shut > 160 || opened <= fold.shut + 40) {
+  console.error("长输出折叠不对（摘要该露着、折着该矮、展开该变高）：",
+    JSON.stringify({ ...fold, opened }));
+  process.exitCode = 1;
+} else {
+  console.log(`长输出 ${fold.rows} 行，折着 ${fold.shut}px（${fold.more}）→ 展开 ${opened}px`);
+}
+
+console.log("拍了", await cdp.shot("15_think", { width: 1280, height: 1100 }));
+
+/* 代码块：行号必须**跟代码对齐**（两列同一个行高），而且**不能进 <code>** ——
+   进去了复制出来每行都顶着一个数字。这两条都得量，看图看不出来。 */
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await feed(FLOW);
+const code = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const fig = document.querySelector("figure.code");
+  if (!fig) return null;
+  const nums = fig.querySelector(".code__nums");
+  const codeEl = fig.querySelector("code");
+  const line = getComputedStyle(codeEl).lineHeight;
+  return { nums: nums ? nums.textContent.split("\n").length : 0,
+           rows: codeEl.textContent.split("\n").length,
+           sameLead: nums ? getComputedStyle(nums).lineHeight === line : false,
+           dirty: /^\s*\d/.test(codeEl.textContent),
+           copy: !!fig.querySelector("[data-copy]") };
+})())`));
+if (!code || !code.copy || code.nums !== code.rows || !code.sameLead || code.dirty) {
+  console.error("代码块不对（行号数该等于行数、行高该一致、正文里不许有行号）：",
+    JSON.stringify(code));
+  process.exitCode = 1;
+} else {
+  console.log(`代码块 ${code.rows} 行，行号对得上、没掺进正文，有复制按钮`);
+}
+
+/* 页签底下那条线是**一条会滑的线**，不是每个页签各自的边。
+   量两件事：量到了宽度（没量到就是没画），切换之后位置真的变了。 */
+const ind = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const box = document.getElementById("side-tabs");
+  const read = () => ({ x: box.style.getPropertyValue("--ind-x"),
+                        w: box.style.getPropertyValue("--ind-w") });
+  const before = read();
+  box.querySelector('[data-side="bots"]').click();
+  const after = read();
+  box.querySelector('[data-side="talks"]').click();
+  return { before, after, on: box.dataset.ind || "",
+           edge: getComputedStyle(box.querySelector('[data-side="talks"]')).borderBottomColor };
+})())`));
+if (ind.on !== "1" || !parseFloat(ind.before.w) || ind.before.x === ind.after.x) {
+  console.error("页签的滑线不对（该量到宽度、切换后该换位置）：", JSON.stringify(ind));
+  process.exitCode = 1;
+} else {
+  console.log(`页签滑线 ${ind.before.w} 宽，切过去 ${ind.before.x} → ${ind.after.x}`);
+}
+
+/* 划一段 → 浮出几个动词 → 点了**填进输入框不发出去**。
+   最后那半条是这个功能的取舍所在，所以必须断言"没发出去"。 */
+const pick = JSON.parse(await cdp.eval(`JSON.stringify((async () => {
+  const p = document.querySelector(".block:not(.block--you) .prose p");
+  const sel = getSelection();
+  sel.removeAllRanges();
+  const r = document.createRange();
+  r.selectNodeContents(p);
+  sel.addRange(r);
+  document.dispatchEvent(new MouseEvent("mouseup"));
+  await new Promise((ok) => setTimeout(ok, 50));
+  const bar = document.querySelector(".pick-bar");
+  const shown = !bar.hidden;
+  const box = bar.getBoundingClientRect();
+  bar.querySelector("[data-pick]").click();
+  return { shown, x: Math.round(box.x), y: Math.round(box.y),
+           gone: bar.hidden, typed: input.value.length, quoted: input.value.includes(">") };
+})())`));
+if (!pick.shown || pick.x < 0 || pick.y < 0 || !pick.gone || !pick.typed || !pick.quoted) {
+  console.error("划词那条不对（该浮出来、该在视口里、点完该填进输入框并引起来）：",
+    JSON.stringify(pick));
+  process.exitCode = 1;
+} else {
+  console.log(`划词浮条在 (${pick.x}, ${pick.y})，点完填进输入框 ${pick.typed} 字`);
+}
+await cdp.eval(`input.value = ""; getSelection().removeAllRanges(); true`);
+
 // 出图那一屏
 await cdp.call("Emulation.setDeviceMetricsOverride",
   { width: 1280, height: 1100, deviceScaleFactor: 1, mobile: false });

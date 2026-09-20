@@ -1176,6 +1176,27 @@ class TestImageToolGate(Base):
             json.dump({"base_url": "https://relay.example/v1"}, f)
         self.assertNotIn("image_generate", self.names())
 
+    def spec(self):
+        return next(t for t in self.agent.tool_schemas() if t["name"] == "image_generate")
+
+    def test_配好的模型名填进enum_默认那个排头(self):
+        with open(tools_mod.IMAGE_CONFIG, "w", encoding="utf-8") as f:
+            json.dump({"default": "乙", "models": {
+                "甲": {"base_url": "https://a.example/v1", "key": "k", "model": "x"},
+                "乙": {"base_url": "https://b.example/v1", "key": "k", "model": "y"}}}, f)
+        field = self.spec()["input_schema"]["properties"]["model"]
+        self.assertEqual(field["enum"], ["乙", "甲"])
+        self.assertIn("乙", field["description"])
+
+    def test_填enum不能改到模块级那份(self):
+        # TOOL_SCHEMAS 是模块级的一份，被就地改了的话下一个工作区会串味
+        with open(tools_mod.IMAGE_CONFIG, "w", encoding="utf-8") as f:
+            json.dump({"models": {"甲": {"base_url": "https://a.example/v1",
+                                        "key": "k", "model": "x"}}}, f)
+        self.spec()
+        shared = next(t for t in tools_mod.TOOL_SCHEMAS if t["name"] == "image_generate")
+        self.assertNotIn("enum", shared["input_schema"]["properties"]["model"])
+
 
 class TestToggles(Base):
     """面板上的开关：关掉的工具不挂进请求，关掉的技能不进系统提示 """

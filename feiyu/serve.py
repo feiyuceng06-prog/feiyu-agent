@@ -277,8 +277,7 @@ class Server:
         那边省的是每轮的 token，这边省的是一次推送的体积。
         """
         box = self.agent.toolbox
-        cfg = tools_mod.image_config()
-        has_image = bool(cfg.get("base_url") and cfg.get("key"))
+        has_image = bool(tools_mod.image_models())
         skills = [{"name": s.name, "description": s.description, "source": s.source,
                    "path": s.folder or s.path, "chars": len(s.body),
                    "extras": list(s.extras), "on": enabled.on("skills", s.name)}
