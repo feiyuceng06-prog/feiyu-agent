@@ -168,6 +168,24 @@ fn where_am_i(state: tauri::State<'_, Agent>) -> String {
     state.workspace.lock().map(|w| w.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// 正文里的链接点了要能开。webview 不是浏览器 —— `target="_blank"` 在这儿
+/// 什么都不会发生，没有新标签页可开，得把 url 交给系统。
+///
+/// **只放行 http / https**：正文是模型吐出来的 markdown，什么 scheme 都可能混进来，
+/// `file://` 直接丢给 xdg-open 等于把「打开本机任意文件」这件事交出去了。
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("只开 http/https 的链接".into());
+    }
+    // 这个桌面端只在 Linux 上跑（打包脚本也只出 Linux 的包），不做 macOS/Windows 分叉。
+    std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| format!("开不了：{e}"))?;
+    Ok(())
+}
+
 struct Args {
     workspace: String,
     model: Option<String>,
@@ -398,7 +416,7 @@ fn main() {
         .manage(agent)
         .manage(std::sync::Arc::new(term::Term::default()))
         .invoke_handler(tauri::generate_handler![
-            send, upload, read_image, where_am_i, switch,
+            send, upload, read_image, where_am_i, switch, open_url,
             term::term_start, term::term_write, term::term_resize, term::term_stop
         ])
         .setup(move |app| {

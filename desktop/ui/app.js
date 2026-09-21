@@ -2820,6 +2820,15 @@ if (document.fonts) document.fonts.ready.then(syncInds);
    **走委托，不给每个按钮绑。** 流式时 `md()` 一秒跑十几次，每次绑一遍等于
    每次重建一批闭包；而且 `paintInto` 换节点时绑上去的东西会一起没掉。 */
 streamEl.addEventListener("click", async (e) => {
+  /* 链接得自己送出去：webview 里 target="_blank" 没有新标签页可开，
+     点下去一点反应都没有 —— 看着像个链接却是死的，比不给链接还糟。 */
+  const link = e.target.closest("a[href]");
+  if (link) {
+    e.preventDefault();
+    TAURI.core.invoke("open_url", { url: link.href }).catch(() => {});
+    return;
+  }
+
   const btn = e.target.closest("[data-copy]");
   if (!btn) return;
   const code = btn.closest(".code").querySelector("code");
