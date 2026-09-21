@@ -415,6 +415,12 @@ having*; a bot is a persona you *start a conversation with*.
 
 `@path` completes in the composer exactly as it does in the terminal — the candidates come from the server, so both surfaces offer the same list. For files outside the workspace, the `＋` left of the composer uploads them; dragging them onto the window works too. They land in `.feiyu/uploads/` inside the workspace and the path goes out with your next message.
 
+**While it works.** A reasoning model can think for ten minutes without saying a word, so the window shows the reasoning itself: an expandable trace that stays open while it thinks and folds itself away once it speaks (you can toggle it, and it then stays the way you left it). When nothing is happening at all, a small pixel grid and an elapsed clock say so — the status bar had the clock since 0.58.0, but your eyes are on the transcript. Long tool output (a test run, a build log) shows its first few lines with the rest one click away; the summary line is never folded.
+
+Code blocks are line-numbered with a copy button, the numbers living outside the scroller so they stay put when a long line scrolls sideways. Select any passage of the reply and a small bar offers explain / rewrite / shorten / do-this — it fills the composer with the quoted passage rather than sending, so you can add a sentence first. A `↓` appears when you have scrolled back and the conversation has grown past you.
+
+The component inventory and the motion recipes are informed by [Beautiful UI](https://www.beautifului.dev/) and [beUI](https://beui.dev/) — the shapes and the timing, not the skin: this window stays white paper, square corners and flat, and every animation is off under `prefers-reduced-motion`.
+
 Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown as a diff or the literal command and nothing runs until you approve. Slash commands, skills and `esc` to interrupt all work. Key management stays in the terminal (`/key add` inside `feiyu`); the desktop app cannot even read them.
 
 Under the hood it is a Tauri window supervising a `feiyu --serve` child process, one JSON object per line between them. **It listens on no port** — the front end and the agent talk over an in-process channel that nothing outside can reach.

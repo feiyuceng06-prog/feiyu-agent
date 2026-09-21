@@ -449,7 +449,7 @@ function openThinking() {
     + '<div class="think__wrap"><div class="think__body"><div class="prose"></div></div></div>'
     + "</div>";
   const box = body.firstElementChild;
-  think = {
+  const it = {
     box,
     head: box.querySelector(".think__head"),
     prose: box.querySelector(".prose"),
@@ -458,14 +458,18 @@ function openThinking() {
     done: false,
     touched: false,      // 人自己点过展开/收起没有
   };
-  think.head.onclick = () => {
-    think.touched = true;
-    const open = box.dataset.open === "1";
-    box.dataset.open = open ? "0" : "1";
-    think.head.setAttribute("aria-expanded", String(!open));
+  /* **闭包里抓的是这一块自己（`it`），不是模块上那个 `think`。**
+     `closeThinking()` 会把 `think` 置成 null（这一轮想完了），而这块轨迹还留在
+     对话里 —— 抓外面那个变量的话，想完之后再点这个按钮就是在 null 上取属性。 */
+  it.head.onclick = () => {
+    it.touched = true;
+    const open = it.box.dataset.open === "1";
+    it.box.dataset.open = open ? "0" : "1";
+    it.head.setAttribute("aria-expanded", String(!open));
   };
+  think = it;
   thinkHead();
-  return think;
+  return it;
 }
 
 function paintThinking() {

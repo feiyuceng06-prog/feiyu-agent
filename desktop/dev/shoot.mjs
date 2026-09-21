@@ -343,6 +343,16 @@ await sleep(1200);
 await cdp.call("Emulation.setDeviceMetricsOverride", {
   width: 1280, height: 900, deviceScaleFactor: 2, mobile: false,
 });
+/* **光 sleep 不够。** 这一屏的前提是"流里一条都没有"，而重连之后 agent 那侧
+   还会把这一轮里我们自己点出来的东西推过来（改模式、点机器人那些 note）——
+   落在 sleep 之后的话，这块「开始」就永远不出现，报出来像是它坏了。
+   跟文件开头那段「要等 agent 回话，不是等 DOM」是同一条，这儿一直漏着。 */
+for (let i = 0; i < 60; i++) {
+  if (await cdp.eval(`commands.length > 0`)) break;
+  await sleep(500);
+}
+await sleep(800);
+await feed([{ kind: "cleared" }]);       // 清流 + 把「开始」摆回去，走真实那条路
 await sleep(300);
 console.log("拍了", await cdp.shot("0_hello", { height: 900, beyond: false }));
 const 例子数 = await cdp.eval(`document.querySelectorAll(".hello__pick").length`);
@@ -460,8 +470,20 @@ if (!trace || trace.open !== "0" || trace.done !== "1" || trace.chars < 40) {
   console.log(`想的轨迹：${trace.head}，${trace.chars} 字，想完收起来了`);
 }
 
-// 点开来拍，收着拍等于没验
-await cdp.eval(`document.querySelector(".think__head").click(); true`);
+/* 点开来拍，收着拍等于没验。**顺带把"想完之后还点得动"钉住** ——
+   这一下真的抓到过一个 bug：折叠按钮的闭包抓的是模块上那个 `think`，
+   而 `closeThinking()` 会把它置成 null，于是想完再点就在 null 上取属性。
+   而按钮的 onclick 抛异常是**不会让 click() 这条 eval 失败的**，只能看结果。 */
+const 点开 = await cdp.eval(`(() => {
+  const head = document.querySelector(".think__head");
+  head.click();
+  const box = head.closest(".think");
+  return box.dataset.open + "/" + head.getAttribute("aria-expanded");
+})()`);
+if (点开 !== "1/true") {
+  console.error("想完之后轨迹点不开了：", 点开);
+  process.exitCode = 1;
+}
 await sleep(500);
 
 /* 长输出默认只露头几行。**折的只能是 detail，摘要那行不许折** ——
@@ -487,7 +509,12 @@ if (!fold || !fold.note || fold.shut > 160 || opened <= fold.shut + 40) {
   console.log(`长输出 ${fold.rows} 行，折着 ${fold.shut}px（${fold.more}）→ 展开 ${opened}px`);
 }
 
-console.log("拍了", await cdp.shot("15_think", { width: 1280, height: 1100 }));
+/* 拍之前把长输出**收回去**：刚才那一下是为了验展开，而这张图要一眼看全
+   「想的轨迹 / 工具 / 还在等」三样，三十行摊开会把前两样顶出画面。 */
+await cdp.eval(`document.querySelector(".fold__more").click(); true`);
+await sleep(500);
+await cdp.eval(`sheet.scrollTop = sheet.scrollHeight; true`);
+console.log("拍了", await cdp.shot("15_think", { width: 1280, height: 1100, beyond: false }));
 
 /* 代码块：行号必须**跟代码对齐**（两列同一个行高），而且**不能进 <code>** ——
    进去了复制出来每行都顶着一个数字。这两条都得量，看图看不出来。 */
@@ -500,10 +527,10 @@ const code = JSON.parse(await cdp.eval(`JSON.stringify((() => {
   const nums = fig.querySelector(".code__nums");
   const codeEl = fig.querySelector("code");
   const line = getComputedStyle(codeEl).lineHeight;
-  return { nums: nums ? nums.textContent.split("\n").length : 0,
-           rows: codeEl.textContent.split("\n").length,
+  return { nums: nums ? nums.textContent.split("\\n").length : 0,
+           rows: codeEl.textContent.split("\\n").length,
            sameLead: nums ? getComputedStyle(nums).lineHeight === line : false,
-           dirty: /^\s*\d/.test(codeEl.textContent),
+           dirty: /^\\s*\\d/.test(codeEl.textContent),
            copy: !!fig.querySelector("[data-copy]") };
 })())`));
 if (!code || !code.copy || code.nums !== code.rows || !code.sameLead || code.dirty) {
@@ -536,7 +563,10 @@ if (ind.on !== "1" || !parseFloat(ind.before.w) || ind.before.x === ind.after.x)
 
 /* 划一段 → 浮出几个动词 → 点了**填进输入框不发出去**。
    最后那半条是这个功能的取舍所在，所以必须断言"没发出去"。 */
-const pick = JSON.parse(await cdp.eval(`JSON.stringify((async () => {
+/* **异步的那段要让 `JSON.stringify` 在 await 之后跑。** 写成
+   `JSON.stringify(异步函数())` 的话拿到的是个 Promise，序列化出来是 `{}` ——
+   断言会挂在一个什么都没量到的对象上。 */
+const pick = JSON.parse(await cdp.eval(`(async () => {
   const p = document.querySelector(".block:not(.block--you) .prose p");
   const sel = getSelection();
   sel.removeAllRanges();
@@ -549,9 +579,9 @@ const pick = JSON.parse(await cdp.eval(`JSON.stringify((async () => {
   const shown = !bar.hidden;
   const box = bar.getBoundingClientRect();
   bar.querySelector("[data-pick]").click();
-  return { shown, x: Math.round(box.x), y: Math.round(box.y),
-           gone: bar.hidden, typed: input.value.length, quoted: input.value.includes(">") };
-})())`));
+  return JSON.stringify({ shown, x: Math.round(box.x), y: Math.round(box.y),
+    gone: bar.hidden, typed: input.value.length, quoted: input.value.includes(">") });
+})()`));
 if (!pick.shown || pick.x < 0 || pick.y < 0 || !pick.gone || !pick.typed || !pick.quoted) {
   console.error("划词那条不对（该浮出来、该在视口里、点完该填进输入框并引起来）：",
     JSON.stringify(pick));
