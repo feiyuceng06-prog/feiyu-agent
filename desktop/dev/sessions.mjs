@@ -84,8 +84,11 @@ async function ask(text) {
   await sleep(1000);        // 收尾那几条事件（turn_end / status / sessions）画完
 }
 
+/* **要钉在 `#talks` 里面。** 机器人清单（`#bots`）从 0.65.0 起用的是同一个
+   `.talk` 类，裸选 `.talk` 会把「＋ 新建机器人」那几行一起数进来 —— 三条
+   数数的断言于是长期挂着，而产品一直是对的。 */
 const talks = async () => JSON.parse(await ev(`JSON.stringify(
-  [...document.querySelectorAll(".talk")].map(t => ({
+  [...document.querySelectorAll("#talks .talk")].map(t => ({
     title: t.querySelector(".talk__title").textContent,
     current: t.getAttribute("aria-current") === "true",
   })))`));
@@ -119,15 +122,18 @@ check("第一段对话进了侧边栏", list.length === 1 && list[0].current, li
 // 开第二段
 await ev(`document.getElementById("new-talk").click(); true`);
 await sleep(1500);
-check("新对话把正文清空了",
-      (await ev(`document.querySelectorAll(".block").length`)) === 0, null);
+/* 清空 = 正文里只剩空状态那一块。**不能数 `.block === 0`**：`#hello` 自己就带
+   `.block`，而 `cleared` 之后 `syncHello()` 要做的正是把它摆回来。 */
+const left = JSON.parse(await ev(`JSON.stringify(
+  [...document.querySelectorAll("#stream .block")].map(b => b.id || b.className))`));
+check("新对话把正文清空了，只剩空状态那块", left.length === 1 && left[0] === "hello", left);
 await ask("我说一个水果：西瓜。只回一个「好」，别用任何工具。");
 await sleep(1200);
 list = await talks();
 check("现在有两段，新的在最前", list.length === 2 && list[0].current, list);
 
 // 切回第一段，历史要真的回来
-await ev(`const rows = [...document.querySelectorAll(".talk")];
+await ev(`const rows = [...document.querySelectorAll("#talks .talk")];
   if (rows[1]) rows[1].click(); true`);
 await sleep(2500);
 const restored = await ev(`document.getElementById("stream").textContent`);
@@ -168,7 +174,7 @@ await sleep(600);
 const { data } = await call("Page.captureScreenshot", { format: "png" });
 writeFileSync(`${outDir}/sidebar.png`, Buffer.from(data, "base64"));
 console.log("拍了", `${outDir}/sidebar.png`);
-console.log("花费:", await ev(`document.getElementById("m-cost").textContent`));
+console.log("花费:", await ev(`document.getElementById("s-cost").textContent`));
 const bad = cases.filter((x) => !x).length;
 if (bad) {
   const timeline = JSON.parse(await ev(`JSON.stringify(window.__in || [])`));

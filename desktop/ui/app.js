@@ -362,9 +362,27 @@ $("s-left").onclick = () => {
   send({ op: "credits" });
 };
 
+/* 状态行上有两种话。
+   一种是**现在是什么情况**：就绪 / 干活中 1:02 / 断了。随时可以重写，秒表
+   每秒就重写一遍。另一种是**留言**：你刚点的那下没成（没连上、换不过去、
+   agent 退了）。留言得等人看见，而秒表一秒冲一次 —— 不让开的话它活不过一秒，
+   等于没说；0.50.x 定的「断线时不能默默吞掉」就是这么被吞掉的。
+
+   **留言按住状态行，直到状态真的变了才让开**（连上了、这一轮完了、下一条留言）。
+   让开的时机不拿秒数去猜：秒表该不该说话，取决于它说的还算不算数 —— 断着线的
+   「干活中 12s」本来就是句瞎话。 */
+let noteHeld = false;
+
 function setDot(state, text) {
+  noteHeld = false;
   $("dot").dataset.state = state;
   $("s-state").textContent = text;
+}
+
+/** 说一句要等人看见的话。秒表那一路不许冲掉它。 */
+function sayOnce(state, text) {
+  setDot(state, text);
+  noteHeld = true;
 }
 
 /* ── 等了多久 ───────────────────────────────────────────────
@@ -384,16 +402,21 @@ function clock(secs) {
   return m ? `${m}:${String(secs % 60).padStart(2, "0")}` : `${secs}s`;
 }
 
-function drawWait() {
+/** `ambient` = 这一下是定时器自己跳的（秒表、迟来的「在跑」），不是刚发生了什么。 */
+function drawWait(ambient) {
   if (!waitFrom) return;
   const secs = Math.round((Date.now() - waitFrom) / 1000);
   const slow = secs >= SLOW_AFTER;
   // 在想的时候说"在想"，别笼统地写"干活中"——那是这一版要治的病
   const what = thoughtSize ? `在想 ${clock(secs)}（已想 ${thoughtSize} 字）`
                            : `干活中 ${clock(secs)}`;
-  setDot(slow && !thoughtSize ? "slow" : "busy",
-         slow && !thoughtSize ? `${what} · 比平时慢，还在等 · esc 中断`
-                              : `${what} · esc 中断`);
+  // 留言还在的时候，定时器自己跳的那一下不写这行字；底下那块和想的轨迹照旧更新。
+  // 挡的只有定时器：别处直接调进来的（起一轮、报想了多少字）都是「刚发生了
+  // 什么」，那是该说话的。
+  if (!(ambient && noteHeld))
+    setDot(slow && !thoughtSize ? "slow" : "busy",
+           slow && !thoughtSize ? `${what} · 比平时慢，还在等 · esc 中断`
+                                : `${what} · esc 中断`);
   if (waitBlock) {
     waitBlock.querySelector(".churn__clock").textContent = clock(secs);
     waitBlock.querySelector(".churn__what").textContent =
@@ -407,7 +430,7 @@ function startWait() {
   waitFrom = Date.now();
   thoughtSize = 0;
   drawWait();
-  waitTick = setInterval(drawWait, 1000);
+  waitTick = setInterval(() => drawWait(true), 1000);
 }
 
 function stopWait() {
@@ -526,7 +549,9 @@ function showWait(on) {
     + "<i></i>".repeat(9)
     + '</span><span class="churn__what">等模型回话</span>'
     + '<span class="churn__clock mono"></span></div>';
-  drawWait();
+  // 这一下是 WAIT_AFTER 那个定时器带进来的，要的只是把块里的秒数填上 ——
+  // 状态行该说什么没变，别把留言挤掉（断线之后它照样会跳，真踩到过）
+  drawWait(true);
 }
 
 function shortPath(raw, cap = 46) {
@@ -999,7 +1024,9 @@ function handle(ev) {
 
     case "gone":
       online = false;
-      setDot("off", "agent 已退出 · 关掉窗口重开");
+      // 它都没了，秒表还在那儿数「干活中」就是撒谎 —— 先把计时收掉再说话
+      stopWait();
+      sayOnce("off", "agent 已退出 · 关掉窗口重开");
       break;
   }
   keepBottom(wasDown);
@@ -2189,7 +2216,7 @@ function drawDesks() {
 async function goDesk(path) {
   $("desks").hidden = true;
   if (!TAURI || path === deskNow) return;
-  setDot("off", "正在换工作台…");
+  sayOnce("off", "正在换工作台…");
   try {
     const now = await TAURI.core.invoke("switch", { dir: path });
     // 换过去就是另一段对话了：正文、侧栏、附件全部归零
@@ -2209,7 +2236,7 @@ async function goDesk(path) {
     }
     hello();
   } catch (err) {
-    setDot("ready", "换不过去：" + String(err).slice(0, 60));
+    sayOnce("ready", "换不过去：" + String(err).slice(0, 60));
   }
 }
 
@@ -2528,14 +2555,14 @@ function send(msg) {
   if (!online) {
     // **断线时不能默默吞掉。** 用户点了发送、字也从输入框里没了，却什么都没发生 ——
     // 那比报个错糟得多。
-    setDot("off", "没连上，这条没发出去");
+    sayOnce("off", "没连上，这条没发出去");
     return false;
   }
   const line = JSON.stringify(msg);
   if (TAURI) {
     TAURI.core.invoke("send", { line }).catch(() => {
       online = false;
-      setDot("off", "agent 断了");
+      sayOnce("off", "agent 断了");
     });
   } else {
     socket.send(line);
@@ -2557,7 +2584,7 @@ function connect() {
   socket.onmessage = (e) => inbound(e.data);
   socket.onclose = () => {
     online = false;
-    setDot("off", "连接断了 · 正在重连");
+    sayOnce("off", "连接断了 · 正在重连");
     setTimeout(connect, 1000);
   };
 }
