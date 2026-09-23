@@ -547,6 +547,14 @@ def rewrite_hint_on() -> bool:
     return os.environ.get("FEIYU_REWRITE_HINT", "").strip().lower() in ("on", "1", "yes")
 
 
+# 快到时间上限时提醒一句"该收口了"（`agent._note_deadline`）。**只有设了
+# `--time-budget` 才谈得上这件事**，所以默认开着：设了闸又不让它知道，等于
+# 只保留了"被掐掉"那一半。`FEIYU_DEADLINE_HINT=off` 是 A/B 的另一档 ——
+# 闸照旧，只是不提前说，用来量"提前知道到底有没有用"。
+def deadline_hint_on() -> bool:
+    return os.environ.get("FEIYU_DEADLINE_HINT", "").strip().lower() not in ("off", "0", "no")
+
+
 def _mostly_rewrite(before: str, after: str) -> str:
     """整写的内容里有多少是原样抄回来的 值得提醒就返回那句话，否则空串
 

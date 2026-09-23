@@ -287,18 +287,21 @@ verify: npm test
 
 From then on the command runs after every file write or edit, and failures go back to the model to fix. The failure comes with a digest first (which test failed, the assertion, the compile error line), then the raw output.
 
-**Two gates for long tasks.** In the same convention file, one line each:
+**Three gates for long tasks.** In the same convention file, one line each:
 
 ```
 max-rounds: 0
 budget: 5
+time-budget: 30m
 ```
 
 `max-rounds` is how many consecutive tool rounds pass before it stops and asks (25 by default, **0 means no limit**). The default is tuned for interactive use: an edit-compile-read-the-error-edit-again loop runs for hundreds of rounds, and there is no right number to pick up front.
 
 **If you lift the round limit, set `budget`.** Non-interactive runs (a pipe, a one-shot task) have nobody to answer that question, so money is the only remaining gate — and a model with no configured price cannot be costed, which leaves no gate at all.
 
-`--max-rounds` and `--budget` on the command line win over the convention file, and `/context` will not overwrite them.
+`time-budget` is how long one request may run (plain numbers are minutes; `90s` / `45m` / `1.5h` also work, **0 means no limit**). It is measured **per request**, not per session, so the minutes you spend thinking in the REPL do not count. **Shortly before the deadline the model is told to wrap up**: get the finished part working, do not leave an edit half-applied. When the clock kills it from outside, a half-edited file is worse than nothing.
+
+`--max-rounds`, `--budget` and `--time-budget` on the command line win over the convention file, and `/context` will not overwrite them.
 
 **Hooks.** Global in `~/.config/feiyu/hooks.json`, per project in `.feiyu/hooks.json`:
 

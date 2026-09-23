@@ -13,12 +13,14 @@ import json
 import platform
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from feiyu import agent as agent_mod
 from feiyu import enabled, keys, permissions, tools as tools_mod
 from feiyu.agent import Feiyu
+from feiyu.providers import ToolOutput
 from feiyu.tools import ToolResult
 from tests.fakes import FakeBackend, call, unpaired
 
@@ -396,6 +398,101 @@ class TestGate(Base):
         self.assertIn("拒绝", self.tool_results(b)[0])
 
 
+class TestTimeGate(Base):
+    """第三道闸：墙钟 0.72.0 那轮基线 7 次撞上限全是墙钟，而被外面掐掉时
+    做到一半的东西一起没了 —— 这道闸买的是"到点那一刻手上的东西还能用"
+    """
+
+    def tools_slow(self):
+        """每次工具调用真的耗掉一点时间 **不能靠"预算小到零"来触发**：
+        假后端一轮只要几十微秒，1 毫秒的闸能让它跑完五轮还没到点，
+        用例于是变成一个跟机器快慢赛跑的掷骰子 """
+        def run(name, args):
+            self.ran.append((name, args))
+            time.sleep(0.02)
+            return ToolResult("ok", summary="ok")
+        self.agent.toolbox.run = run
+
+    def note(self, left: float, budget: float = 100.0, content: str = "原来的结果"):
+        """按"还剩 left 秒"喂一次提醒，返回最后一条工具结果 """
+        self.agent.time_budget = budget
+        outs = [ToolOutput(id="c1", content=content)]
+        self.agent._note_deadline(time.monotonic() + left, outs)
+        return outs[-1]
+
+    def test_到点了停下来并补一条_assistant(self):
+        """不补的话角色不交替，下一次请求直接 400 —— 跟另外两道闸同一条规矩 """
+        self.agent.time_budget = 0.01
+        b = self.use([("", [call("c%d" % i)]) for i in range(6)])
+        self.tools_slow()
+        out = quiet(self.agent.send, "很慢的任务")
+        # 认准是**时间**那道闸：另外两道的措辞里也有"我先停下"
+        self.assertIn("时间上限", out)
+        self.assertEqual(len(self.ran), 1)
+        self.assertEqual(b.messages[-1]["role"], "assistant")
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_没设闸就完全不参与(self):
+        self.agent.time_budget = 0.0
+        script = [("", [call("c%d" % i)]) for i in range(3)]
+        script.append(("做完了", []))
+        b = self.use(script)
+        self.tools_ok()
+        self.assertEqual(quiet(self.agent.send, "普通任务"), "做完了")
+        self.assertEqual(len(self.ran), 3)
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_快到点了在最后一条工具结果上说一句(self):
+        got = self.note(left=10)
+        self.assertIn("原来的结果", got.content, "原来那条结果不能被顶掉")
+        self.assertIn("时间还剩", got.content)
+        self.assertIn("别再开新的探索", got.content)
+
+    def test_时间还够就不说(self):
+        """每轮报一次时间只会把正事挤下去 —— 0.68.0 那条教训 """
+        self.assertNotIn("时间还剩", self.note(left=80).content)
+
+    def test_只说一次(self):
+        self.agent.time_budget = 100.0
+        first = [ToolOutput(id="c1", content="甲")]
+        self.agent._note_deadline(time.monotonic() + 10, first)
+        second = [ToolOutput(id="c2", content="乙")]
+        self.agent._note_deadline(time.monotonic() + 5, second)
+        self.assertIn("时间还剩", first[-1].content)
+        self.assertEqual(second[-1].content, "乙", "第二次不该再说")
+
+    def test_每问一句重新起表(self):
+        """按每一句话计，不是整个会话 —— 交互里人想事情的那几分钟不该算进来 """
+        self.agent._time_warned = True
+        self.use([("好了", [])])
+        quiet(self.agent.send, "下一句话")
+        self.assertFalse(self.agent._time_warned, "新的一句话没把提醒过的标记清掉")
+
+    def test_关掉开关只是不说闸照旧(self):
+        """A/B 的另一档：量"提前知道到底有没有用"，不能把闸也一起关了 """
+        os.environ["FEIYU_DEADLINE_HINT"] = "off"
+        self.addCleanup(os.environ.pop, "FEIYU_DEADLINE_HINT", None)
+        self.assertEqual(self.note(left=10, content="甲").content, "甲")
+        self.agent.time_budget = 0.01
+        b = self.use([("", [call("c%d" % i)]) for i in range(4)])
+        self.tools_slow()
+        self.assertIn("时间上限", quiet(self.agent.send, "很慢的任务"))
+        self.assertEqual(unpaired(b.messages), set())
+
+    def test_说这一句时不能把图弄丢(self):
+        """手写 ToolOutput 必漏 image，这个项目里已经漏过三处 """
+        self.agent.time_budget = 100.0
+        outs = [ToolOutput(id="c1", content="看图", image=("image/png", "AAA"))]
+        self.agent._note_deadline(time.monotonic() + 1, outs)
+        self.assertEqual(outs[-1].image, ("image/png", "AAA"))
+
+    def test_一条工具结果都没有时不说(self):
+        outs: list[ToolOutput] = []
+        self.agent.time_budget = 100.0
+        self.agent._note_deadline(time.monotonic() + 1, outs)
+        self.assertEqual(outs, [])
+
+
 class TestCompact(Base):
     def test_压缩后重建成两条(self):
         b = self.use([])
@@ -575,6 +672,19 @@ class TestLimitConfig(unittest.TestCase):
         self.assertEqual(agent_mod.find_limits("budget: 5"), {"budget": 5.0})
         self.assertEqual(agent_mod.find_limits("budget: ¥2.5"), {"budget": 2.5})
 
+    def test_time_budget_三种单位(self):
+        """不写单位按分钟算 —— 人说"跑二十分钟"，不会说"跑一千二百秒" """
+        self.assertEqual(agent_mod.find_limits("time-budget: 30"), {"time_budget": 1800.0})
+        self.assertEqual(agent_mod.find_limits("time_budget: 90s"), {"time_budget": 90.0})
+        self.assertEqual(agent_mod.find_limits("time-budget: 1.5h"), {"time_budget": 5400.0})
+
+    def test_看不懂的时间要当场抛(self):
+        """静默当成"不限"最糟：他以为设了闸，实际上一道都没有 """
+        with self.assertRaises(ValueError):
+            agent_mod.parse_time("半小时")
+        with self.assertRaises(ValueError):
+            agent_mod.parse_time("")
+
     def test_从约定文件里读出来(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "FEIYU.md").write_text(
@@ -582,6 +692,13 @@ class TestLimitConfig(unittest.TestCase):
             a = Feiyu(Path(tmp))
             self.assertEqual(a.max_rounds, 400)
             self.assertEqual(a.budget, 5.0)
+
+    def test_三道闸一起从约定文件里读出来(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "FEIYU.md").write_text(
+                "max-rounds: 0\nbudget: 5\ntime-budget: 20m\n", encoding="utf-8")
+            a = Feiyu(Path(tmp))
+            self.assertEqual((a.max_rounds, a.budget, a.time_budget), (0, 5.0, 1200.0))
 
     def test_没配就用出厂值(self):
         with tempfile.TemporaryDirectory() as tmp:

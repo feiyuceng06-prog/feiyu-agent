@@ -4,6 +4,7 @@
 所以全在这儿用夹具验：
 
 - `tbench_pick`：同一份输入永远出同一批题，难度构成跟全量一致
+- `tbench_ab`：从基线存档里挑出**有分辨力**的那几道（挑错了的代价见 0.73.0）
 - `tbench_report`：一份 `result.json` 落进哪个格子
 
 **分类那几条是这套东西的承重墙。** 判错一条的代价不是表格难看：
@@ -19,7 +20,7 @@ import unittest.mock
 from datetime import datetime
 from pathlib import Path
 
-from evals import report, tbench_pick, tbench_report
+from evals import report, tbench_ab, tbench_pick, tbench_report
 
 TOML = """\
 version = "1.0"
@@ -95,6 +96,62 @@ class TestPick(unittest.TestCase):
         if not rows:
             self.skipTest("本地没有 harbor 题面缓存")
         self.assertEqual(tbench_pick.load(), tbench_pick.chosen(rows))
+
+
+def _ab_row(name, ok=True, s=600.0, graded=True, exc=None, turn=1):
+    return {"suite": name, "turn": turn, "ok": ok, "s": s,
+            "detail": {"graded": graded, "exception": exc}}
+
+
+class TestAbPick(unittest.TestCase):
+    """挑 A/B 题的规矩 0.73.0 挑错过一次：三道里两道两档都撞满 1800 秒墙钟，
+    主指标被上限截断，改动有用没用量出来都一样
+    """
+
+    def test_两遍都跑完又都做出来的才要(self):
+        rows = [_ab_row("甲", turn=1), _ab_row("甲", turn=2),
+                _ab_row("乙", turn=1), _ab_row("乙", ok=False, turn=2)]
+        self.assertEqual([n for n, _ in tbench_ab.picked(rows)], ["甲"])
+
+    def test_撞过墙钟的不要(self):
+        """撞了的那遍墙钟被截断在上限上，两档都是那个数，没有分辨力 """
+        rows = [_ab_row("甲", turn=1),
+                _ab_row("甲", turn=2, exc="AgentTimeoutError")]
+        self.assertEqual(tbench_ab.picked(rows), [])
+
+    def test_判不了的不要(self):
+        rows = [_ab_row("甲", turn=1), _ab_row("甲", turn=2, graded=False)]
+        self.assertEqual(tbench_ab.picked(rows), [])
+
+    def test_太短的不要(self):
+        """几十秒跑完的题，改动的影响淹在噪声里 """
+        rows = [_ab_row("甲", s=30.0, turn=1), _ab_row("甲", s=40.0, turn=2)]
+        self.assertEqual(tbench_ab.picked(rows), [])
+
+    def test_只跑过一遍的不要(self):
+        self.assertEqual(tbench_ab.picked([_ab_row("甲")]), [])
+
+    def test_软闸按各自的中位算(self):
+        """**必须一题一个值**：挑出来的题自然耗时差着好几倍，统一一个秒数
+        对一半太松（轮不到它说话）、对另一半太紧（还没干活就到点）
+        """
+        rows = [_ab_row("alpha", s=400.0, turn=1), _ab_row("alpha", s=600.0, turn=2),
+                _ab_row("beta", s=1000.0, turn=1), _ab_row("beta", s=2000.0, turn=2)]
+        self.assertEqual(tbench_ab.picked(rows, squeeze=0.5),
+                         [("alpha", 250), ("beta", 750)])
+
+    def test_同一份存档永远同一批(self):
+        rows = [_ab_row("beta", turn=1), _ab_row("beta", turn=2),
+                _ab_row("alpha", turn=1), _ab_row("alpha", turn=2)]
+        self.assertEqual(tbench_ab.picked(rows), tbench_ab.picked(list(reversed(rows))))
+        self.assertEqual([n for n, _ in tbench_ab.picked(rows)], ["alpha", "beta"])
+
+    def test_子集文件跟基线算出来的一致(self):
+        """本机有基线存档时才跑 改了 FLOOR / SQUEEZE 却忘了 `--write`，这条会红 """
+        if not tbench_ab.BASELINE.exists():
+            self.skipTest("本地没有 0.72.0 的基线存档")
+        self.assertEqual(tbench_ab.load(),
+                         tbench_ab.picked(tbench_ab._rows(tbench_ab.BASELINE)))
 
 
 def _result(**kw):

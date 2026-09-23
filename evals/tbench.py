@@ -283,6 +283,11 @@ class FeiyuAgent(BaseAgent):
         rounds = int(os.environ.get("FEIYU_BENCH_ROUNDS") or DEFAULT_MAX_ROUNDS)
         timeout = int(os.environ.get("FEIYU_BENCH_TIMEOUT") or DEFAULT_TIMEOUT)
         budget = float(os.environ.get("FEIYU_BENCH_BUDGET") or DEFAULT_BUDGET)
+        # feiyu 自己那道**软**墙钟（`--time-budget`）：快到点时它会收到一句
+        # 「该收口了」，到点自己停。跟 Harbor 那道硬闸不是一回事 —— 那道到点直接杀，
+        # 手上做了一半的东西一起没。**要量它就必须设得比 Harbor 那道紧**，
+        # 否则永远轮不到它说话（`evals.tbench_ab --cmd` 一题一个值地给）。
+        soft = os.environ.get("FEIYU_BENCH_TIME") or ""
 
         # 题面走文件不走命令行：里头有换行、引号、反引号，拼进命令行迟早出事
         await self._sh(environment,
@@ -301,7 +306,7 @@ class FeiyuAgent(BaseAgent):
         # （那条路 feiyu 跑在宿主机，环境变量天然就在），挪到 Harbor 这边就断了，
         # 而断得很安静：开关照样能设，只是不起作用，两档跑出来一模一样。
         # Harbor 的 `--agent-env` 也不行，它进不到我们这次 `exec` 的 env 里。
-        for name in ("FEIYU_ASSIST", "FEIYU_REWRITE_HINT"):
+        for name in ("FEIYU_ASSIST", "FEIYU_REWRITE_HINT", "FEIYU_DEADLINE_HINT"):
             if os.environ.get(name):
                 env[name] = os.environ[name]
         # 题面是**位置参数**，没有 -p 这个开关（`feiyu [选项] [prompt ...]`）
@@ -313,9 +318,10 @@ class FeiyuAgent(BaseAgent):
         #
         # **`-u` 不能省**：输出到文件是块缓冲的，进程被杀时攒着的那一段会跟着没掉，
         # 而那一段恰好是最后在干什么 —— 正是要查的东西。
-        cmd = ("python3 -u -m feiyu --mode auto -m %s --max-rounds %d --budget %s "
+        cmd = ("python3 -u -m feiyu --mode auto -m %s --max-rounds %d --budget %s %s"
                "-- \"$(cat /tmp/feiyu-task.txt)\" > %s 2>&1"
-               % (shlex.quote(MODEL_NAME), rounds, shlex.quote("%g" % budget), REMOTE_OUT))
+               % (shlex.quote(MODEL_NAME), rounds, shlex.quote("%g" % budget),
+                  ("--time-budget %s " % shlex.quote(soft)) if soft else "", REMOTE_OUT))
         # **收尾一律在 finally 里。** 超时那条路上 `exec` 会抛，原来写在后面的
         # `_fill_usage` 根本轮不到 —— 十道冒烟里有四道就是这么丢的记录：
         # 钱在账面上，feiyu 这边一分没记，于是「记的」和「扣的」覆盖的不是同一批题，

@@ -16,8 +16,17 @@ from . import sandbox as sandbox_mod
 from . import schema as schema_mod, session, trace, ui
 from . import __version__
 from .agent import (CONTEXT_FILES, MAX_ROUNDS, MODE_ORDER, MODES, STYLES, Feiyu,
-                    find_score)
+                    find_score, parse_time)
 from .providers import OpenAICompatBackend
+
+
+def _time_arg(text: str) -> float:
+    """`--time-budget` 的值 **在 argparse 这一层就认**：看不懂的写法要是拖到
+    跑起来之后才炸，那时候已经开始花钱了 """
+    try:
+        return parse_time(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def main() -> int:
@@ -69,6 +78,15 @@ def main() -> int:
         metavar="元",
         help="这次任务最多花多少钱，到了就停（0 是不限） 只有填过价格的模型算得出来 "
              "也可以写进项目约定文件：单起一行 `budget: 5` ",
+    )
+    parser.add_argument(
+        "--time-budget",
+        type=_time_arg,
+        default=None,
+        metavar="时长",
+        help="这次任务最多跑多久，到了就停（0 是不限） 不写单位按分钟算，"
+             "也可以写 90s / 45m / 1.5h 快到点时它会收到一句「该收口了」 "
+             "也可以写进项目约定文件：单起一行 `time-budget: 30m` ",
     )
     parser.add_argument(
         "--review",
@@ -128,9 +146,13 @@ def main() -> int:
     if args.budget is not None:
         agent.budget = args.budget
         agent.limit_cli.add("budget")
+    if args.time_budget is not None:
+        agent.time_budget = args.time_budget
+        agent.limit_cli.add("time_budget")
     tracer.write("run_start", version=__version__, model=agent.model,
                  name=agent.name, mode=agent.mode, verify=agent.verify or None,
                  max_rounds=agent.max_rounds, budget=agent.budget or None,
+                 time_budget=agent.time_budget or None,
                  task=" ".join(args.prompt) if args.prompt else None)
 
     if args.serve:

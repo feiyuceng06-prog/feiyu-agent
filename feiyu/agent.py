@@ -202,6 +202,21 @@ VERIFY_TIMEOUT = 300
 # 事先给不出一个对的数字 放开轮数就得靠 budget 收口（两道闸在 send 里同一处）
 ROUNDS_LINE = re.compile(r"^max[-_ ]?rounds:[ \t]*`?(\d+)`?[ \t]*$", re.M | re.I)
 BUDGET_LINE = re.compile(r"^budget:[ \t]*`?[¥$]?(\d+(?:\.\d+)?)`?[ \t]*$", re.M | re.I)
+# 第三道闸：墙钟 轮数管"空转"、budget 管"烧钱"，这道管的是**人还等不等得起**
+# 0.72.0 那轮基线里 7 次撞上限**全是墙钟**（0 次预算、0 次轮数），而被外面掐掉时
+# 它手上做了一半的东西一起没了 —— 自己知道还剩多少，才来得及收口
+TIME_LINE = re.compile(
+    r"^time[-_ ]?budget:[ \t]*`?(\d+(?:\.\d+)?)[ \t]*([smh]?)`?[ \t]*$", re.M | re.I)
+# 不写单位按**分钟**算：一次任务等多久，人是按分钟说的
+TIME_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "": 60.0}
+
+
+def parse_time(text: str) -> float:
+    """"30" / "90s" / "1.5h" → 秒 不认的形状抛 ValueError，不要静默当成"不限" """
+    hit = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhSMH]?)\s*", text or "")
+    if not hit:
+        raise ValueError("看不懂的时间：%r（要像 30 / 90s / 45m / 1.5h）" % (text,))
+    return float(hit.group(1)) * TIME_UNITS[hit.group(2).lower()]
 
 
 SCORE_LINE = re.compile(r"评分[:：]\s*(\d+(?:\.\d+)?)\s*/\s*10")
@@ -210,6 +225,16 @@ SCORE_LINE = re.compile(r"评分[:：]\s*(\d+(?:\.\d+)?)\s*/\s*10")
 def find_score(text: str) -> float | None:
     hit = SCORE_LINE.search(text or "")
     return float(hit.group(1)) if hit else None
+
+
+def clock(secs: float) -> str:
+    """秒 → 人话 屏幕和给模型的话都用它，两处说的得是同一个单位 """
+    secs = int(round(secs))
+    if secs < 60:
+        return "%d 秒" % secs
+    if secs < 3600:
+        return "%d 分 %d 秒" % (secs // 60, secs % 60)
+    return "%d 小时 %d 分" % (secs // 3600, secs % 3600 // 60)
 
 
 def _clip_middle(text: str, limit: int) -> str:
@@ -236,7 +261,7 @@ def find_verify(text: str) -> str:
 
 
 def find_limits(text: str) -> dict[str, float]:
-    """约定文件里的两道闸 **没写的键不出现**——0 是"不限"，不能拿它表示"没配" """
+    """约定文件里的三道闸 **没写的键不出现**——0 是"不限"，不能拿它表示"没配" """
     out: dict[str, float] = {}
     hit = ROUNDS_LINE.search(text or "")
     if hit:
@@ -244,6 +269,9 @@ def find_limits(text: str) -> dict[str, float]:
     hit = BUDGET_LINE.search(text or "")
     if hit:
         out["budget"] = float(hit.group(1))
+    hit = TIME_LINE.search(text or "")
+    if hit:
+        out["time_budget"] = parse_time(hit.group(1) + hit.group(2))
     return out
 
 
@@ -467,6 +495,10 @@ class Feiyu:
         self.max_rounds = MAX_ROUNDS
         # 单次任务的花费上限（元），0 就是不限 放开轮数之后这是唯一的另一道闸
         self.budget = 0.0
+        # 单次任务的墙钟上限（秒），0 就是不限 **按每一句话计，不是整个会话** ——
+        # 交互里人想事情的那几分钟不该算进来，而"这一问最多跑多久"才是他真正想设的
+        self.time_budget = 0.0
+        self._time_warned = False
         # 命令行显式给过的闸 `/context` 重载时不被约定文件盖掉：
         # 用户敲了 --max-rounds 就是要这个数，不该被仓库里的一行改掉
         self.limit_cli: set[str] = set()
@@ -919,6 +951,8 @@ class Feiyu:
             note += attached
         self.backend.add_user_message(user_message + note)
         rounds = 0
+        deadline = time.monotonic() + self.time_budget if self.time_budget else 0.0
+        self._time_warned = False
         nudged = False      # 清单没做完只提醒一次，提醒到底会转不出来
         retries = 0
         rescued = 0         # 上下文溢出救过几次：第一次瘦身，第二次摘要，再不行就放弃
@@ -1013,6 +1047,7 @@ class Feiyu:
                 if changed:
                     self._after_tools(changed, outputs)
                 self._note_jobs(outputs)
+                self._note_deadline(deadline, outputs)
                 self.backend.add_tool_results(outputs)
                 self._pending += sum(len(o.content) for o in outputs) // CHARS_PER_TOKEN
                 self._fold(turn.tool_calls, outputs)
@@ -1022,6 +1057,10 @@ class Feiyu:
             spent = self._over_budget()
             if spent:
                 return self._stop_budget(spent)
+            # 三道闸收在同一处 **时间要排在轮数前面**：轮数那道在交互下会停下来
+            # 问一句，而到点了再问等于把最后那点时间也花在等人回话上
+            if deadline and time.monotonic() >= deadline:
+                return self._stop_time(self.time_budget)
             if self.max_rounds and rounds >= self.max_rounds:
                 said = self._round_limit(rounds)
                 if said is None:
@@ -1221,6 +1260,16 @@ class Feiyu:
         text = note + " 我先停下 要接着做就把上限调高，或者 feiyu --resume 接上 "
         self.backend.messages.append({"role": "assistant", "content": text})
         self.trace.write("budget_stop", cost=self.cost, budget=self.budget)
+        print(ui.warn(text))
+        print()
+        return text
+
+    def _stop_time(self, budget: float) -> str:
+        """时间到了，收手 跟 `_stop_budget` 同一个形状，包括必须补的那条 assistant """
+        text = ("这次任务已经跑满 %s，到了你设的时间上限 我先停下 "
+                "要接着做就把上限调高，或者 feiyu --resume 接上 " % clock(budget))
+        self.backend.messages.append({"role": "assistant", "content": text})
+        self.trace.write("time_stop", budget=round(budget, 1))
         print(ui.warn(text))
         print()
         return text
@@ -1736,6 +1785,44 @@ class Feiyu:
             id=last.id,
             content=last.content + "\n\n---\n\n后台命令已经结束：" + notes
             + " 用 job（action=output）看它打了什么 ",
+            is_error=last.is_error,
+            image=last.image,      # 重建这条时别把图弄丢了，见 _after_tools
+        )
+
+    # 还剩这么多的时候说一句"该收口了" **只说一次**：0.68.0 量出来的教训是
+    # 「多告诉它一些它没问的事 = 多给它一些事做」，每轮报一次时间只会挤掉正事
+    WARN_LEFT = 0.25
+
+    DEADLINE_NOTE = (
+        "时间还剩大约 %s（这次任务上限 %s，到点我会停下）。"
+        "从现在起先收口：把已经做成的那部分弄到能用、改到一半的别留在半路，"
+        "别再开新的探索 "
+    )
+
+    def _note_deadline(self, deadline: float, outputs: list[ToolOutput]) -> None:
+        """快到点了提醒一次 跟校验、后台命令一样搭在最后一条工具结果上
+
+        **为什么是提醒不是硬停**：0.70.1 已经证伪过"给更多资源"那条路（预算 ×3、
+        轮数 120、超时 ×3 重跑三道 0 分题，一道没翻盘），所以这道闸不是为了让它
+        做出更多题，而是让**到点那一刻手上的东西还能用** —— 被外面掐掉时，
+        改到一半的文件是负分，不是零分。
+        """
+        if not deadline or self._time_warned or not outputs:
+            return
+        left = deadline - time.monotonic()
+        if left > self.time_budget * self.WARN_LEFT:
+            return
+        self._time_warned = True
+        if not tools_mod.deadline_hint_on():
+            # A/B 的另一档：闸照旧，只是不提前说 **记一条**，不然没法确认它真的没说
+            self.trace.write("time_warn", left=round(left, 1), said=False)
+            return
+        self.trace.write("time_warn", left=round(left, 1), said=True)
+        last = outputs[-1]
+        outputs[-1] = ToolOutput(
+            id=last.id,
+            content=last.content + "\n\n---\n\n"
+            + self.DEADLINE_NOTE % (clock(max(left, 0)), clock(self.time_budget)),
             is_error=last.is_error,
             image=last.image,      # 重建这条时别把图弄丢了，见 _after_tools
         )

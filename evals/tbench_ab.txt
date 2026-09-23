@@ -1,0 +1,11 @@
+# 墙钟 / 收敛类改动的配对 A/B 子集（evals/tbench_ab.py 从基线存档里算的）
+# 一行一道：题名 + 给它的软闸秒数（= 基线中位墙钟 × 0.7）
+# 挑的规矩：两遍都判过、两遍都解出来、两遍都没撞墙钟、中位 ≥ 300 秒 
+# **改这个文件等于换了尺子**，之前跑出来的数就不能跟之后的比了 
+bn-fit-modify 254
+build-pmars 366
+chess-best-move 789
+custom-memory-heap-crash 490
+fix-ocaml-gc 1419
+git-multibranch 445
+pytorch-model-cli 296
