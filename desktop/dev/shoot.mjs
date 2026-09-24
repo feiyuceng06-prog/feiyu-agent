@@ -1235,6 +1235,49 @@ if (skinBad.length) {
     + `按钮对比 ${contrast(skin.goFg, skin.goBg).toFixed(2)}:1、390px 不横滚、切回默认复原`);
 }
 
+/* ── 右下角换模型那张清单（0.79.1）────────────────────────────
+   两个主题各拍一张打开的样子，量两件事：清单真的在视口里（零尺寸 / 跑到屏幕外
+   在截图里就是「不存在」），390px 下也不横出去。键盘和点击那些在 input.mjs 里。 */
+const MENU_MODELS = { kind: "models", trusted: true, rows: [
+  ...["opus-5.5", "sonnet-5", "haiku-4.5", "fable-5.1"].map((n) => (
+    { name: n, model: "anthropic/claude-" + n, vision: true, has_key: true, using: n === "opus-5.5" })),
+  ...["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map((n) => (
+    { name: n, model: "openai/" + n, vision: true, has_key: true, using: false })),
+  { name: "qwen3.8-flash", model: "qwen/qwen3.8-flash", vision: true, has_key: true, using: false },
+  { name: "没配key的", model: "openai/gpt-x", vision: false, has_key: false, using: false },
+] };
+const menuBad = [];
+for (const [t, width, name] of [["light", 1280, "20_model_menu"], ["anthropic", 1280, "21_anthropic_model_menu"],
+                                 ["anthropic", 390, "22_anthropic_model_menu_narrow"]]) {
+  await cdp.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+  await cdp.call("Page.navigate", { url });
+  await sleep(1200);
+  await cdp.eval(`setTheme("${t}"); true`);
+  await feed(TALK.slice(0, 4));
+  await cdp.eval(`document.getElementById("model").click(); true`);
+  await sleep(700);                     // 真 agent 回的那份 models 先落地，再灌编好的
+  await feed([MENU_MODELS]);
+  await sleep(400);
+  const box = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+    const r = document.querySelector("#models .models__card").getBoundingClientRect();
+    return { x: Math.round(r.x), right: Math.round(r.right), w: Math.round(r.width), h: Math.round(r.height),
+             rows: document.querySelectorAll("#models .models__row").length,
+             page: document.documentElement.scrollWidth };
+  })())`));
+  if (box.w < 200 || box.h < 120 || box.rows !== 9 || box.x < 0 || box.right > width || box.page > width) {
+    menuBad.push(`${name}: ${JSON.stringify(box)}`);
+  }
+  console.log("拍了", await cdp.shot(name, { width, height: 900, beyond: false }));
+}
+await cdp.eval(`setTheme("light"); true`);
+await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+if (menuBad.length) {
+  console.error("换模型那张清单不对（该在视口里、九条都在、不横出去）：", menuBad.join("；"));
+  process.exitCode = 1;
+} else {
+  console.log("换模型的清单：两个主题都在视口里，390px 下不横出去");
+}
+
 const pageErrors = await cdp.eval("JSON.stringify(window.__errs || [])");
 if (pageErrors && pageErrors !== "[]") {
   console.error("页面里有报错：", pageErrors);

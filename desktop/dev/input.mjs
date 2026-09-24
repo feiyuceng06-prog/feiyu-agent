@@ -703,6 +703,102 @@ const asked = (await state()).sent.map(x => { try { return JSON.parse(x); } catc
 check("点一下发 op:credits 现查一次", asked.some(m => m.op === "credits"), asked);
 
 
+/* ── 右下角换模型（0.79.1）─────────────────────────────────────
+   那个钮从 0.52.0 起就摆在那儿、有 title，却**从来没绑过点击**，用户拿截图来要的。
+   清单用编好的一份（跟跑夹具这台机器上配了什么无关）：十条，过了出筛选框的线，
+   两个厂商、一条没 key 的。点开之后真 agent 也会回一份 models，**等它落地再灌**，
+   不然它会把编好的这份盖掉（跟文件开头那句「要等 agent 回话」同一条）。 */
+const FAKE_MODELS = { kind: "models", trusted: true, rows: [
+  ...["opus-5.5", "sonnet-5", "haiku-4.5", "fable-5.1", "opus-5"].map((n) => (
+    { name: n, model: "anthropic/claude-" + n, vision: true, has_key: true, using: n === "sonnet-5" })),
+  ...["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna"].map((n) => (
+    { name: n, model: "openai/" + n, vision: true, has_key: true, using: false })),
+  { name: "没配key的", model: "openai/gpt-x", vision: false, has_key: false, using: false },
+] };
+const ops = async () => (await state()).sent.map((x) => { try { return JSON.parse(x); } catch { return {}; } });
+async function openMenu() {
+  await ev(`document.getElementById("model").click(); true`);
+  await sleep(700);
+  await ev(`handle(${JSON.stringify(FAKE_MODELS)}); true`);
+  await sleep(200);
+}
+async function menuState() {
+  return JSON.parse(await ev(`JSON.stringify({
+    open: !document.getElementById("models").hidden,
+    expanded: document.getElementById("model").getAttribute("aria-expanded"),
+    groups: [...document.querySelectorAll("#models .models__group")].map((e) => e.textContent),
+    rows: [...document.querySelectorAll("#models .models__row .models__name")].map((e) => e.textContent),
+    lit: (document.querySelector('#models [aria-selected="true"] .models__name') || {}).textContent || "",
+    now: (document.querySelector('#models [data-now="1"] .models__name') || {}).textContent || "",
+    findShown: !!document.querySelector("#models .models__find") && !document.querySelector("#models .models__find").hidden,
+    focusInFind: document.activeElement === document.querySelector("#models .models__find"),
+    foot: (document.querySelector("#models .models__foot") || {}).textContent || "",
+  })`));
+}
+
+await reset();
+await openMenu();
+let mm = await menuState();
+check("点右下角的模型名弹出清单", mm.open && mm.expanded === "true", mm);
+check("点开时现取一次清单（op:models）", (await ops()).some((m) => m.op === "models"), await ops());
+check("不加厂商小标题，按配置里的顺序排（用户看过说不要小标题）",
+      mm.groups.length === 0 && mm.rows[0] === "opus-5.5" && mm.rows[5] === "gpt-6-luna", mm);
+check("在用的那条标出来、键盘也先停在它上面", mm.now === "sonnet-5" && mm.lit === "sonnet-5", mm);
+check("十条过了线就给筛选框，焦点就在它上面", mm.findShown && mm.focusInFind, mm);
+
+await type("luna");
+mm = await menuState();
+check("打字就筛", mm.rows.join("|") === "gpt-6-luna|gpt-5.6-luna", mm.rows);
+await key("ArrowDown");
+mm = await menuState();
+check("上下键在筛出来的里面走", mm.lit === "gpt-5.6-luna", mm);
+await ev(`window.__sent = []; true`);
+await key("Enter");
+mm = await menuState();
+let got = await ops();
+check("回车换过去：发的是 /model <名字>", got.some((m) => m.op === "command" && m.text === "/model gpt-5.6-luna"), got);
+check("换完清单收起来", !mm.open && mm.expanded === "false", mm);
+
+// esc 只收菜单：一轮正跑着也不能顺手把它打断了（补全菜单 0.50.3 踩过同一个坑）
+await ev(`handle({kind:"status", ready:true, busy:true, mode:"default", name:"sonnet-5", model:"x"}); true`);
+await openMenu();
+mm = await menuState();
+check("跑着的时候说一声「跑完才换」", mm.foot.includes("跑完才换"), mm.foot);
+await ev(`window.__sent = []; true`);
+await key("Escape");
+mm = await menuState();
+got = await ops();
+check("esc 收起清单", !mm.open, mm);
+check("esc 收清单时不打断这一轮", !got.some((m) => m.op === "interrupt"), got);
+await ev(`handle({kind:"status", ready:true, busy:false, mode:"default", name:"sonnet-5", model:"x"}); true`);
+
+await openMenu();
+await ev(`window.__sent = []; true`);
+await ev(`[...document.querySelectorAll("#models .models__row")]
+  .find((li) => li.textContent.includes("没配key的")).click(); true`);
+mm = await menuState();
+got = await ops();
+check("没 key 的那条点不动（换过去必然 401）", mm.open && !got.some((m) => m.op === "command"), { mm, got });
+await ev(`[...document.querySelectorAll("#models .models__row")]
+  .find((li) => li.dataset.now === "1").click(); true`);
+mm = await menuState();
+got = await ops();
+check("点在用的那条只收起来，不白发一条命令", !mm.open && !got.some((m) => m.op === "command"), { mm, got });
+
+await openMenu();
+await call("Input.dispatchMouseEvent", { type: "mousePressed", x: 640, y: 200, button: "left", clickCount: 1 });
+await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: 640, y: 200, button: "left", clickCount: 1 });
+await sleep(200);
+check("点清单外面就收起来", !(await menuState()).open, null);
+
+await ev(`input.value = "/mo"; input.dispatchEvent(new Event("input")); true`);
+await sleep(200);
+await openMenu();
+check("跟补全菜单一次只开一张",
+      (await menuState()).open && (await ev(`document.getElementById("palette").hidden`)), null);
+await ev(`input.value = ""; input.dispatchEvent(new Event("input")); true`);
+await key("Escape");
+
 // 收尾打断：附件那条把 agent 支使去跑活儿了，别留给下一轮
 await ev(`if (window.socket && socket.readyState === 1)
   socket.send(JSON.stringify({op:"interrupt"})); true`);

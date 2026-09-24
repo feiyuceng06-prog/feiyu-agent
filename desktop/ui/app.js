@@ -26,6 +26,8 @@ const streamEl = $("stream");
 const sheetEl = $("sheet");
 const inputEl = $("input");
 const paletteEl = $("palette");
+const modelsEl = $("models");
+const modelPill = $("model");
 
 let socket = null;
 let busy = false;
@@ -573,6 +575,8 @@ function shortPath(raw, cap = 46) {
 function setStatus(s) {
   if (!s) return;
   busy = !!s.busy;
+  // 换模型那张清单底下那句「跑完才换」跟着 busy 走
+  if (!modelsEl.hidden) drawModelsList();
   // **工作台不由 status 说了算。** 换台时旧进程可能还会再推一条 status 过来，
   // 让它写的话状态栏会闪回旧目录。桌面端以 setDesk 为准，浏览器里才用它。
   if (s.workspace && !TAURI) {
@@ -908,6 +912,7 @@ function handle(ev) {
     case "models":
       models = ev;
       if (shelfOpen()) drawShelf();
+      drawModelsList();
       break;
 
     case "settings":
@@ -2718,6 +2723,7 @@ function paint() {
     return el;
   }));
   paletteEl.hidden = false;
+  openModels(false);          // 两张清单占的是同一块地方，一次只开一张
   /* **选中那条要滚进视野。** 菜单最高 16rem，命令有十几条，
      按 ↑↓ 走到第八条之后高亮就跑到看不见的地方去了（用户拿截图来问过）。
      `block: "nearest"` —— 用 "center" 的话每按一下整个列表都在跳。 */
@@ -2809,8 +2815,158 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
+/* ── 右下角换模型 ───────────────────────────────────────────
+   点那个模型名 = 在它头顶弹一张清单，点一条就换过去。这个钮从 0.52.0 起就摆在那儿，
+   有 title、悬停会变色，**却从来没绑过点击** —— 看着能点其实是死的（0.77.1 那条：
+   比不给还糟）。用户拿截图来要的。
+
+   **换还是走 `/model <名字>`**（One action, one home），跟设置面板那张表同一条路；
+   这儿只是把「敲命令」换成「点一下」。清单每次打开都现取（`models` 那个 op）——
+   设置里刚加的那条得立刻出现在这儿。
+   一轮正跑着的时候命令会排在它后面，所以要说一声「这一轮跑完才换过去」，
+   不然点了没动静，跟以前一样像是死的。 */
+// moved：人动过键盘没有。没动过的话高亮一直跟着「在用的那条」—— 清单是点开之后才
+// 取回来的，第一次画的时候还没有它，定死成第 0 条就停在了别人身上
+const menu = { find: "", at: 0, moved: false, list: null, foot: null, box: null };
+// 清单长了才给筛选框：三五条的时候它只是多一个要看的东西
+const MENU_FIND_AFTER = 8;
+
+function modelsOpen() { return !modelsEl.hidden; }
+
+function menuRows() {
+  const q = menu.find.trim().toLowerCase();
+  const rows = rowsOf(models && models.rows);
+  return q ? rows.filter((r) => (r.name + " " + r.model).toLowerCase().includes(q)) : rows;
+}
+
+function openModels(on) {
+  modelsEl.hidden = !on;
+  modelPill.setAttribute("aria-expanded", String(on));
+  if (!on) {
+    // 焦点还在清单里的话还给输入框，不然它落在一个藏起来的元素上，键盘就没处去了
+    if (modelsEl.contains(document.activeElement)) inputEl.focus();
+    return;
+  }
+  hidePalette();
+  menu.find = "";
+  menu.at = 0;
+  menu.moved = false;
+  modelsEl.replaceChildren();
+  const card = document.createElement("div");
+  card.className = "models__card";
+  menu.box = document.createElement("input");
+  menu.box.className = "models__find";
+  menu.box.type = "search";
+  menu.box.placeholder = "筛一下…";
+  menu.box.setAttribute("aria-label", "筛选模型");
+  menu.box.spellcheck = false;
+  menu.box.oninput = () => {
+    menu.find = menu.box.value;
+    menu.at = 0;
+    menu.moved = true;
+    drawModelsList();
+  };
+  menu.list = document.createElement("ul");
+  menu.list.className = "models__list";
+  menu.list.setAttribute("role", "listbox");
+  menu.list.setAttribute("aria-label", "模型");
+  menu.list.tabIndex = -1;
+  menu.foot = document.createElement("p");
+  menu.foot.className = "models__foot";
+  card.append(menu.box, menu.list, menu.foot);
+  modelsEl.append(card);
+  send({ op: "models" });
+  drawModelsList();
+}
+
+function drawModelsList() {
+  if (!modelsOpen() || !menu.list) return;
+  const all = rowsOf(models && models.rows);
+  const rows = menuRows();
+  // 键盘只在点得动的那几条之间走：没 key 的换过去必然 401
+  const live = rows.filter((r) => r.has_key);
+  if (!menu.moved) menu.at = Math.max(0, live.findIndex((r) => r.using));
+  menu.at = Math.max(0, Math.min(menu.at, live.length - 1));
+  const lit = live[menu.at];
+
+  menu.box.hidden = all.length <= MENU_FIND_AFTER;
+  // 点开那一刻清单还没取回来的话，筛选框是藏着的、焦点落在列表上；
+  // 清单到了、框出来了，焦点得跟过去 —— 不然打的字没地方去
+  if (!menu.box.hidden && document.activeElement === menu.list) menu.box.focus();
+  // **不分组、不加厂商小标题**（用户看过说不要）：每一行底下那行 id 本来就带着厂商，
+  // 小标题是同一件事说两遍。顺序就是配置里的顺序，那是他自己排的
+  const out = [];
+  rows.forEach((row) => {
+    const li = document.createElement("li");
+    li.className = "models__row";
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", String(row === lit));
+    if (row.using) li.dataset.now = "1";
+    if (!row.has_key) li.setAttribute("aria-disabled", "true");
+    li.innerHTML = `<span class="models__name"></span><span class="models__id"></span>`;
+    li.querySelector(".models__name").textContent = row.name;
+    li.querySelector(".models__id").textContent =
+      row.model + (row.vision ? " · 认图" : "") + (row.has_key ? "" : " · 没有 key");
+    if (row.using) li.insertAdjacentHTML("beforeend", `<span class="models__now">在用</span>`);
+    li.onclick = () => pickModel(row);
+    out.push(li);
+  });
+  menu.list.replaceChildren(...out);
+  const hot = menu.list.querySelector('[aria-selected="true"]');
+  if (hot) hot.scrollIntoView({ block: "nearest" });
+
+  menu.foot.textContent = !models ? "读取中…"
+    : !all.length ? "还没配模型 —— Ctrl K 打开设置，在「模型」里加一条"
+    : !rows.length ? "没有叫这个的"
+    : busy ? "这一轮还在跑，跑完才换过去"
+    : "";
+  menu.foot.hidden = !menu.foot.textContent;
+}
+
+function pickModel(row) {
+  if (!row || !row.has_key) return;
+  openModels(false);
+  if (!row.using) tune("/model " + row.name);
+}
+
+modelPill.onclick = () => {
+  openModels(!modelsOpen());
+  if (!modelsOpen()) return;
+  // 条数多的时候直接能打字筛；少的时候焦点给清单，上下键照样能走
+  (menu.box.hidden ? menu.list : menu.box).focus();
+};
+
+modelsEl.addEventListener("keydown", (e) => {
+  const live = menuRows().filter((r) => r.has_key);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (!live.length) return;
+    menu.at = (menu.at + (e.key === "ArrowDown" ? 1 : live.length - 1)) % live.length;
+    menu.moved = true;
+    drawModelsList();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    pickModel(live[menu.at]);
+  } else if (e.key === "Escape") {
+    // **要 stopPropagation**，理由跟补全菜单那条一样：冒到 document 上，
+    // 那边看见菜单已经关了、一轮又正跑着，就把这一轮打断了
+    e.preventDefault();
+    e.stopPropagation();
+    openModels(false);
+  }
+});
+
+// 点清单外面就收起来。钮本身除外 —— 它的 onclick 自己管开关，这儿再关一次就开不开了
+document.addEventListener("mousedown", (e) => {
+  if (modelsOpen() && !modelsEl.contains(e.target) && !modelPill.contains(e.target)) {
+    openModels(false);
+  }
+});
+
 // esc 中断，跟终端一个键。菜单开着时上面那段会把事件截住。
 document.addEventListener("keydown", (e) => {
+  // 换模型那张清单开着、焦点却不在它里面（刚点完那个钮）：esc 只收起它
+  if (e.key === "Escape" && modelsOpen()) { e.preventDefault(); openModels(false); return; }
   // 面板开着时 esc 是"退回对话"，不是"打断这一轮" —— 那儿根本没有正在跑的一轮
   if (e.key === "Escape" && shelfOpen()) { e.preventDefault(); showShelf(false); return; }
   if (e.key === "Escape" && botShopOpen()) { e.preventDefault(); showBotShop(false); return; }

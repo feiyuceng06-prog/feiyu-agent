@@ -143,13 +143,15 @@
 <footer class="composer" id="composer">
   <ul class="clips" id="clips" hidden></ul>
   <div class="palette" id="palette" hidden></div>
+  <div class="models" id="models" hidden></div>
   <div class="composer__row">
     <label class="chip chip--attach" title="上传文件到工作区">
       ＋<input id="file" type="file" multiple hidden>
     </label>
     <textarea id="input" rows="1" spellcheck="false" autocomplete="off"
               placeholder="我们要做什么？"></textarea>
-    <button id="model" class="pick" type="button" title="切换模型">—</button>
+    <button id="model" class="pick" type="button" title="切换模型"
+            aria-haspopup="listbox" aria-expanded="false" aria-controls="models">—</button>
     <button id="send" class="go" type="button" title="发送">→</button>
     <button id="stop" class="go go--stop" type="button" title="中断" hidden>■</button>
   </div>

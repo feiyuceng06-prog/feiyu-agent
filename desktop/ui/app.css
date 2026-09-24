@@ -1645,6 +1645,105 @@ body[data-side="off"] .side { border-right: 0; }
 
 .pick:hover { color: var(--text); border-color: var(--line); }
 
+/* 它会弹出一张清单 —— 光一个名字看不出来能点（用户就是这么以为它点不动的）
+   三角钉在右边、不跟着文字流：名字长了被省略号截断时，它不能跟着一起被截掉 */
+.pick { position: relative; padding-right: 1.5em; }
+.pick::after {
+  content: "▾";
+  position: absolute;
+  right: 0.5em;
+  top: 50%;
+  translate: 0 -50%;
+  color: var(--faint);
+}
+
+/* 换模型那张清单。跟补全菜单占同一块地方、同一套线框，但靠右 —— 挨着那个模型名 */
+.models {
+  display: flex;
+  justify-content: flex-end;
+  max-width: var(--content);
+  margin: 0 auto var(--space-2);
+  animation: rise 160ms var(--rise-ease) both;
+}
+
+.models__card {
+  width: min(26rem, 100%);
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+}
+
+.models__find {
+  display: block;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.models__find:focus { outline: 0; border-bottom-color: var(--accent); }
+.models__find::placeholder { color: var(--faint); }
+.models__find::-webkit-search-cancel-button { display: none; }
+
+/* 33 条配置是真的有（用户那台就是），不封顶的话一张清单能把输入框顶出屏幕 */
+.models__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: min(20rem, 50vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.models__list:focus { outline: 0; }
+
+.models__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.models__row:hover, .models__row[aria-selected="true"] { background: var(--panel); }
+/* 在用的那条：左边一道 accent 线 —— accent 只做线和面，跟设置里那张表一个标法 */
+.models__row[data-now="1"] { box-shadow: inset 2px 0 0 var(--accent); }
+.models__row[aria-disabled="true"] { cursor: default; opacity: 0.5; }
+.models__row[aria-disabled="true"]:hover { background: none; }
+
+.models__name { font-size: var(--text-sm); line-height: 20px; color: var(--text); }
+
+.models__id {
+  grid-column: 1;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 16px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.models__now {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  font-size: var(--text-2xs);
+  color: var(--muted);
+}
+
+.models__foot {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-2xs);
+  color: var(--muted);
+}
+
 .go {
   width: 1.75rem;
   height: 1.75rem;
@@ -2087,6 +2186,7 @@ body[data-side="off"] .scrim { display: none; }
    （量高度、排 requestAnimationFrame 的几处绕过了 CSS）。 */
 @media (prefers-reduced-motion: reduce) {
   [data-fresh],
+  .models,
   .pick-bar,
   .churn__grid i,
   .think:not([data-done]) .think__mark { animation: none; }
@@ -2680,6 +2780,41 @@ body[data-side="off"] .scrim { display: none; }
 }
 
 :root[data-theme="anthropic"] .palette__item { border-bottom: 0; border-radius: var(--radius); }
+
+/* 换模型那张清单：claude.ai 那个模型菜单的样子 —— 浮起来的圆角卡片，在用的那条打一个陶土色的勾 */
+:root[data-theme="anthropic"] .models__card {
+  padding: var(--space-1);
+  border-color: var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+}
+
+:root[data-theme="anthropic"] .models__find {
+  margin-bottom: var(--space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 6px var(--space-3);
+  background: var(--bg);
+}
+
+:root[data-theme="anthropic"] .models__find:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.15);
+}
+
+:root[data-theme="anthropic"] .models__row { border-radius: var(--radius); padding: 6px 10px; }
+
+:root[data-theme="anthropic"] .models__row:hover,
+:root[data-theme="anthropic"] .models__row[aria-selected="true"] { background: var(--card); }
+
+:root[data-theme="anthropic"] .models__row[data-now="1"] { box-shadow: none; }
+:root[data-theme="anthropic"] .models__id { font-family: var(--font-sans); font-size: 11.5px; }
+
+/* 「在用」两个字换成一个勾：字还在（读屏读得到），只是不画 */
+:root[data-theme="anthropic"] .models__now { font-size: 0; }
+:root[data-theme="anthropic"] .models__now::before { content: "✓"; font-size: 15px; color: var(--accent); }
+:root[data-theme="anthropic"] .models__foot { border-top-color: var(--line); padding: var(--space-2) 10px var(--space-1); }
 :root[data-theme="anthropic"] .palette__item[aria-selected="true"] { background: var(--card); }
 
 /* ── 空对话：衬线大字的问候 ───────────────────────────────────
