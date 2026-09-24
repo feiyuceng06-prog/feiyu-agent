@@ -14,6 +14,7 @@
  *   0_hello —— 一条消息都没有时的「开始」那块
  *   13_anthropic—— Anthropic 暖色主题（跟复古并存，底色不能撞）
  *   3_narrow—— 390px 宽，看 meta-rail 塌成单列之后还成不成立
+ *   23–26  —— 0.80.0：空对话那一组居中、发出第一句落到底、「以下是新的」、确认卡的键帽
  */
 
 import { spawn } from "node:child_process";
@@ -670,8 +671,15 @@ for (const [w, want] of [[720, 0], [760, 240]]) {
   await cdp.call("Emulation.setDeviceMetricsOverride",
     { width: w, height: 800, deviceScaleFactor: 1, mobile: false });
   await sleep(400);
+  // 0.80.0 起侧栏收起是**整块滑出视口**（定宽 240，不再压成 0 宽），
+  // 所以量的是它露在屏幕上的那一截；滑完之后它还是 visibility: hidden
   const got = JSON.parse(await cdp.eval(`JSON.stringify({
-    side: Math.round(document.getElementById("side").getBoundingClientRect().width),
+    side: (() => {
+      const el = document.getElementById("side");
+      const r = el.getBoundingClientRect();
+      if (getComputedStyle(el).visibility === "hidden") return 0;
+      return Math.round(Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)));
+    })(),
     body: Math.round(document.querySelector(".block__body").getBoundingClientRect().x),
     scrim: !document.getElementById("scrim").hidden,
   })`));
@@ -1276,6 +1284,228 @@ if (menuBad.length) {
   process.exitCode = 1;
 } else {
   console.log("换模型的清单：两个主题都在视口里，390px 下不横出去");
+}
+
+/* ── 0.80.0：开口、点头、没看见的、手感 ──────────────────────
+   量的全是「截图上看着没毛病、其实不对」的那一类：居中是不是真居中、滑完是不是
+   真落回了底、长对话的开头是不是真滚得上去、线是不是铺在第一块新的前面、
+   人在跟前的时候到底叫没叫。键盘答确认卡那些在 input.mjs 里（要真按键）。 */
+const v80 = [];
+const want80 = (ok, msg, detail) => { if (!ok) v80.push(`${msg}：${JSON.stringify(detail)}`); };
+
+await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+await sleep(1500);
+// 换过页，报错收集要重新挂 —— 不然文末那条「页面无 JS 报错」量的是一张空表
+await cdp.eval(`window.__errs = []; addEventListener("error", (e) => __errs.push(String(e.message)));
+  setTheme("anthropic"); true`);
+for (let i = 0; i < 60; i++) {
+  if (await cdp.eval(`commands.length > 0`)) break;
+  await sleep(500);
+}
+await sleep(800);
+await cdp.eval(`stream.replaceChildren(); syncHello(); true`);
+await sleep(700);
+
+// 一、空对话：问候 + 例子 + 输入框是一组，摆在视觉中心（上下留白 42 : 58）
+const geo80 = async () => JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const r = (el) => el.getBoundingClientRect();
+  const hello = document.getElementById("hello");
+  const row = r(document.querySelector(".composer__row"));
+  const from = r(sheetEl).top, to = r(document.querySelector(".status")).top;
+  return { above: Math.round((hello ? r(hello).top : 0) - from), below: Math.round(to - row.bottom),
+           rowTop: Math.round(row.top), helloBottom: hello ? Math.round(r(hello).bottom) : 0 };
+})())`));
+const g80 = await geo80();
+const share = g80.above / (g80.above + g80.below);
+want80(share > 0.36 && share < 0.48 && g80.helloBottom <= g80.rowTop,
+  "空对话那一组没摆在视觉中心（上下留白该是 42:58、问候在输入框上面）", g80);
+console.log("拍了", await cdp.shot("23_anthropic_center", { width: 1280, height: 900, beyond: false }));
+const hit80 = await cdp.eval(`(() => { const b = document.getElementById("side-toggle").getBoundingClientRect();
+  return document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)?.id || ""; })()`);
+want80(hit80 === "side-toggle", "抬起来的那一组盖住了标题栏的按钮", hit80);
+
+// 敲三行：输入卡片的顶边不动、往下长（字不在眼皮底下跳）
+await cdp.eval(`inputEl.value = "一\\n二\\n三"; inputEl.dispatchEvent(new Event("input")); true`);
+await sleep(300);
+const g3 = await geo80();
+want80(Math.abs(g3.rowTop - g80.rowTop) <= 1, "空对话里敲字换行，输入卡片的顶边跟着跳了",
+  { before: g80.rowTop, after: g3.rowTop });
+await cdp.eval(`inputEl.value = ""; inputEl.dispatchEvent(new Event("input")); setTheme("light"); true`);
+await sleep(300);
+const trLight = await cdp.eval(`getComputedStyle(document.querySelector(".composer")).translate`);
+want80(trLight === "none", "默认主题的空对话也被抬起来了（只该对 Anthropic 那套皮生效）", trLight);
+await cdp.eval(`setTheme("anthropic"); true`);
+await sleep(300);
+
+// 二、发出第一句：输入框和那句话一起落到底，问候撤干净
+await cdp.eval(`glideArm = Date.now();
+  handle({ kind: "turn_start", text: "把 build.mjs 里读 frontmatter 那段抽成一个函数" }); true`);
+await sleep(120);
+const mid80 = await cdp.eval(`getComputedStyle(document.querySelector(".composer")).translate`);
+console.log("拍了", await cdp.shot("24_anthropic_glide", { width: 1280, height: 900, beyond: false }));
+const end80 = JSON.parse(await cdp.eval(`JSON.stringify({
+  tr: getComputedStyle(document.querySelector(".composer")).translate,
+  hello: !!document.getElementById("hello"), leaving: document.querySelectorAll("[data-leaving]").length,
+  glide: document.body.dataset.glide ?? null })`));
+want80(mid80 !== "none" && end80.tr === "none" && !end80.hello && !end80.leaving && end80.glide === null,
+  "第一句发出去之后没滑回底（要有中间态、滑完归零、问候撤干净）", { mid80, end80 });
+
+// 三、长对话：开头滚得上去，到底了 atBottom 就是真。0.74.0 那条 flex-end 在两个引擎里各错一半：
+//     Chrome 把开头放到滚动原点上面（够不着），WebKitGTK 把原点翻到底边（atBottom 恒假）
+await feed(Array.from({ length: 40 }, (_, i) => ({ kind: "note", level: "notice", text: `第 ${i} 条` })));
+await sleep(300);
+const sc80 = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const down = { st: Math.round(sheetEl.scrollTop), max: sheetEl.scrollHeight - sheetEl.clientHeight,
+                 bottom: atBottom(), toEndHidden: toEnd.hidden, jc: getComputedStyle(sheetEl).justifyContent };
+  sheetEl.scrollTop = 0;
+  const first = Math.round(streamEl.firstElementChild.getBoundingClientRect().top - sheetEl.getBoundingClientRect().top);
+  return { ...down, first, topIsBottom: atBottom() };
+})())`));
+want80(sc80.max > 0 && Math.abs(sc80.st - sc80.max) <= 1 && sc80.bottom && sc80.toEndHidden
+  && sc80.first >= 0 && !sc80.topIsBottom && sc80.jc !== "flex-end",
+  "长对话的滚动不对（开头要滚得上去、到底时 atBottom 为真、「回到最新」藏着）", sc80);
+
+// 四、没看见的：往回翻着的时候底下长出来的，线铺在第一块新的前面，药丸上数着
+await cdp.eval(`sheetEl.scrollTop = 0; sheetEl.dispatchEvent(new Event("scroll")); true`);
+await sleep(200);
+await feed([
+  { kind: "tool_start", name: "bash", label: "Bash", args: { command: "npm test" }, target: "npm test" },
+  { kind: "tool_result", summary: "退出码 0", is_error: false },
+  { kind: "note", level: "notice", text: "测试全过" },
+]);
+await sleep(400);
+const un80 = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const mark = document.querySelector(".unread");
+  return { count: unseen.count, marks: document.querySelectorAll(".unread").length,
+           beforeTool: !!mark && mark.nextElementSibling.classList.contains("block--tool"),
+           pill: toEnd.dataset.count ?? null, label: toEnd.querySelector(".to-end__n").textContent,
+           hidden: toEnd.hidden, st: sheetEl.scrollTop };
+})())`));
+want80(un80.count === 2 && un80.marks === 1 && un80.beforeTool && un80.pill === "1"
+  && !un80.hidden && un80.label.includes("2") && un80.st === 0,
+  "往回翻时底下长出来的没标出来（线在第一块新的前面、药丸数着 2 条、没把人拽下去）", un80);
+await cdp.eval(`toEnd.click(); true`);
+await sleep(900);
+// 线不在（上一条已经红了）也别在这儿抛 —— 夹具该报红，不该崩
+const jump80 = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const mark = document.querySelector(".unread");
+  return { markTop: mark ? Math.round(mark.getBoundingClientRect().top - sheetEl.getBoundingClientRect().top) : -1,
+           h: sheetEl.clientHeight, count: unseen.count };
+})())`));
+want80(jump80.markTop >= 0 && jump80.markTop < jump80.h && jump80.count === 0,
+  "点「N 条新」没落到那条线上（线要进视野、看到底之后数清零）", jump80);
+console.log("拍了", await cdp.shot("25_anthropic_unread", { width: 1280, height: 900, beyond: false }));
+
+// 五、人不在跟前才叫：人在的时候一声不吭；不在时要你点头带命令原文，跑完带它的第一句话
+await cdp.eval(`window.__notes = []; notifyUser = (t, b) => __notes.push([t, b]);
+  handle({ kind: "status", ready: true, busy: true, mode: "default", name: "m", model: "m" });
+  handle({ kind: "ask", id: 9301, type: "approve", tool: "bash", label: "Bash", target: "", args: { command: "npm test" } });
+  true`);
+const here80 = await cdp.eval(`__notes.length`);
+await cdp.eval(`window.dispatchEvent(new Event("blur"));
+  handle({ kind: "ask", id: 9302, type: "approve", tool: "bash", label: "Bash", target: "",
+           args: { command: "rm -rf dist/" } });
+  turnFrom = Date.now() - 45000;
+  lastSaid = "## 全绿了\\n三处都修好。";
+  handle({ kind: "turn_end" });
+  true`);
+const away80 = JSON.parse(await cdp.eval(`JSON.stringify(__notes)`));
+await cdp.eval(`window.dispatchEvent(new Event("focus"));
+  handle({ kind: "status", ready: true, busy: false, mode: "default", name: "m", model: "m" }); true`);
+want80(here80 === 0 && away80.length === 2 && away80[0][0].includes("回不去") && away80[0][1].includes("rm -rf dist/")
+  && away80[1][0].startsWith("跑完了") && away80[1][1] === "全绿了",
+  "系统通知叫得不对（人在不叫；不在时要你点头带命令、跑完带第一句）", { here80, away80 });
+
+// 六、浮层：这套皮里浮着（不挤对话栏）；收起时 hidden 立刻为真，画面上先淡出再藏
+const sheetH0 = await cdp.eval(`sheetEl.clientHeight`);
+await cdp.eval(`inputEl.value = "/"; inputEl.dispatchEvent(new Event("input")); true`);
+await sleep(300);
+const pal80 = JSON.parse(await cdp.eval(`JSON.stringify({ open: !paletteEl.hidden,
+  pos: getComputedStyle(paletteEl).position, sheetH: sheetEl.clientHeight })`));
+await cdp.eval(`inputEl.value = ""; inputEl.dispatchEvent(new Event("input")); true`);
+const out80 = JSON.parse(await cdp.eval(`JSON.stringify({ hidden: paletteEl.hidden,
+  leaving: paletteEl.dataset.leaving ?? null, display: getComputedStyle(paletteEl).display })`));
+await sleep(400);
+const gone80 = await cdp.eval(`getComputedStyle(paletteEl).display`);
+want80(pal80.open && pal80.pos === "absolute" && pal80.sheetH === sheetH0 && out80.hidden
+  && out80.leaving === "1" && out80.display !== "none" && gone80 === "none",
+  "补全菜单的进出不对（浮着不挤对话栏；收起先淡出再藏）", { sheetH0, pal80, out80, gone80 });
+
+// 七、侧栏：滑出去的，不是一下子没的；滑完藏起来（Tab 走不进去）
+await cdp.eval(`setSide(false); true`);
+await sleep(100);
+const sMid80 = await cdp.eval(`Math.round(document.getElementById("side").getBoundingClientRect().right)`);
+await sleep(400);
+const sEnd80 = JSON.parse(await cdp.eval(`JSON.stringify({
+  right: Math.round(document.getElementById("side").getBoundingClientRect().right),
+  vis: getComputedStyle(document.getElementById("side")).visibility })`));
+await cdp.eval(`setSide(true); true`);
+await sleep(400);
+want80(sMid80 > 0 && sMid80 < 240 && sEnd80.right <= 0 && sEnd80.vis === "hidden",
+  "侧栏收起不是滑出去的（中途该露一截、滑完藏起来）", { sMid80, sEnd80 });
+
+// 八、确认卡：四个键帽，到点浮出来（按键那些在 input.mjs）
+await cdp.eval(`stream.replaceChildren(); dropUnread();
+  handle({ kind: "status", ready: true, busy: true, mode: "default", name: "m", model: "m" });
+  handle({ kind: "turn_start", text: "跑一遍测试" });
+  handle({ kind: "tool_start", name: "bash", label: "Bash", args: { command: "npm test" }, target: "npm test" });
+  handle({ kind: "ask", id: 9401, type: "approve", tool: "bash", label: "Bash", target: "",
+           args: { command: "npm test" }, rule: "Bash(npm:*)" });
+  true`);
+// 看的是「接不接键」那个状态，不是键帽的 opacity —— 没有等待的话，量的那一刻
+// 淡入刚起步，opacity 恰好还是 0，照样骗得过去（回退验证时真被它骗了一次）
+const early80 = await cdp.eval(`document.querySelector(".ask").dataset.armed ? "armed" : "0"`);
+await sleep(900);
+const keys80 = JSON.parse(await cdp.eval(`JSON.stringify([...document.querySelectorAll(".ask .btn__key")]
+  .map((k) => k.textContent + ":" + getComputedStyle(k).opacity))`));
+console.log("拍了", await cdp.shot("26_anthropic_ask_keys", { width: 1280, height: 900, beyond: false }));
+want80(early80 === "0" && keys80.join() === "1:1,2:1,3:1,4:1",
+  "确认卡的键帽不对（四个 1–4，刚出现时不露、到点浮出来）", { early80, keys80 });
+await cdp.eval(`handle({ kind: "status", ready: true, busy: false, mode: "default", name: "m", model: "m" });
+  setTheme("light"); true`);
+
+// 九、系统里关了动效：上面这些一个都不演 —— 「一句话关掉」那条的延长线。
+//     JS 那侧的 REDUCED 是开页面时读一次的，所以要先模拟媒体查询、再重新打开页面
+await cdp.call("Emulation.setEmulatedMedia",
+  { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+await cdp.call("Page.navigate", { url });
+await sleep(1500);
+await cdp.eval(`window.__errs = []; addEventListener("error", (e) => __errs.push(String(e.message)));
+  setTheme("anthropic"); true`);
+for (let i = 0; i < 60; i++) {
+  if (await cdp.eval(`commands.length > 0`)) break;
+  await sleep(500);
+}
+await sleep(800);
+await cdp.eval(`stream.replaceChildren(); syncHello(); true`);
+await sleep(300);
+const rm80 = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  glideArm = Date.now();
+  handle({ kind: "turn_start", text: "你好" });
+  const out = { reduced: REDUCED, motion: document.body.dataset.motion ?? null,
+    glide: document.body.dataset.glide ?? null, leaving: document.querySelectorAll("[data-leaving]").length,
+    tr: getComputedStyle(document.querySelector(".composer")).translate };
+  inputEl.value = "/"; inputEl.dispatchEvent(new Event("input"));
+  inputEl.value = ""; inputEl.dispatchEvent(new Event("input"));
+  out.palLeaving = paletteEl.dataset.leaving ?? null;
+  handle({ kind: "ask", id: 9501, type: "approve", tool: "bash", label: "Bash", target: "", args: { command: "ls" } });
+  document.querySelector(".ask .btn").click();
+  const tick = document.querySelector(".ask__tick");
+  out.tick = tick ? getComputedStyle(tick).strokeDashoffset : "没有勾";
+  return out;
+})())`));
+await cdp.call("Emulation.setEmulatedMedia", { features: [] });
+want80(rm80.reduced && rm80.motion === null && rm80.glide === null && rm80.leaving === 0 && rm80.tr === "none"
+  && rm80.palLeaving === null && parseFloat(rm80.tick) === 0,
+  "系统关了动效，新加的这些还在演（滑、淡出、侧栏过渡都该没有，勾要直接画好）", rm80);
+
+if (v80.length) {
+  console.error("0.80.0 那几处：", v80.join("；"));
+  process.exitCode = 1;
+} else {
+  console.log("0.80.0：空对话居中、敲字往下长、滑回底、长对话滚得到头、没看见的有线有数、"
+    + "人不在才叫、浮层淡出、侧栏滑出、键帽到点浮出、关了动效一个都不演");
 }
 
 const pageErrors = await cdp.eval("JSON.stringify(window.__errs || [])");

@@ -115,6 +115,30 @@
   --slide-dur: 260ms;
   --slide-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --fold-dur: 280ms;
+
+  /* 第三组（0.80.0）：**进场和离场分开给**。
+     NN/g：出现要比消失慢（它举的例子是弹窗出现 300ms、消失 200–250ms）——
+     出现时人要看清它是什么，消失时人已经不看它了，拖着只是挡路。
+     曲线取 Material 3 的三条 emphasized：
+       --ease-enter  进场，前段快后段缓，落得轻（emphasized-decelerate）
+       --ease-exit   离场，起步缓、越走越快，走得干脆（emphasized-accelerate）
+       --ease-move   已经在屏上的东西挪位置，两头都缓（emphasized 的 CSS 近似）
+     时长按「动的东西多大、走多远」给，不是一个数用到底：
+       --press-dur  按下去那一下。<100ms 才算「即时」（NN/g 的 0.1 秒那条线）
+       --pop-in / --pop-out  小浮层（补全、换模型、划词那条）
+       --side-dur   侧栏收放：一整列 240px
+       --glide-dur  空对话的输入框从正中落到底：全窗口的大位移，NN/g 说只有这种才配 400ms 以上 */
+  --ease-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --ease-move: cubic-bezier(0.2, 0, 0, 1);
+  --press-dur: 90ms;
+  --pop-in: 200ms;
+  --pop-out: 120ms;
+  --side-dur: 240ms;
+  --glide-dur: 460ms;
+  /* 侧栏自己的宽。跟 --side（那一列的宽）分开：收起时列宽过渡到 0，
+     侧栏本身不变宽窄、整块往左滑 —— 见「侧栏收放」 */
+  --side-w: 15rem;
 }
 
 /* ── 复古 ───────────────────────────────────────────────────
@@ -373,10 +397,15 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* 定宽，不跟着那一列变窄 —— 收起时列宽过渡到 0，它自己整块往左平移出去
+     （见文末「侧栏收放」）。跟着列变窄的话，一路上导航字挤成一团、会话标题一截截
+     被省略号吃掉，滑出去的就不是侧栏而是一堆碎字。 */
+  width: var(--side-w);
 }
 
 body[data-side="off"] { --side: 0px; }
-body[data-side="off"] .side { border-right: 0; }
+/* 收起来之后 `visibility: hidden`：人看不见的东西，Tab 也不该走进去 */
+body[data-side="off"] .side { translate: -100% 0; visibility: hidden; }
 
 /* 工作台选择器。**摆在侧栏最上面**：它是「这一切发生在哪儿」，
    比会话列表更靠上一层，跟 Hermes 把 Projects 放侧栏是同一个道理。 */
@@ -679,7 +708,16 @@ body[data-side="off"] .side { border-right: 0; }
      让它待在眼睛和手都在的地方。满屏之后这条不起作用，照常从上往下滚。 */
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
+  /* **不能写 `justify-content: flex-end`**（0.74.0 写过，0.80.0 撤掉）。
+     内容超出一屏之后，两个引擎对它的处理是反的，而且都不对：
+       · Chrome（夹具用的）把超出的部分放到滚动原点**上面**，够不着 ——
+         scrollHeight == clientHeight，长对话的开头永远滚不上去；
+       · WebKitGTK（产品用的）把它当 column-reverse 处理，scrollTop 变成
+         −588…0、0 在最底下。于是 `atBottom()` 在产品里恒为 false：
+         「回到最新」一直挂着，往回翻着看时底下一长、正在读的那段就被往上推走
+         （偏移量是从底边量的）—— 正是 `keepBottom` 那条注释说「最烦人」的事。
+     「内容短时贴底」只靠下面 `.stream` 的 `margin-top: auto` 就够了：
+     有富余时它把内容推到底，超出时它是 0、内容从顶上排、滚动原点照常。 */
 }
 
 .stream {
@@ -1663,7 +1701,8 @@ body[data-side="off"] .side { border-right: 0; }
   justify-content: flex-end;
   max-width: var(--content);
   margin: 0 auto var(--space-2);
-  animation: rise 160ms var(--rise-ease) both;
+  /* 从右下角长出来 —— 那个模型名就在它右下角。进出场见文末「浮层」 */
+  transform-origin: 100% 100%;
 }
 
 .models__card {
@@ -1795,6 +1834,8 @@ body[data-side="off"] .side { border-right: 0; }
   border: 1px solid var(--line-strong);
   max-height: 16rem;
   overflow-y: auto;
+  /* 从左下角长出来：它补的是你刚在行首敲的那个 `/` 或 `@` */
+  transform-origin: 0 100%;
 }
 
 .palette__item {
@@ -1845,7 +1886,6 @@ body[data-side="off"] .scrim { display: none; }
   .side { position: fixed; inset: var(--bar) auto var(--bar-s) 0; width: 15rem; background: var(--bg); z-index: 3; }
   body { grid-template-columns: minmax(0, 1fr); }
   .sheet, .composer { grid-column: 1; }
-  body[data-side="off"] .side { width: 0; }
   /* 标签这时候是堆在正文上面的，没有 rail 那一列了 ——
      再画那条纵线就成了一条贴着左边、什么也不标的边框。 */
   .stream::before { display: none; }
@@ -1890,9 +1930,23 @@ body[data-side="off"] .scrim { display: none; }
               border-color var(--tap-dur) var(--slide-ease);
 }
 
-.chip:active, .btn:active, .go:active, .pick:active, .win:active,
-.hello__pick:active, .fold__more:active, .code__copy:active,
-.to-end:active, .pick-bar button:active { scale: 0.94; }
+/* 0.80.0 分成两档，按东西的大小给（Vercel 那份界面准则：「缓动跟着被动的东西走」）：
+   小方钮缩得明显一点才看得出来；带字的按钮宽，同样 0.94 两边各收进去十几像素，
+   像整块塌下去 —— 收到 0.97。
+   **按下去那一下要快（--press-dur），松手才回弹**：原来按下和松开共用 220ms，
+   按下去的反馈要过 0.1 秒那条线才出来，手感是「黏的」。
+   `[data-pressed]` 是键盘按的（确认卡的数字键）—— 键盘没有 :active。 */
+.chip:active, .go:active, .win:active, .code__copy:active, .to-end:active { scale: 0.92; }
+
+.btn:active, .pick:active, .hello__pick:active, .fold__more:active,
+.pick-bar button:active, .btn[data-pressed] { scale: 0.97; }
+
+.chip:active, .go:active, .win:active, .code__copy:active, .to-end:active,
+.btn:active, .pick:active, .hello__pick:active, .fold__more:active,
+.pick-bar button:active, .btn[data-pressed] {
+  transition-duration: var(--press-dur);
+  transition-timing-function: var(--ease-enter);
+}
 
 /* 整行宽的那些只动底色，不缩 */
 .nav, .talk, .desk, .side__tab, .tab {
@@ -2129,8 +2183,12 @@ body[data-side="off"] .scrim { display: none; }
   display: flex;
   background: var(--bg);
   border: 1px solid var(--line-strong);
-  animation: rise 160ms var(--rise-ease) both;
+  /* 从选区那一侧长出来：平时摆在选区上方（原点在底边中间），
+     上面放不下翻到下方时原点跟着翻到顶边 —— `showPick()` 打 data-below */
+  transform-origin: 50% 100%;
 }
+
+.pick-bar[data-below] { transform-origin: 50% 0; }
 
 .pick-bar button {
   appearance: none;
@@ -2161,7 +2219,6 @@ body[data-side="off"] .scrim { display: none; }
   align-self: end;
   z-index: 3;
   margin: 0 var(--space-5) var(--space-3) 0;
-  width: 28px;
   height: 28px;
   appearance: none;
   border: 1px solid var(--line-strong);
@@ -2171,14 +2228,207 @@ body[data-side="off"] .scrim { display: none; }
   font: inherit;
   line-height: 1;
   cursor: pointer;
+  /* 0.80.0：底下有没看过的东西时，方钮往左长出一截「3 条新」。
+     宽度靠第二列 0fr ↔ 1fr 过渡，不用 JS 量字宽；箭头那一列定宽，所以没有字时
+     它还是原来那个 28px 的方块（26 + 两条边） */
+  display: inline-grid;
+  grid-template-columns: 26px 0fr;
+  align-items: center;
+  padding: 0;
+  transition: scale var(--tap-dur) var(--tap-ease),
+              color var(--tap-dur) var(--slide-ease),
+              background var(--tap-dur) var(--slide-ease),
+              border-color var(--tap-dur) var(--slide-ease),
+              grid-template-columns var(--slide-dur) var(--ease-move);
 }
 
 .to-end:hover { color: var(--text); border-color: var(--text); }
+
+.to-end__arrow { text-align: center; }
+.to-end__n { min-width: 0; overflow: hidden; white-space: nowrap; }
+
+/* 右边距放在里面那层：外层是 0fr 那一列，自己带内边距的话缩不到 0 */
+.to-end__n > span {
+  display: block;
+  padding-right: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+}
+
+.to-end[data-count] { grid-template-columns: 26px 1fr; color: var(--text); }
+
+/* 露面时从右下角冒出来，跟浮层同一个进场 —— 它是往回翻时才出现的，
+   一下子蹦出来会让人以为点到了什么 */
+.to-end { transform-origin: 100% 100%; animation: pop-in var(--pop-in) var(--ease-enter) both; }
 
 @media (max-width: 46rem) {
   /* 这一档 body 只有一列，`.sheet` 也挪到第一列了 */
   .to-end { grid-column: 1; }
 }
+
+/* ════════════════════════════════════════════════════════════
+   0.80.0：以人为本的四个时刻 —— 开口、点头、没看见的、手感
+
+   依据（每条落在哪儿，见各小节）：
+     · Apple HIG · Motion —— 动效要有目的；频繁的交互少加动效；
+       别让人等动画放完才能做下一件事
+     · NN/g —— 0.1 / 1 / 10 秒三条线；动效时长 100–500ms，按位移大小给，
+       出现比消失慢；人不在看的时候发生的变化会被错过（变化盲视）
+     · Vercel Web Interface Guidelines —— 动画要能被打断、原点要对、
+       只动 transform / opacity、不写 `transition: all`
+     · Material 3 —— emphasized 那三条缓动曲线（token 在文件头上）
+   ════════════════════════════════════════════════════════════ */
+
+/* ── 浮层：从触发它的地方长出来，走得比来得快 ────────────────
+   补全、换模型、划词那条。原来出现是 160ms 的浮现、消失是一下子没了 ——
+   来得有交代、走得没交代，眼睛会以为是闪了一下。
+   **收起时 `hidden` 立刻就是 true**（键盘、点击、夹具看到的都是「已经收了」），
+   画面上借 `data-leaving` 再多留 --pop-out 那么久淡出去，期间点不到它。
+   `[hidden]` 那条带 !important，所以这儿也得带、而且特指度要更高。 */
+@keyframes pop-in { from { opacity: 0; scale: 0.96; translate: 0 4px; } }
+@keyframes pop-out { to { opacity: 0; scale: 0.98; translate: 0 2px; } }
+
+.palette, .models, .pick-bar { animation: pop-in var(--pop-in) var(--ease-enter) both; }
+
+.palette[hidden][data-leaving] { display: block !important; }
+.models[hidden][data-leaving], .pick-bar[hidden][data-leaving] { display: flex !important; }
+
+.palette[data-leaving], .models[data-leaving], .pick-bar[data-leaving] {
+  animation: pop-out var(--pop-out) var(--ease-exit) both;
+  pointer-events: none;
+}
+
+/* ── 侧栏收放 ────────────────────────────────────────────────
+   原来是一下子没了、正文一下子跳过去 —— 眼睛找不着东西去哪儿了（Apple 说的
+   「帮人明白发生了什么」）。现在那一列的宽度过渡到 0，侧栏本身定宽、同一个时长
+   同一条曲线往左平移：两者同步，侧栏的右边缘就一直贴着那条列线，内容不挤不折，
+   整块滑出去。**只动了一列宽 + 一个 translate**，正文那栏在居中的情况下不重新折行。
+   `data-motion` 等第一帧画完才挂上 —— 不然记住的「收起」在启动时也要演一遍。
+   收起来之后 `visibility` 等滑完才藏（进场时不等），滑的过程中它得看得见。 */
+body[data-motion] { transition: grid-template-columns var(--side-dur) var(--ease-move); }
+
+body[data-motion] .side {
+  transition: translate var(--side-dur) var(--ease-move), visibility 0s linear 0s;
+}
+
+body[data-motion][data-side="off"] .side { transition-delay: 0s, var(--side-dur); }
+
+@keyframes fade-in { from { opacity: 0; } }
+
+.scrim { animation: fade-in var(--side-dur) var(--ease-enter) both; }
+
+/* ── 以下是新的 ──────────────────────────────────────────────
+   NN/g 说的变化盲视：人不在看的时候发生的变化，回来时是看不出来的 ——
+   你往回翻着看、或者切到别的窗口，底下长出来的东西跟原来的连成一片，
+   分不出哪些是新的。在第一条没看过的前面铺一条线。
+   线是 accent（accent 只做线和面，这儿是线）；字走 --muted。
+   铺的时候从右往左画出来：那是「刚放下的一个记号」，不是本来就在那儿的一条边。 */
+.unread {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
+  font-size: var(--text-3xs);
+  line-height: var(--leading-body);
+  letter-spacing: var(--tracking-caps);
+  color: var(--muted);
+  user-select: none;
+}
+
+.unread::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--accent);
+  transform-origin: 100% 50%;
+  animation: lay 480ms var(--ease-enter) both;
+}
+
+@keyframes lay { from { scale: 0 1; } }
+
+/* ── 要你点头 ────────────────────────────────────────────────
+   一、**键盘能答。** 手本来就在键盘上（话是敲进去的），为了点一下同意去摸鼠标，
+       一轮里要来回好几次。按钮上是 1 2 3 4，跟摆的顺序一样。
+       卡片出现后**等一会儿才接键**（app.js 的 ARM_AFTER）：人可能正打着字，
+       卡片弹出来那一刻手指还在往下落 —— 键帽是那一刻之后才浮出来的，
+       它浮出来就是「现在按才算数」。
+   二、**出现时叫一下，然后安静。** 日常那档不上红（那条规矩不动），
+       只是边上亮一下再退回灰 —— 一屏里它是唯一在等你的东西，得让眼睛找到一次。
+   三、**答完收成一行回执**，前面一个勾画出来 —— 告诉你「收到了」，不用猜点没点上。 */
+.btn__key {
+  display: inline-block;
+  min-width: 14px;
+  margin-left: var(--space-2);
+  padding: 0 3px;
+  border: 1px solid var(--line-strong);
+  font: var(--w-regular) var(--text-3xs) / 12px var(--font-mono);
+  letter-spacing: 0;
+  text-align: center;
+  vertical-align: 1px;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity var(--pop-in) var(--ease-enter);
+}
+
+.btn--primary .btn__key { color: inherit; border-color: currentColor; }
+.ask[data-armed] .btn__key { opacity: 1; }
+
+@keyframes ask-call { 0%, 30% { border-left-color: var(--accent); } }
+
+.ask { animation: ask-call 1.8s ease-out 150ms both; }
+.ask--danger { animation: none; }
+
+.ask {
+  transition: background var(--fold-dur) var(--slide-ease),
+              border-color var(--fold-dur) var(--slide-ease),
+              box-shadow var(--fold-dur) var(--slide-ease);
+}
+
+.ask--done { animation: none; }
+
+.ask__answer { animation: rise 240ms var(--ease-enter) both; }
+
+.ask__tick {
+  width: 12px;
+  height: 12px;
+  margin-right: var(--space-1);
+  vertical-align: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 16;
+  stroke-dashoffset: 16;
+  animation: tick 320ms var(--ease-enter) 60ms forwards;
+}
+
+@keyframes tick { to { stroke-dashoffset: 0; } }
+
+/* 「自己写」：原来是弹一个 `prompt()` —— 系统对话框，整个窗口卡住等它，
+   长相跟这套排版毫无关系（删对话那块早就定了「不用 confirm() 弹窗」，这儿漏了）。
+   现在就在卡片里展开一行 */
+.ask__own {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  animation: rise var(--pop-in) var(--ease-enter) both;
+}
+
+.ask__own-box {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--bg);
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.ask__own-box:focus { outline: 0; border-color: var(--accent); }
+.ask__own-box::placeholder { color: var(--faint); }
 
 /* ── 一句话关掉 ──────────────────────────────────────────────
    **新加动效时记得回来加一条。** 上面那条 `.block { animation: none }`
@@ -2187,14 +2437,25 @@ body[data-side="off"] .scrim { display: none; }
 @media (prefers-reduced-motion: reduce) {
   [data-fresh],
   .models,
+  .palette,
   .pick-bar,
+  .to-end,
+  .scrim,
+  .unread::before,
+  .ask,
+  .ask__answer,
+  .ask__own,
   .churn__grid i,
   .think:not([data-done]) .think__mark { animation: none; }
+
+  /* 勾是靠 dashoffset 画出来的，动画一关它就停在「没画」那一格 —— 得直接给终点 */
+  .ask__tick { animation: none; stroke-dashoffset: 0; }
 
   .chip, .btn, .go, .pick, .win, .hello__pick, .fold__more, .code__copy,
   .to-end, .think__head, .pick-bar button, .nav, .talk, .desk,
   .side__tab, .tab, .think__wrap, .think__chev::before,
-  .fold .tool__lines { transition: none; }
+  .fold .tool__lines, .ask, .btn__key,
+  body[data-motion], body[data-motion] .side { transition: none; }
 
   .side__tabs::after, .tabs::after { transition: none; }
 }
@@ -2642,12 +2903,57 @@ body[data-side="off"] .scrim { display: none; }
   font-size: 12.5px;
 }
 
-:root[data-theme="anthropic"] .ask--done { box-shadow: none; background: transparent; }
+:root[data-theme="anthropic"] .ask--done { box-shadow: none; background: transparent; animation: none; }
 
 :root[data-theme="anthropic"] .ask__answer {
   letter-spacing: 0;
   text-transform: none;
   font-size: 12.5px;
+}
+
+/* 出现时外面漾开一圈陶土色，一次就停 —— 这套皮里卡片是浮起来的，
+   亮左边那条线不合它的形状，叫人的是这一圈。危险那张漾的是红 */
+@keyframes ask-ring {
+  from { box-shadow: var(--shadow-float), 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  to   { box-shadow: var(--shadow-float), 0 0 0 12px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+
+@keyframes ask-ring-danger {
+  from { box-shadow: var(--shadow-float), 0 0 0 0 color-mix(in srgb, var(--alert) 40%, transparent); }
+  to   { box-shadow: var(--shadow-float), 0 0 0 12px color-mix(in srgb, var(--alert) 0%, transparent); }
+}
+
+:root[data-theme="anthropic"] .ask { animation: ask-ring 1.3s var(--ease-enter) 250ms both; }
+:root[data-theme="anthropic"] .ask--danger { animation-name: ask-ring-danger; }
+:root[data-theme="anthropic"] .ask--done { animation: none; }
+
+:root[data-theme="anthropic"] .btn__key {
+  min-width: 18px;
+  padding: 0 4px;
+  border-color: var(--line-strong);
+  border-radius: 4px;
+  font: 500 11px / 16px var(--font-sans);
+  vertical-align: 0;
+}
+
+:root[data-theme="anthropic"] .btn--primary .btn__key { color: #fff; border-color: rgba(255, 255, 255, 0.5); }
+
+:root[data-theme="anthropic"] .ask__own-box {
+  border-radius: var(--radius);
+  background: var(--raised);
+  font-family: var(--font-sans);
+}
+
+:root[data-theme="anthropic"] .ask__own-box:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.15);
+}
+
+/* 这套皮里 accent-deep 可以做字（纸上 4.69:1），「以下是新的」跟那条线一个色系 */
+:root[data-theme="anthropic"] .unread {
+  font-size: 11.5px;
+  letter-spacing: 0;
+  color: var(--accent-deep);
 }
 
 /* ── 按钮 ────────────────────────────────────────────────────
@@ -2779,6 +3085,24 @@ body[data-side="off"] .scrim { display: none; }
   padding: var(--space-1);
 }
 
+/* 补全和换模型**浮在对话上面**，不再挤进输入区的流里（0.80.0）。
+   在流里的话，打一个 `/` 输入区就长高一截、对话栏跟着矮一截，
+   正在看的那段话被往上顶走（Vercel：别让东西无故挪位）；这套皮里它们本来就是
+   带阴影的浮卡片，浮着才名副其实。默认主题里照旧在流里 —— 那套没有「浮起来」这回事。
+   左右跟输入区的内边距对齐，所以宽度和输入卡片是同一条线。 */
+:root[data-theme="anthropic"] .composer { position: relative; }
+
+:root[data-theme="anthropic"] .palette,
+:root[data-theme="anthropic"] .models {
+  position: absolute;
+  left: var(--space-5);
+  right: var(--space-5);
+  bottom: calc(100% + var(--space-1));
+  z-index: 5;
+  margin: 0 auto;
+  max-width: var(--content);
+}
+
 :root[data-theme="anthropic"] .palette__item { border-bottom: 0; border-radius: var(--radius); }
 
 /* 换模型那张清单：claude.ai 那个模型菜单的样子 —— 浮起来的圆角卡片，在用的那条打一个陶土色的勾 */
@@ -2820,14 +3144,49 @@ body[data-side="off"] .scrim { display: none; }
 /* ── 空对话：衬线大字的问候 ───────────────────────────────────
    claude.ai 第一屏那句「下午好」是它最认得出来的一处。星芒换成 feiyu 自己的那只狗，
    `logo.svg` 当遮罩用、染成陶土色 —— <img> 里的 currentColor 染不上 */
-:root[data-theme="anthropic"] .sheet:has(#hello) { justify-content: center; }
+/* **问候、例子和输入框是一组，一起摆在视觉中心**（0.80.0）。
+   原来问候居中、输入框留在最底下，两者之间空着三百来像素：眼睛先落在问候上，
+   手要去的地方却在屏幕底边 —— 一句「问它点什么」和能问的那个框隔着半屏。
+   claude.ai 的第一屏就是这一组居中（Jakob 定律：人在别处用惯了的，这儿别另起一套）。
+
+   做法：问候照常贴在对话栏底部（紧挨着输入框），然后把**对话流和输入框一起往上抬
+   同一个 --lift**，抬到这一组的上方留白 : 下方留白 ≈ 42 : 58（视觉中心比几何中心高一点）。
+   --lift 是 app.js 的 `measureLift()` 量出来喂的；只用 translate，不动布局，
+   所以发出第一句时「落回底部」就是 translate 过渡回 0 —— 合成层上走，不重排。
+   **抬的是 .stream 不是 .sheet**：.sheet 抬上去会盖住标题栏，标题栏的按钮就点不到了。 */
+:root[data-theme="anthropic"] body[data-empty] .stream,
+:root[data-theme="anthropic"] body[data-empty] .composer {
+  translate: 0 calc(var(--lift, 0px) * -1);
+}
+
+/* 发出第一句：问候淡出，你那句话出现在输入框正上方，两个一起落到底。
+   只在这一下挂上过渡（`data-glide`）—— 窗口缩放、敲字换行时 --lift 也会变，
+   那些时候跟着手走、不该拖泥带水地滑。 */
+:root[data-theme="anthropic"] body[data-glide] .stream,
+:root[data-theme="anthropic"] body[data-glide] .composer {
+  transition: translate var(--glide-dur) var(--ease-move);
+}
+
+:root[data-theme="anthropic"] .hello[data-leaving] {
+  position: absolute;
+  inset: auto 0 0;
+  pointer-events: none;
+  animation: hello-out var(--pop-out) var(--ease-exit) both;
+}
+
+@keyframes hello-out { to { opacity: 0; translate: 0 -12px; } }
+
+/* 你那句话**等问候走得差不多了再出来**：两样叠在同一处，同时一个淡出一个浮现，
+   中间那几帧两行字压在一起（拍下来看过）。等 --pop-out 那么久，交接就是干净的 */
+:root[data-theme="anthropic"] body[data-glide] .block:not([data-leaving]) {
+  animation-delay: var(--pop-out);
+}
 
 :root[data-theme="anthropic"] .hello .block__body {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding-bottom: 8vh;
 }
 
 :root[data-theme="anthropic"] .hello__greet {
@@ -2846,7 +3205,24 @@ body[data-side="off"] .scrim { display: none; }
   background: var(--accent);
   -webkit-mask: url("logo.svg") center / contain no-repeat;
   mask: url("logo.svg") center / contain no-repeat;
+  /* 打招呼的时候点一下头：只在「开始」出现时一次，不循环（Apple：频繁出现的东西少动）。
+     原点在下巴底下，转的是头不是整只狗飘 */
+  transform-origin: 40% 90%;
+  animation: nod 900ms var(--ease-enter) 180ms both;
 }
+
+@keyframes nod {
+  0%   { rotate: -16deg; scale: 0.86; opacity: 0; }
+  45%  { rotate: 7deg; scale: 1; opacity: 1; }
+  100% { rotate: 0deg; }
+}
+
+/* 四个例子依次递过来，前后差 40ms —— 只在「开始」出现时一次 */
+:root[data-theme="anthropic"] .hello__list li { animation: rise var(--rise-dur) var(--rise-ease) both; }
+:root[data-theme="anthropic"] .hello__list li:nth-child(1) { animation-delay: 120ms; }
+:root[data-theme="anthropic"] .hello__list li:nth-child(2) { animation-delay: 160ms; }
+:root[data-theme="anthropic"] .hello__list li:nth-child(3) { animation-delay: 200ms; }
+:root[data-theme="anthropic"] .hello__list li:nth-child(4) { animation-delay: 240ms; }
 
 :root[data-theme="anthropic"] .hello__lead { margin-bottom: var(--space-5); font-size: 15px; color: var(--muted); }
 
@@ -2985,13 +3361,21 @@ body[data-side="off"] .scrim { display: none; }
   overflow: hidden;
 }
 
+/* 没有新东西时是个圆，有了就往左长成一颗药丸 —— 32 + 两条边 = 34，跟原来那个圆一样大 */
 :root[data-theme="anthropic"] .to-end {
-  width: 34px;
   height: 34px;
+  grid-template-columns: 32px 0fr;
   border-color: var(--line);
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--raised);
   box-shadow: var(--shadow-float);
+}
+
+:root[data-theme="anthropic"] .to-end[data-count] { grid-template-columns: 32px 1fr; }
+
+:root[data-theme="anthropic"] .to-end__n > span {
+  padding-right: 14px;
+  font: 500 12.5px / 1 var(--font-sans);
 }
 
 :root[data-theme="anthropic"] .term { border-top-color: var(--line); }
@@ -3020,10 +3404,19 @@ body[data-side="off"] .scrim { display: none; }
 @media (max-width: 46rem) {
   :root[data-theme="anthropic"] .sheet { padding: var(--space-4) var(--space-3); }
   :root[data-theme="anthropic"] .composer { padding: var(--space-1) var(--space-3) var(--space-2); }
+  :root[data-theme="anthropic"] .palette,
+  :root[data-theme="anthropic"] .models { left: var(--space-3); right: var(--space-3); }
   :root[data-theme="anthropic"] .hello__greet { font-size: 32px; }
   :root[data-theme="anthropic"] .side { background: var(--side-bg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme="anthropic"] .churn::before { animation: none; }
+  :root[data-theme="anthropic"] .churn::before,
+  :root[data-theme="anthropic"] .ask,
+  :root[data-theme="anthropic"] .hello__mark,
+  :root[data-theme="anthropic"] .hello__list li,
+  :root[data-theme="anthropic"] .hello[data-leaving] { animation: none; }
+
+  :root[data-theme="anthropic"] body[data-glide] .stream,
+  :root[data-theme="anthropic"] body[data-glide] .composer { transition: none; }
 }

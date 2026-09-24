@@ -179,11 +179,61 @@ fn open_url(url: String) -> Result<(), String> {
         return Err("只开 http/https 的链接".into());
     }
     // 这个桌面端只在 Linux 上跑（打包脚本也只出 Linux 的包），不做 macOS/Windows 分叉。
-    std::process::Command::new("xdg-open")
+    let child = std::process::Command::new("xdg-open")
         .arg(&url)
         .spawn()
         .map_err(|e| format!("开不了：{e}"))?;
+    reap(child);
     Ok(())
+}
+
+/// 子进程退出了要有人收尸，不然窗口开一天，点过几个链接就挂着几个僵尸。
+/// 起一个线程等它 —— 这几样（xdg-open、notify-send）都是一两百毫秒的事。
+fn reap(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// 通知正文会被 GNOME 当成标记语言解析（服务器报 body-markup），
+/// 命令原文里的 `<` `&` 不转掉的话，轻则显示成乱的，重则整条正文被丢掉。
+fn markup_escape(raw: &str) -> String {
+    raw.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// 按字符截断（不是按字节 —— 汉字三个字节，按字节截会截在半个字上 panic）。
+fn clip_chars(raw: &str, max: usize) -> String {
+    let mut out: String = raw.chars().take(max).collect();
+    if raw.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+/// 窗口不在前台时叫人一声：它在等你点头，或者一轮长活跑完了。**只由前端决定叫不叫**
+/// （它知道窗口在不在前台、这一轮跑了多久），这儿只管送出去。
+///
+/// Wayland 上「窗口闪一下」是空的 —— tao 的 `request_user_attention` 走 GTK3 的
+/// urgency hint，Wayland 下什么都不发生。系统通知是唯一靠得住的路。
+/// 走 `notify-send` 不加依赖；没装就算了，不报错（叫不出来不该耽误别的）。
+/// `desktop-entry` 那条 hint 让 GNOME 把它认成 Feiyu 的通知（图标、归组，点一下回到窗口）。
+#[tauri::command]
+fn notify(title: String, body: String) {
+    let title = clip_chars(&title, 80);
+    let body = markup_escape(&clip_chars(&body, 240));
+    if let Ok(child) = std::process::Command::new("notify-send")
+        .args(["--app-name=Feiyu", "--icon=feiyu", "--hint=string:desktop-entry:feiyu"])
+        // 标题和正文是模型给的字：`--` 之后才是位置参数，以 `-` 开头的也不会被当成选项
+        .arg("--")
+        .arg(title)
+        .arg(body)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        reap(child);
+    }
 }
 
 struct Args {
@@ -416,7 +466,7 @@ fn main() {
         .manage(agent)
         .manage(std::sync::Arc::new(term::Term::default()))
         .invoke_handler(tauri::generate_handler![
-            send, upload, read_image, where_am_i, switch, open_url,
+            send, upload, read_image, where_am_i, switch, open_url, notify,
             term::term_start, term::term_write, term::term_resize, term::term_stop
         ])
         .setup(move |app| {
@@ -506,5 +556,22 @@ mod tests {
         let inherited = std::env::var_os("FEIYU_DESKTOP_STDERR").is_some();
         unsafe { std::env::remove_var("FEIYU_DESKTOP_STDERR") };
         assert!(inherited);
+    }
+
+    /// 通知正文是命令原文，`rm -rf <dir> && echo ok` 这种不转义的话 GNOME 会把
+    /// `<dir>` 当标签吃掉，整条正文可能直接不显示
+    #[test]
+    fn 通知正文里的尖括号和和号要转掉() {
+        assert_eq!(markup_escape("a <b> & c"), "a &lt;b&gt; &amp; c");
+        // 先转 & 再转 <>：顺序反了会把 &lt; 里的 & 再转一遍
+        assert_eq!(markup_escape("<"), "&lt;");
+    }
+
+    /// 按字符截，不按字节 —— 汉字按字节截会截在半个字上，String 切片直接 panic
+    #[test]
+    fn 截断按字符算_汉字不会被截成半个() {
+        assert_eq!(clip_chars("要你点头", 2), "要你…");
+        assert_eq!(clip_chars("要你点头", 4), "要你点头");
+        assert_eq!(clip_chars("", 3), "");
     }
 }

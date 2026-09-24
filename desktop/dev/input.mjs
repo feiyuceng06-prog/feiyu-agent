@@ -103,7 +103,7 @@ await sleep(2200);
    夹具跑完那轮多半还没结束，下一次跑的时候 `/help` `/key` 这些命令就排在它后面，
    看起来像「agent 不回话」。收尾也打断一次，别把这个烂摊子留给下一轮。 */
 await ev(`localStorage.clear();
-  if (window.socket && socket.readyState === 1) socket.send(JSON.stringify({op:"interrupt"}));
+  if (socket && socket.readyState === 1) socket.send(JSON.stringify({op:"interrupt"}));
   true`);
 await sleep(600);
 await call("Page.navigate", { url });
@@ -370,7 +370,14 @@ check("没有匹配时菜单收起", !s.palette, s);
 async function side() {
   return JSON.parse(await ev(`JSON.stringify({
     open: document.body.dataset.side !== "off",
-    width: Math.round(document.getElementById("side").getBoundingClientRect().width),
+    // 0.80.0 起收起是整块滑出视口（定宽 240、滑完 visibility: hidden），
+    // 量的是露在屏幕上的那一截，不是它自己的盒子宽
+    width: (() => {
+      const el = document.getElementById("side");
+      const r = el.getBoundingClientRect();
+      if (getComputedStyle(el).visibility === "hidden") return 0;
+      return Math.round(Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)));
+    })(),
     talks: [...document.querySelectorAll("#talks .talk__title")].map(e => e.textContent),
     current: [...document.querySelectorAll('#talks .talk[aria-current="true"] .talk__title')]
                .map(e => e.textContent)[0] || null,
@@ -381,13 +388,13 @@ await ev(`setSide(true); true`);
 let sd = await side();
 check("侧边栏展开时有宽度", sd.width > 100, sd);
 await ev(`document.getElementById("side-toggle").click(); true`);
-await sleep(200);
+await sleep(450);          // 滑出去要 --side-dur（240ms），滑完才藏
 sd = await side();
-check("点一下收起来，宽度归零", !sd.open && sd.width === 0, sd);
+check("点一下收起来，滑出视口", !sd.open && sd.width === 0, sd);
 check("收起状态记进了 localStorage",
       (await ev(`localStorage.getItem("feiyu.side")`)) === "off", null);
 await ev(`document.getElementById("side-toggle").click(); true`);
-await sleep(200);
+await sleep(450);
 sd = await side();
 check("再点一下展开", sd.open && sd.width > 100, sd);
 
@@ -480,6 +487,13 @@ check("附件路径跟着这句话一起发出去",
       prompt && prompt.text.includes("看看这张图") && prompt.text.includes(".feiyu/uploads/a.png"),
       prompt);
 check("发完附件条清空", (await ev(`clips.length`)) === 0, null);
+/* **发完就打断。** 那句话真发给了 agent，它真跑一轮 —— 模型要是去 read / bash 那张图，
+   会停下来要人点头，那张真卡就一直等着：后面几条量状态行的，量到的是「等你点头」
+   （0.80.0 起它会这么说），下一次跑夹具时 /help、/key 也排在它后面没人回（真踩到过，
+   跟模型那一轮怎么走有关，所以时好时坏）。0.80.0 起中断能把等着的确认一起放掉。 */
+await sleep(300);
+await ev(`if (socket && socket.readyState === 1) socket.send(JSON.stringify({op:"interrupt"})); true`);
+await sleep(800);
 
 // 断线时点发送：话要留在框里，状态行要说一声
 await reset();
@@ -799,8 +813,115 @@ check("跟补全菜单一次只开一张",
 await ev(`input.value = ""; input.dispatchEvent(new Event("input")); true`);
 await key("Escape");
 
+/* ── 0.80.0：确认卡用数字键答 ───────────────────────────────
+   **真按键**，不直接调函数 —— 这一条的毛病全在「焦点在哪、框里有没有字、到没到点」
+   这几个判断上，绕过按键层就等于没测。 */
+async function digit(d) {
+  const code = 48 + Number(d);
+  await call("Input.dispatchKeyEvent",
+    { type: "keyDown", key: d, code: "Digit" + d, text: d, windowsVirtualKeyCode: code });
+  await call("Input.dispatchKeyEvent",
+    { type: "keyUp", key: d, code: "Digit" + d, windowsVirtualKeyCode: code });
+  await sleep(250);            // 键盘按下去那一下要先演 110ms 再点
+}
+const replies = async () => (await ops()).filter((m) => m.op === "reply");
+let askId = 9100;
+/* **这一段只灌假事件，先把真 agent 的收件口堵上。** 附件那条用例真发过一句话出去，
+   那一轮什么时候跑完不一定 —— 跑完推过来的 turn_end / status(busy=false) 会（正确地）
+   把假卡上的键撤掉，于是断言随机挂在「按了没反应」上（真踩到过：单独跑全过，
+   串在整套里挂一条）。发出去的照旧记在 __sent 里。 */
+await ev(`window.__inbound = socket.onmessage; socket.onmessage = () => {}; true`);
+async function askNow(extra = {}) {
+  askId += 1;
+  const card = { kind: "ask", id: askId, type: "approve", tool: "bash", label: "Bash", target: "",
+                 args: { command: "npm test" }, rule: "Bash(npm:*)", ...extra };
+  await ev(`handle({kind:"status", ready:true, busy:true, mode:"default", name:"m", model:"m"});
+    handle(${JSON.stringify(card)}); true`);
+  return askId;
+}
+
+await reset();
+const firstAsk = await askNow();
+await digit("1");             // 卡片刚弹出来：这个 1 是手指还在往下落的那一下
+let rs = await replies();
+let st = await state();
+check("卡片刚出现时按数字不算回答（落进输入框当字）", !rs.length && st.value === "1", { rs, st });
+check("这时状态行说的是「等你点头」，不是「干活中」",
+      (await ev(`document.getElementById("s-state").textContent`)).startsWith("等你点头"), null);
+await reset();
+await sleep(700);             // 过了 ARM_AFTER
+// 卡片找不着（上一条已经红了）也别在这儿抛 —— 夹具该报红，不该崩
+check("到点了键帽浮出来",
+      (await ev(`(() => { const k = document.querySelector(".ask:not(.ask--done) .btn__key");
+                         return k ? getComputedStyle(k).opacity : "没有卡"; })()`)) === "1", null);
+await digit("1");
+rs = await replies();
+check("框里空着、到了点，按 1 = 同意一次",
+      rs.length === 1 && rs[0].id === firstAsk && rs[0].value === "yes", rs);
+check("答完收成一行回执，前面一个勾",
+      await ev(`!!document.querySelector(".ask--done .ask__answer .ask__tick")`), null);
+
+await reset();
+await askNow();
+await sleep(700);
+await type("修");              // 框里有字了 —— 数字就是字
+await digit("2");
+rs = await replies();
+st = await state();
+check("框里有字时按数字是打字，不是回答", !rs.length && st.value.endsWith("2"), { rs, st });
+await reset();
+await digit("2");
+rs = await replies();
+check("框清空了再按 2 = 拒绝", rs.length === 1 && rs[0].value === "no", rs);
+
+await reset();
+await askNow({ args: { command: "rm -rf build/" } });
+await sleep(800);
+await digit("1");
+rs = await replies();
+check("回不去的那档 0.8 秒时还不接键", !rs.length, rs);
+await reset();
+await sleep(700);
+await digit("2");
+rs = await replies();
+check("过了 1.2 秒才接（按 2 拒绝）", rs.length === 1 && rs[0].value === "no", rs);
+
+await reset();
+await askNow();
+await sleep(700);
+await ev(`input.value = "/"; input.dispatchEvent(new Event("input")); input.value = ""; true`);
+await ev(`showSoft(palette); true`);     // 补全开着：手在那儿挑命令
+await digit("1");
+rs = await replies();
+check("补全菜单开着时数字不当回答", !rs.length, rs);
+await ev(`hidePalette(); true`);
+await reset();
+await digit("2");            // 把这张收掉，别留给下面
+
+await reset();
+await ev(`window.__prompted = 0; window.prompt = () => { __prompted++; return null; }; true`);
+askId += 1;
+await ev(`handle({kind:"ask", id:${askId}, type:"choice", question:"用哪个？", options:["npm","pnpm"]}); true`);
+await sleep(700);
+await digit("3");
+let own = JSON.parse(await ev(`JSON.stringify({ open: !!document.querySelector(".ask__own"),
+  focus: document.activeElement.className, prompted: __prompted })`));
+check("「自己写」就地展开一行，不弹 prompt()", own.open && own.focus === "ask__own-box" && !own.prompted, own);
+await type("用 bun 12");      // 数字在这儿是字，不是回答
+await key("Escape");
+own = JSON.parse(await ev(`JSON.stringify({ open: !!document.querySelector(".ask__own"),
+  ops: (window.__sent || []).map((x) => { try { return JSON.parse(x).op; } catch { return ""; } }) })`));
+check("esc 只收起那一行，不打断这一轮", !own.open && !own.ops.includes("interrupt") && !own.ops.includes("reply"), own);
+await digit("3");
+await type("用 bun");
+await key("Enter");
+rs = await replies();
+check("写完回车 = 把这句当回答", rs.length === 1 && rs[0].value === "用 bun", rs);
+await ev(`handle({kind:"status", ready:true, busy:false, mode:"default", name:"m", model:"m"});
+  socket.onmessage = window.__inbound; true`);
+
 // 收尾打断：附件那条把 agent 支使去跑活儿了，别留给下一轮
-await ev(`if (window.socket && socket.readyState === 1)
+await ev(`if (socket && socket.readyState === 1)
   socket.send(JSON.stringify({op:"interrupt"})); true`);
 
 const errs = await ev(`JSON.stringify(window.__errs || [])`);

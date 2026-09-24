@@ -14,6 +14,7 @@ import queue
 import re
 import tempfile
 import threading
+import time
 import types
 import unittest
 
@@ -219,6 +220,24 @@ class TestReaderHardening(unittest.TestCase):
         # busy 是 False，扔了会落在没人接的地方，把整个服务带走
         self.server.busy = False
         self.assertTrue(self.feed('{"op":"interrupt"}'))
+
+    def test_确认卡开着时中断要立刻生效(self):
+        """interrupt_main 只立旗、不是真信号，叫不醒阻塞在 box.get 上的主线程 ——
+        不把等着的放掉，esc / 停止键要等满 REPLY_TIMEOUT（600 秒）才起作用。
+
+        线程要摆得跟服务里一样：**主线程等回话**（agent 在等你点头），中断从另一个线程来
+        （读 stdin 的那个）。反过来摆的话中断落在 `_dispatch_in` 半路上，后面那句根本没跑到。
+        超时临时压到 3 秒：回退验证时它得在 3 秒而不是 600 秒后红 """
+        from unittest import mock
+        self.server.busy = True
+        began = time.monotonic()
+        threading.Timer(0.2, lambda: self.feed('{"op":"interrupt"}')).start()
+        with mock.patch.object(serve, "REPLY_TIMEOUT", 3.0):
+            try:
+                self.server.proto.request("ask")
+            except KeyboardInterrupt:
+                pass
+        self.assertLess(time.monotonic() - began, 1.5)
 
 
 class TestDeleteSession(unittest.TestCase):

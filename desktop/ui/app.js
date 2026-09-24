@@ -50,6 +50,28 @@ const boots = new Map();
    在那之前就可能被调到，而对着还没初始化的 const 连 `typeof` 都会抛。 */
 let toEnd = null;
 
+/* 0.80.0 那几样的状态，同一个理由全在这儿先占名 —— 用到它们的函数（block、
+   syncHello、hidePalette……）都定义在前面，哪天在初始化时被同步调一次就撞 TDZ。 */
+
+/* 人在不在看。**只认真发生过的 blur / 隐藏**，不拿 `document.hasFocus()` 猜初值 ——
+   无头浏览器里它常年是 false，拿它当初值的话夹具里每一块都会被当成「没看见」。 */
+let away = document.visibilityState === "hidden";
+/* 没看见的：那条「以下是新的」（mark），和它后面攒了几块还没看到（count） */
+const unseen = { mark: null, count: 0 };
+/* 正等着人点头的那张卡：{ card, keys, from, timer, pressing } */
+let pendingAsk = null;
+/* 这一轮几时开始、它最后说了什么 —— 人不在时跑完了，通知里要说这两样 */
+let turnFrom = 0;
+let lastSaid = "";
+/* 空对话里点发送的时刻。之后几秒内「开始」那块让位，就是这一下引起的 —— 要滑 */
+let glideArm = 0;
+let glideTimer = 0;
+/* 空对话时输入框抬了多高（见 measureLift），和盯着尺寸变化的那个观察者 */
+let liftPx = 0;
+let liftWatch = null;
+/* 浮层淡出时各自那只定时器（见 hideSoft） */
+const leaving = new WeakMap();
+
 /* ── 小工具 ─────────────────────────────────────────────────── */
 
 /* 系统里关掉了动效就一个都不做。**JS 里也要问一次** —— CSS 那半边有媒体查询
@@ -60,6 +82,30 @@ const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+/* 取 app.css 里的动效 token。JS 里起的过渡（Web Animations）也吃同一套数，
+   不在这边另抄一份 —— 抄了就会有一天两边对不上 */
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const cssMs = (name) => parseFloat(cssVar(name)) || 0;
+
+/* 一块东西就地换了内容、高度跟着变：量出前后两个高度，中间补一段过渡，
+   底下的东西就不是「跳」过去的。只动这一块自己的 height，动完就还原成 auto */
+function settle(el, change) {
+  const from = el.offsetHeight;
+  change();
+  if (REDUCED || !el.animate) return;
+  const to = el.offsetHeight;
+  if (Math.abs(from - to) < 2) return;
+  el.animate([{ height: from + "px" }, { height: to + "px" }],
+             { duration: cssMs("--slide-dur"), easing: cssVar("--ease-move") || "ease" });
+}
+
+/* 一段 markdown 的第一句话，去掉行首记号 —— 给系统通知用，那儿只认纯文本 */
+function plainLine(text) {
+  const line = String(text || "").split("\n").map((l) => l.trim())
+    .find((l) => l && !l.startsWith("```")) || "";
+  return line.replace(/^(#{1,6}\s+|>\s*|[-*+]\s+|\d+\.\s+)/, "").replace(/[*`]/g, "").slice(0, 120);
+}
+
 function atBottom() {
   return sheetEl.scrollHeight - sheetEl.scrollTop - sheetEl.clientHeight < 80;
 }
@@ -67,9 +113,8 @@ function atBottom() {
 /* 只在本来就贴着底的时候才跟着滚。用户往回翻着看的时候把他拽回来是最烦人的。 */
 function keepBottom(wasDown) {
   if (wasDown) sheetEl.scrollTop = sheetEl.scrollHeight;
-  // 没跟着滚 = 底下又长出了没看见的东西，「回到最新」该露面（它在文件末尾建，
-  // 所以这儿必须判一下 —— 对着 TDZ 里的 const 连 typeof 都会抛）
-  if (toEnd) toEnd.hidden = atBottom();
+  // 没跟着滚 = 底下又长出了没看见的东西，「回到最新」该露面
+  drawToEnd();
 }
 
 function block(label, cls) {
@@ -79,8 +124,62 @@ function block(label, cls) {
   el.innerHTML = `<div class="block__label">${esc(label)}</div><div class="block__body"></div>`;
   streamEl.append(el);
   syncHello();
+  // 线要在跟着滚之前铺：先滚再插的话，最后一块会被那条线顶到屏幕下面去
+  markUnseen(el, wasDown);
   keepBottom(wasDown);
   return el.querySelector(".block__body");
+}
+
+/* ── 没看见的 ───────────────────────────────────────────────
+   你往回翻着看、或者切到别的窗口的时候，底下照样在长。回来时新旧连成一片，
+   分不出哪些是后来的（NN/g 说的变化盲视）。所以在第一块没看见的前面铺一条
+   「以下是新的」，「回到最新」上数着攒了几块，点它落到那条线上 —— 从第一条新的读起。
+
+   **看到底了只清数，不撤线**：线留着，往回翻时它还标着「从这儿起是后来长出来的」。
+   下一批没看见的来了就挪过去，你开口说下一句时撤掉（那时你已经接着往下聊了）。 */
+function markUnseen(el, wasDown) {
+  if (el.classList.contains("block--wait")) return;     // 「在跑」来了又走，不算数
+  if (!away && wasDown) return;                          // 长在眼前的，就是看见了
+  // 上一批都看过了（数清零了），那条线作废，挪到这一批的第一块前面
+  if (!unseen.mark || !unseen.mark.isConnected || !unseen.count) {
+    if (unseen.mark) unseen.mark.remove();
+    unseen.mark = document.createElement("div");
+    unseen.mark.className = "unread";
+    unseen.mark.setAttribute("role", "separator");
+    unseen.mark.textContent = "以下是新的";
+    el.before(unseen.mark);
+  }
+  unseen.count += 1;
+}
+
+/* 人在、而且看到底了：攒的数清掉 */
+function sawAll() {
+  if (away || !unseen.count || !atBottom()) return;
+  unseen.count = 0;
+  drawToEnd();
+}
+
+function dropUnread() {
+  if (unseen.mark) unseen.mark.remove();
+  unseen.mark = null;
+  unseen.count = 0;
+  drawToEnd();
+}
+
+function drawToEnd() {
+  if (!toEnd) return;      // 它在文件末尾才建
+  toEnd.hidden = atBottom();
+  const n = unseen.count;
+  if (n) {
+    toEnd.dataset.count = "1";
+    toEnd.querySelector(".to-end__n > span").textContent = `${n} 条新`;
+  } else {
+    // 字不清：药丸缩回去那一下里面还得有字，空着缩像是坏了
+    delete toEnd.dataset.count;
+  }
+  toEnd.title = n ? `${n} 条新的，跳到第一条` : "回到最新";
+  // 字在数清零后还留着（为了缩回去那一下），读屏得按现在的数念
+  toEnd.setAttribute("aria-label", toEnd.title);
 }
 
 /* ── 一片空白的时候说点什么 ─────────────────────────────────
@@ -111,8 +210,15 @@ function syncHello() {
   // 于是在空对话上连调两次就把它删了（第三次又加回来，来回跳）。
   // 现在所有调用点恰好都是"先清空/先追加"，所以没露出来；
   // 加一个调用点就会静默失效，而空状态没了是不会报错的。
-  const has = streamEl.children.length > (el ? 1 : 0);
-  if (has) { if (el) el.remove(); return; }
+  // 正在淡出的那块旧「开始」（没有 id 了）也不算内容
+  const kids = [...streamEl.children].filter((c) => !c.dataset.leaving).length;
+  const has = kids > (el ? 1 : 0);
+  if (has) {
+    if (el) leaveHello(el);
+    delete document.body.dataset.empty;
+    return;
+  }
+  document.body.dataset.empty = "1";
   if (el) return;
   el = document.createElement("div");
   el.id = "hello";
@@ -138,6 +244,26 @@ function syncHello() {
     };
   });
   streamEl.append(el);
+  // 它的高度会变（字体加载完、窗口变窄折行），变了输入框要重新摆
+  if (liftWatch) liftWatch.observe(el);
+}
+
+/* 「开始」让位。空对话里刚点过发送的话（`glideArm`，Anthropic 那套皮），
+   它淡出去、输入框和你那句话一起落到底（见 app.css「问候、例子和输入框是一组」）；
+   别的时候 —— 开旧对话、机器人开场、别的主题 —— 直接撤，不演。 */
+const GLIDE_ARM = 4000;
+
+function leaveHello(el) {
+  const glide = glideArm && Date.now() - glideArm < GLIDE_ARM && !REDUCED
+    && document.documentElement.dataset.theme === "anthropic";
+  glideArm = 0;
+  if (!glide) { el.remove(); return; }
+  el.removeAttribute("id");
+  el.dataset.leaving = "1";
+  document.body.dataset.glide = "1";
+  setTimeout(() => el.remove(), 260);
+  clearTimeout(glideTimer);
+  glideTimer = setTimeout(() => { delete document.body.dataset.glide; }, 620);
 }
 
 /* ── markdown ───────────────────────────────────────────────
@@ -417,10 +543,15 @@ function clock(secs) {
 function drawWait(ambient) {
   if (!waitFrom) return;
   const secs = Math.round((Date.now() - waitFrom) / 1000);
-  const slow = secs >= SLOW_AFTER;
-  // 在想的时候说"在想"，别笼统地写"干活中"——那是这一版要治的病
-  const what = thoughtSize ? `在想 ${clock(secs)}（已想 ${thoughtSize} 字）`
-                           : `干活中 ${clock(secs)}`;
+  // 卡在你这儿的时候不算「慢」—— 那不是模型慢
+  const slow = !pendingAsk && secs >= SLOW_AFTER;
+  // 在想的时候说"在想"，别笼统地写"干活中"——那是这一版要治的病。
+  // **等你点头的时候说「等你点头」**（0.80.0）：原来这时候秒表照样写「干活中 0:35」，
+  // 可它什么都没在干，是在等你 —— 这句话一直在说反话
+  const what = pendingAsk
+    ? `等你点头 ${clock(Math.round((Date.now() - pendingAsk.from) / 1000))}`
+    : thoughtSize ? `在想 ${clock(secs)}（已想 ${thoughtSize} 字）`
+                  : `干活中 ${clock(secs)}`;
   // 留言还在的时候，定时器自己跳的那一下不写这行字；底下那块和想的轨迹照旧更新。
   // 挡的只有定时器：别处直接调进来的（起一轮、报想了多少字）都是「刚发生了
   // 什么」，那是该说话的。
@@ -451,6 +582,7 @@ function stopWait() {
   thoughtSize = 0;
   showWait(false);
   closeThinking();
+  dropAsk();          // 这一轮都停了，卡上的数字键不再算数
 }
 
 /* ── 想的过程 ───────────────────────────────────────────────
@@ -677,9 +809,14 @@ function paintSaying() {
   sayingTimer = 0;
   sayingPainted = performance.now();
   if (!saying) return;
+  // 贴着底的话跟着长出来的字滚。**这一下以前是 WebKit 白送的**：`.sheet` 原来是
+  // flex-end，产品那边的滚动原点在底边，内容往下长视野自己就跟着 —— 撤掉那条之后
+  // （见 app.css `.sheet`）得自己跟，跟 paintThinking 同一个写法
+  const wasDown = atBottom();
   const prose = saying.firstElementChild;
   paintInto(prose, mdParts(sayingText));
   (prose.lastElementChild || prose).append(cursorEl);
+  keepBottom(wasDown);
 }
 
 /* **按固定间隔节流，不是按帧。** 一次重绘的代价随这条消息变长而线性上涨，
@@ -707,6 +844,8 @@ function closeSaying() {
     paintInto(saying.firstElementChild, mdParts(sayingText));
     fillShots(saying);
     delete saying.dataset.live;
+    // 人不在时一轮跑完，通知里要带它最后说的那句（见 notifyUser）
+    if (sayingText.trim()) lastSaid = sayingText;
   }
   saying = null;
   sayingText = "";
@@ -817,6 +956,8 @@ function handle(ev) {
     case "turn_start":
       shownShots = new Set();
       closeSaying();
+      turnFrom = Date.now();
+      lastSaid = "";
       block("你", "block--you").textContent = ev.text;
       armWait();
       break;
@@ -989,12 +1130,21 @@ function handle(ev) {
       askCard(ev);
       break;
 
-    case "turn_end":
+    case "turn_end": {
       closeSaying();
       toolBlocks.clear();
       toolSeen.clear();
       pendingPreview = null;
+      dropAsk();
+      // 人不在、而且跑得够久（过了 10 秒那条线，人多半已经去干别的了）：叫一声。
+      // 回放进来的 turn_end 没有 turnFrom（那一轮不是这一页看着开始的），不会叫
+      const secs = turnFrom ? Math.round((Date.now() - turnFrom) / 1000) : 0;
+      if (away && secs >= LONG_TURN) {
+        notifyUser(`跑完了（用时 ${clock(secs)}）`, plainLine(lastSaid) || "回来看看它做了什么");
+      }
+      turnFrom = 0;
       break;
+    }
 
     case "sessions":
       drawTalks(rowsOf(ev.rows), ev.current);
@@ -1003,6 +1153,7 @@ function handle(ev) {
     case "opened":
       showShelf(false);
       showBotShop(false);
+      dropUnread();
       rowsOf(ev.history).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
         else block("它说", "block--say").innerHTML = `<div class="prose">${md(row.text)}</div>`;
@@ -1012,6 +1163,7 @@ function handle(ev) {
     case "cleared":
       // 只清对话。刊头那条启动信息说的是环境，跟聊了什么无关，留着
       streamEl.replaceChildren();
+      dropUnread();
       syncHello();
       break;
 
@@ -1154,13 +1306,7 @@ function askCard(ev) {
     btn.textContent = label;
     // 规则是文件路径，单独包一层不参与大写（见 .btn code）
     if (rule) btn.insertAdjacentHTML("beforeend", ` <code>${esc(rule)}</code>`);
-    btn.onclick = () => {
-      send({ op: "reply", id: ev.id, value });
-      card.classList.add("ask--done");
-      row.replaceWith(
-        Object.assign(document.createElement("p"),
-          { className: "ask__answer", textContent: "已回答：" + label + (rule ? " " + rule : "") }));
-    };
+    btn.onclick = () => answerAsk(card, ev.id, value, label + (rule ? " " + rule : ""));
     row.append(btn);
   });
   // 自由输入那一路：ask_user 的选项常常不是用户真正想说的那句
@@ -1169,21 +1315,108 @@ function askCard(ev) {
     other.type = "button";
     other.className = "btn";
     other.textContent = "自己写";
-    other.onclick = () => {
-      const said = prompt(question);
-      if (said) {
-        send({ op: "reply", id: ev.id, value: said });
-        card.classList.add("ask--done");
-        row.replaceWith(
-          Object.assign(document.createElement("p"),
-            { className: "ask__answer", textContent: "已回答：" + said }));
-      }
-    };
+    other.onclick = () => ownAnswer(card, ev.id);
     row.append(other);
   }
   card.append(row);
   body.append(card);
   sheetEl.scrollTop = sheetEl.scrollHeight;
+  armAsk(card, [...row.children], looksDangerous(ev));
+  // 人不在跟前的话，屏幕上画得再醒目也没人看 —— 叫一声（见 notifyUser）。
+  // bash 那条把命令原文带上：「要不要跑 rm -rf build」得看到命令才判断得了
+  if (away) {
+    const cmd = ev.args && ev.args.command ? "\n" + String(ev.args.command) : "";
+    notifyUser(looksDangerous(ev) ? "要你点头（回不去的操作）" : "要你点头", question + cmd);
+  }
+}
+
+/* ── 答一张卡 ───────────────────────────────────────────────
+   一、**键盘能答**：按钮上是 1 2 3 4，跟摆的顺序一样（见文末那个 keydown）。
+   二、卡片出现后**等一会儿才接键**。人可能正在打字 —— 卡片弹出来那一刻手指还在
+       往下落，落下去的那个数字不该变成「同意」。键帽是到点才浮出来的，它浮出来
+       就是「现在按才算数」。回不去的那档再多等一倍。
+       （Firefox 装扩展、确认下载那种对话框，按钮也是先灰一下才能点，同一个道理。）
+   三、**发不出去就别装作答了**：原来不管 send 成没成都把按钮换成「已回答」，
+       断线时那是句假话 —— 0.50.x 定过「断线时不能默默吞掉」，这儿漏了。 */
+const ARM_AFTER = 600;
+
+function armAsk(card, keys, danger) {
+  dropAsk();
+  keys.slice(0, 9).forEach((btn, n) => {
+    btn.insertAdjacentHTML("beforeend", `<kbd class="btn__key" aria-hidden="true">${n + 1}</kbd>`);
+    btn.setAttribute("aria-keyshortcuts", String(n + 1));
+  });
+  const ask = { card, keys, from: Date.now(), timer: 0, pressing: false };
+  ask.timer = setTimeout(() => { if (pendingAsk === ask) card.dataset.armed = "1"; },
+                         danger ? ARM_AFTER * 2 : ARM_AFTER);
+  pendingAsk = ask;
+  drawWait();         // 状态行现在就改口说「等你点头」，别等秒表下一跳
+}
+
+/* 这张卡不再等键了（答了、这一轮停了、又来了一张新的）。键帽跟着收回去 */
+function dropAsk() {
+  if (!pendingAsk) return;
+  clearTimeout(pendingAsk.timer);
+  delete pendingAsk.card.dataset.armed;
+  pendingAsk = null;
+}
+
+function answerAsk(card, id, value, shown) {
+  if (card.classList.contains("ask--done")) return;
+  if (!send({ op: "reply", id, value })) {
+    if (pendingAsk && pendingAsk.card === card) pendingAsk.pressing = false;
+    return;
+  }
+  if (pendingAsk && pendingAsk.card === card) dropAsk();
+  // 从「一排按钮」收成「一行回执」，高度差二十来像素 —— 补一段过渡，底下的东西别跳
+  settle(card, () => {
+    card.classList.add("ask--done");
+    const own = card.querySelector(".ask__own");
+    if (own) own.remove();
+    card.querySelector(".ask__row").replaceWith(receipt(shown));
+  });
+  drawWait();
+}
+
+/* 回执前面一个勾，是画出来的 —— 「收到了」，不用猜点没点上 */
+function receipt(text) {
+  const p = document.createElement("p");
+  p.className = "ask__answer";
+  p.innerHTML = '<svg class="ask__tick" viewBox="0 0 12 12" aria-hidden="true">'
+    + '<path d="M2 6.5 5 9.5 10 3"/></svg>';
+  p.append("已回答：" + text);
+  return p;
+}
+
+/* 「自己写」：就在卡片里展开一行。原来是 `prompt()` —— 系统对话框，整个窗口
+   卡住等它，长相跟这套排版毫无关系（删对话那块早就定了「不用 confirm() 弹窗」）。 */
+function ownAnswer(card, id) {
+  // 按数字键打开的也算「还没答」：收起来之后数字键得照样能用
+  if (pendingAsk && pendingAsk.card === card) pendingAsk.pressing = false;
+  let own = card.querySelector(".ask__own");
+  if (!own) {
+    own = document.createElement("form");
+    own.className = "ask__own";
+    own.innerHTML = '<input class="ask__own-box" type="text" spellcheck="false" autocomplete="off"'
+      + ' placeholder="写你想说的…" aria-label="自己写的回答">'
+      + '<button class="btn btn--primary" type="submit">发送</button>';
+    const box = own.querySelector("input");
+    own.onsubmit = (e) => {
+      e.preventDefault();
+      const said = box.value.trim();
+      if (said) answerAsk(card, id, said, said);
+      else box.focus();
+    };
+    // esc 只收起这一行 —— 全局那个 esc 在一轮跑着时会发 interrupt
+    box.onkeydown = (e) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      own.remove();
+      inputEl.focus();
+    };
+    card.querySelector(".ask__row").after(own);
+  }
+  own.querySelector("input").focus();
 }
 
 /* ── 终端面板 ──────────────────────────────────────────────────
@@ -1439,6 +1672,9 @@ function setTheme(name) {
   // 终端面板的配色是建的时候拿 CSS 变量算出来的一份快照，**换主题要重算**，
   // 不然它会顶着上一套配色留在那儿（termTheme() 只是算，不会自己应用）
   if (term) term.options.theme = termTheme();
+  // 换了皮字号就变了，空对话那一组要重新摆（见 measureLift）。
+  // **放进下一帧**：这个函数在模块求值时就跑一次，那时 rowBase 还在 TDZ 里
+  requestAnimationFrame(() => { rowBase = 0; measureLift(); });
 }
 
 setTheme(theme());
@@ -2626,6 +2862,10 @@ function submit() {
   if (text === "/help") wantHelp = true;
   // 没发出去就把话留在输入框里，别让用户重打一遍
   if (!send(text.startsWith("/") ? { op: "command", text } : { op: "prompt", text })) return;
+  // 空对话里发出的第一句：「开始」让位时要演那一下落到底（见 leaveHello）
+  if ($("hello")) glideArm = Date.now();
+  // 你开口接着聊了，「以下是新的」那条线完成了它的事
+  dropUnread();
   if (ready.length && !text.startsWith("/")) {
     clips = clips.filter((c) => c.state !== "ready");
     drawClips();
@@ -2722,7 +2962,7 @@ function paint() {
     el.onmousedown = (e) => { e.preventDefault(); pick(n); };
     return el;
   }));
-  paletteEl.hidden = false;
+  showSoft(paletteEl);
   openModels(false);          // 两张清单占的是同一块地方，一次只开一张
   /* **选中那条要滚进视野。** 菜单最高 16rem，命令有十几条，
      按 ↑↓ 走到第八条之后高亮就跑到看不见的地方去了（用户拿截图来问过）。
@@ -2731,10 +2971,28 @@ function paint() {
 }
 
 function hidePalette() {
-  paletteEl.hidden = true;
+  hideSoft(paletteEl);
   palItems = [];
   palIndex = 0;
   palMoved = false;
+}
+
+/* 浮层收起：`hidden` 立刻为真（键盘、点击、夹具看到的都是「已经收了」），
+   画面上借 `data-leaving` 再淡出 --pop-out 那么久（见 app.css「浮层」）。
+   同一个浮层淡到一半又被叫出来，就地撤掉淡出，接着进场 */
+function hideSoft(el) {
+  if (el.hidden) return;
+  el.hidden = true;
+  if (REDUCED) return;
+  el.dataset.leaving = "1";
+  clearTimeout(leaving.get(el));
+  leaving.set(el, setTimeout(() => { delete el.dataset.leaving; }, cssMs("--pop-out") + 80));
+}
+
+function showSoft(el) {
+  clearTimeout(leaving.get(el));
+  delete el.dataset.leaving;
+  el.hidden = false;
 }
 
 function pick(n) {
@@ -2840,7 +3098,8 @@ function menuRows() {
 }
 
 function openModels(on) {
-  modelsEl.hidden = !on;
+  if (on) showSoft(modelsEl);
+  else hideSoft(modelsEl);
   modelPill.setAttribute("aria-expanded", String(on));
   if (!on) {
     // 焦点还在清单里的话还给输入框，不然它落在一个藏起来的元素上，键盘就没处去了
@@ -2984,6 +3243,28 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+/* 确认卡的数字键（见 armAsk）。**只在没在打字的时候接**：焦点在别的输入框里
+   （设置、筛选、自己写），或者在输入框里而且框里已经有字 —— 那时候数字就是字。
+   补全、换模型、设置面板开着的时候也不接：手在那儿干别的。
+   输入法正在拼的时候（isComposing）数字是在选候选词，更不能接。 */
+document.addEventListener("keydown", (e) => {
+  const ask = pendingAsk;
+  if (!ask || !ask.card.dataset.armed || ask.pressing) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.repeat) return;
+  if (!/^[1-9]$/.test(e.key)) return;
+  const at = document.activeElement;
+  const typing = at && at.matches("input, textarea, select, [contenteditable]")
+    && !(at === inputEl && !inputEl.value);
+  if (typing || !paletteEl.hidden || modelsOpen() || shelfOpen() || botShopOpen()) return;
+  const btn = ask.keys[Number(e.key) - 1];
+  if (!btn) return;
+  e.preventDefault();
+  ask.pressing = true;
+  // 键盘没有 :active —— 先让它按下去一下，看得见按的是哪个，再点
+  btn.dataset.pressed = "1";
+  setTimeout(() => { delete btn.dataset.pressed; btn.click(); }, REDUCED ? 0 : 110);
+});
+
 $("send").onclick = submit;
 $("stop").onclick = () => send({ op: "interrupt" });
 
@@ -3069,7 +3350,7 @@ document.body.append(pickBar);
 let picked = "";
 
 function hidePick() {
-  pickBar.hidden = true;
+  hideSoft(pickBar);
   picked = "";
 }
 
@@ -3084,12 +3365,19 @@ function showPick() {
   const box = sel.getRangeAt(0).getBoundingClientRect();
   if (!box.width && !box.height) return hidePick();
   picked = text;
-  pickBar.hidden = false;
+  showSoft(pickBar);
   // 先摆出来才量得到自己的尺寸；夹在视口里，别飘到看不见的地方
   const w = pickBar.offsetWidth;
   const h = pickBar.offsetHeight;
   const x = Math.min(Math.max(8, box.left + box.width / 2 - w / 2), innerWidth - w - 8);
-  const y = box.top - h - 8 < 8 ? box.bottom + 8 : box.top - h - 8;
+  // 上面放不下就翻到选区下方，长出来的原点跟着翻（见 app.css `.pick-bar[data-below]`）
+  const below = box.top - h - 8 < 8;
+  // **竖着也要夹住**：选区比一屏还长、或者一截已经滚出去了，上下两个位置都可能在视口外。
+  // 原来只夹了横向 —— 上面那句「夹在视口里」只做了一半。0.80.0 对话栏真能滚了之后，
+  // 夹具选中的第一段落在视口上方，浮条跑到了 y = −250
+  const y = Math.min(Math.max(8, below ? box.bottom + 8 : box.top - h - 8), innerHeight - h - 8);
+  if (below) pickBar.dataset.below = "1";
+  else delete pickBar.dataset.below;
   pickBar.style.left = Math.round(x) + "px";
   pickBar.style.top = Math.round(y) + "px";
 }
@@ -3124,18 +3412,95 @@ toEnd.type = "button";
 toEnd.className = "to-end";
 toEnd.title = "回到最新";
 toEnd.hidden = true;
-toEnd.textContent = "↓";
+// 第二格是「3 条新」那截字，平时 0 宽（见 app.css `.to-end`）
+toEnd.innerHTML = '<span class="to-end__arrow" aria-hidden="true">↓</span>'
+  + '<span class="to-end__n"><span></span></span>';
 /* **摆进 body 那张网格里，跟 `.sheet` 同一格。** 网格项是可以重叠的，
    所以它既不参与对话流的排版、也不会跟着内容滚走 —— 放进 `.sheet` 里面的话，
    要么占掉底下一条空带（显隐时还会抖一下），要么 `position: absolute`
    跟着滚动内容飘上去。 */
 document.body.append(toEnd);
+/* 有攒着没看的：落到「以下是新的」那条线上，从第一条新的读起。
+   线已经在视野上面了（新的那截看过一部分了），就直接到底。 */
 toEnd.onclick = () => {
-  sheetEl.scrollTo({ top: sheetEl.scrollHeight, behavior: REDUCED ? "auto" : "smooth" });
+  const mark = unseen.count && unseen.mark && unseen.mark.isConnected ? unseen.mark : null;
+  const at = mark
+    ? mark.getBoundingClientRect().top - sheetEl.getBoundingClientRect().top + sheetEl.scrollTop - 16
+    : -1;
+  sheetEl.scrollTo({
+    top: mark && at > sheetEl.scrollTop + 8 ? at : sheetEl.scrollHeight,
+    behavior: REDUCED ? "auto" : "smooth",
+  });
 };
-sheetEl.addEventListener("scroll", () => { toEnd.hidden = atBottom(); });
+sheetEl.addEventListener("scroll", () => { sawAll(); drawToEnd(); });
+
+/* ── 你在不在 ────────────────────────────────────────────────
+   两处用它：没看见的那条线（markUnseen）和下面的系统通知。
+   回来的方式不止 focus 一种（从别的工作区切回来、直接点一下窗口），
+   按下鼠标也算回来了 —— 捕获阶段听，别被哪个 stopPropagation 截走。 */
+window.addEventListener("blur", () => { away = true; });
+window.addEventListener("focus", () => { away = false; sawAll(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) away = true; });
+document.addEventListener("pointerdown", () => { if (away) { away = false; sawAll(); } }, true);
+
+/* ── 你不在的时候叫你一声 ────────────────────────────────────
+   它在等你点头、或者一轮长活跑完了，而窗口不在前台 —— 这时候屏幕上画什么都没用，
+   原来它就那么等着，等到你自己想起来切回来看。
+   **只在人不在的时候叫**：看着的时候再弹一条系统通知就是噪音。
+   Wayland 上「窗口闪一下」那条路是空的（tao 的 request_user_attention 走 GTK3 的
+   urgency hint，Wayland 下不起作用），所以走系统通知：Rust 那边调 notify-send。
+   浏览器那条路（devserver，只给测试用）不发 —— 夹具把这个函数换掉，数它叫了几次。 */
+const LONG_TURN = 10;       // 秒。NN/g：过了 10 秒，人的注意力就不在这个对话上了
+
+function notifyUser(title, body) {
+  if (!TAURI) return;
+  TAURI.core.invoke("notify", { title, body }).catch(() => { /* 叫不出来不耽误别的 */ });
+}
+
+/* ── 空对话时输入框在正中（Anthropic 那套皮） ─────────────────
+   见 app.css「问候、例子和输入框是一组」。这儿只管量：「开始」的顶到输入卡片的底
+   是一组，抬到上下留白 42 : 58 的位置，抬多少写进 --lift。
+   **敲字换行时卡片往下长、顶边不动**：量的时候拿「空着时那一行的高度」（rowBase）
+   当它的高度 —— 多出来的那截算成往下长，而不是整组重新居中（那样每换一行，
+   输入框就往上窜半行，字在眼皮底下跳）。抬到 0 之后再长，就只能往上长了。
+   「开始」的位置用 offsetTop 量，不用它自己的 getBoundingClientRect：
+   它刚出现时在浮现（translate 8px），量进去就差那 8px，浮现完也没人再量。 */
+const LIFT_AT = 0.42;
+const rowEl = document.querySelector(".composer__row");
+const statusEl = document.querySelector(".status");
+let rowBase = 0;
+
+function measureLift() {
+  const hello = $("hello");
+  if (!hello || document.documentElement.dataset.theme !== "anthropic"
+      || sheetEl.hidden || !$("term").hidden) return setLift(0);
+  const row = rowEl.getBoundingClientRect();
+  if (!row.height) return;       // 设置面板开着时输入区是藏着的，量出来全是 0
+  if (!inputEl.value || !rowBase) rowBase = row.height;
+  // 对话流和输入框被同一个 --lift 挪着，加回来就是没挪之前的位置
+  const top = streamEl.getBoundingClientRect().top + liftPx + hello.offsetTop;
+  const bottom = row.top + liftPx + rowBase;
+  const from = sheetEl.getBoundingClientRect().top;
+  const free = statusEl.getBoundingClientRect().top - from - (bottom - top);
+  setLift(Math.max(0, Math.round(top - from - Math.max(0, free) * LIFT_AT)));
+}
+
+function setLift(px) {
+  if (px === liftPx) return;
+  liftPx = px;
+  document.body.style.setProperty("--lift", px + "px");
+}
+
+liftWatch = new ResizeObserver(() => measureLift());
+liftWatch.observe(sheetEl);
+liftWatch.observe(rowEl);
 
 syncHello();      // 一进来就是空的，这一下把「开始」那块摆上
 syncInds();
 connect();
 inputEl.focus();
+
+// 侧栏收放的过渡等第一帧画完才挂上：不然「上次是收着的」启动时也要演一遍
+if (!REDUCED) {
+  requestAnimationFrame(() => requestAnimationFrame(() => { document.body.dataset.motion = "1"; }));
+}

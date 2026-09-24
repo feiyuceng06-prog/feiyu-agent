@@ -815,6 +815,13 @@ class Server:
             # 跟 esc 落在同一处，0.12.0 那套补历史的机制原样生效
             if self.busy:
                 _thread.interrupt_main()
+                # **主线程要是正卡在等你点头上，光扔中断叫不醒它。** interrupt_main 只是
+                # 立一面旗、不是真信号，`Protocol.request` 里那个阻塞的 box.get 要等满
+                # REPLY_TIMEOUT（600 秒）才回来看旗 —— 确认卡开着时按 esc / 停止键，
+                # 十分钟里什么都不发生，等你终于点了同意，它才「刚好」停下（0.80.0 量过：
+                # 一个 4 秒的 get，中断扔在 0.5 秒，被打断在 4.00 秒）。
+                # 把等着的都放掉：它立刻醒、按没回话处理（拒绝），接着就撞上那面旗。
+                self.proto.fail_all()
         elif op in ("prompt", "command"):
             text = str(msg.get("text") or "")[:MAX_TEXT]
             self.inbox.put((op, text))

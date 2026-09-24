@@ -369,6 +369,10 @@ After install it also shows up in your app launcher as **Feiyu**.
 
 The current model sits at the bottom right of the input box; **click it to switch** from a list, with a filter once it gets long and a mark on the one in use.
 
+**When it asks for approval you can answer from the keyboard:** the buttons carry `1` `2` `3` `4` in the order they are laid out. The keys only count once the card has been up for a moment (twice as long for commands that can't be undone), so a digit you were already typing lands in the input box instead of approving something; while the input box has text in it, digits are just text. *Write my own* opens a line inside the card instead of a system dialog.
+
+**It tells you when you weren't looking.** If you scroll back while it keeps working, or switch to another window, a *new below here* line marks the first thing you missed and the arrow at the bottom right shows how many there are — clicking it takes you to that line, not to the very bottom. With the window in the background, a desktop notification (`notify-send`) says when it needs your approval — with the command — or when a turn longer than ten seconds has finished.
+
 The sidebar holds new-session and skills-and-tools, with past conversations below: click one to switch (the agent's context follows, not just the view), `shift+click` pins it, hovering reveals a `×` that deletes it (it asks first), and the search box filters the list locally. `Ctrl B` collapses the sidebar, `Ctrl N` starts a new session. The row at the top is the workspace; click it to switch directories.
 
 **Settings** (`Ctrl K`) is five tabs: general, skills, tools, MCP, profiles. "General" holds the appearance, permission mode, answer style, model, helper model, bash sandbox, verify command, permission rules and long-term memory — clicking one takes effect immediately and runs exactly the slash command you would type in the terminal. The model entry
