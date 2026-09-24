@@ -75,6 +75,17 @@ THEMES = {
         "glyphs": {"BULLET": "◆", "ELBOW": "└", "SPARK": "✳", "FRAMES": "◐◓◑◒",
                    "CORNERS": "╔╗╚╝", "DOT": "·", "LOGO": True},
     },
+    # Anthropic：Claude Code 那个样子 —— 记号照默认那套（⏺ ⎿ ✻），品牌色换成用户自己
+    # 那档陶土 #C96442（桌面端同名主题、kitty、nvim 都是这个色）
+    # 终端的底色不归我们管，所以每个色都按「kitty 浅底 #FAF9F5 和深底 #141414 上都 ≥3.7:1」
+    # 挑的：陶土 3.70 / 4.72、灰 4.07 / 4.30、加号 4.25 / 4.12、减号 4.29 / 4.08
+    "anthropic": {
+        "label": "Anthropic",
+        "rgb": {"grey": "125;122;114", "blue": "78;130;98", "red": "196;82;72",
+                "amber": "164;120;48", "brown": "201;100;66"},
+        "glyphs": {"BULLET": "⏺", "ELBOW": "⎿", "SPARK": "✻", "FRAMES": "✳✻✽✶",
+                   "CORNERS": "╭╮╰╯", "DOT": "•", "LOGO": True},
+    },
 }
 THEME = "default"
 

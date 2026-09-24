@@ -10,7 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from feiyu import agent as agent_mod
 from feiyu import hooks
 from feiyu.agent import Feiyu
 from feiyu.tools import ToolResult

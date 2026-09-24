@@ -1,4 +1,5 @@
 import codecs
+import copy
 import difflib
 import ipaddress
 import json
@@ -33,6 +34,12 @@ UNDO_MAX = 30             # /undo 最多退这么多步 存的是整份文件，
 SEARCH_MAX_CONTEXT = 10
 
 
+# symbol 说明里讲 outline 的两段 单独拎出来是因为 A/B 的 outline 关闭档要把它们原样摘掉
+# （`without_outline`），改这两句不用管那边，改别的句子别把它们拆开
+_OUTLINE_DESC = ("outline 列出一个文件里有哪些类和函数（带行号），**几百行以上的文件先用它定位、"
+                 "再用 read_file 的 offset / limit 只读那一段**，比整份读进来省一个数量级 ")
+_OUTLINE_ARGS = "；outline 只要 path"
+
 TOOL_SCHEMAS = [
     {
         "name": "bash",
@@ -62,6 +69,12 @@ TOOL_SCHEMAS = [
                 "reset": {
                     "type": "boolean",
                     "description": "先把攒下来的变量和函数清空再执行，环境被搞坏了才用 ",
+                },
+                "network": {
+                    "type": "boolean",
+                    "description": "这条命令要联网（装依赖、拉代码、调接口）时设为 true "
+                                   "读过网页、搜索结果或 MCP 返回的内容之后，没带它的命令"
+                                   "是断网跑的；带了它要先经用户同意 ",
                 },
             },
             "required": ["command"],
@@ -362,11 +375,10 @@ TOOL_SCHEMAS = [
         "name": "symbol",
         "description": (
             "按语义看代码结构 走语言服务器（pyright / clangd / rust-analyzer 等，装了才能用）"
-            "outline 列出一个文件里有哪些类和函数（带行号），**几百行以上的文件先用它定位、"
-            "再用 read_file 的 offset / limit 只读那一段**，比整份读进来省一个数量级 "
+            + _OUTLINE_DESC +
             "definition 看一个符号定义在哪，references 看哪些地方用到了它，比 search 准："
             "同名的变量、注释、字符串不会混进来 跨文件改名、看某个函数被谁调用优先用它 "
-            "definition / references 要给 name（最好带上行号）；outline 只要 path "
+            "definition / references 要给 name（最好带上行号）" + _OUTLINE_ARGS + " "
             "没装对应的服务器时会明说，那就退回 search "
         ),
         "input_schema": {
@@ -511,16 +523,96 @@ GIT_DIFF_CAP = 12_000
 # 查到哪为止是量出来的：语法错要查（零成本、一定是它的锅），
 # 整文件的语言服务器诊断不要（A/B 负收益，理由在 `_diagnose` 的 docstring 里）。
 
-# 评测用的 A/B 开关：`FEIYU_ASSIST=off` 把 0.68.0 加的那几样"帮忙的东西"全关掉
-# （写盘前查语法、动手前先复现、symbol 的 outline）。
+# 评测用的 A/B 开关：0.68.0 加的三样"帮忙的东西"，**一样一个**（0.79.0 拆开的）
 #
-# **为什么要有它**：要证明这几样有用，就得拿同一批题跑两遍对比。而"改动之前"
+#   FEIYU_SYNTAX_CHECK=off   写盘前查语法
+#   FEIYU_REPRODUCE=off      动手前先复现
+#   FEIYU_OUTLINE=off        symbol 的 outline（只摘这一档，definition / references 照旧）
+#
+# `FEIYU_ASSIST=off` 照旧是总闸，三样一起关
+#
+# **为什么要有这些开关**：要证明它们有用，就得拿同一批题跑两遍对比。而"改动之前"
 # 那份代码在工作区里已经不存在了，靠 git 分也分不干净（同一批改动里还混着
-# 0.67.2 的修复）。同一个二进制跑两遍、只翻这一个开关，才是能说清的对照。
+# 0.67.2 的修复）。同一个二进制跑两遍、只翻开关，才是能说清的对照。
 #
-# 平时不要用它。它只在 `evals/` 里出现。
-def assist_on() -> bool:
-    return os.environ.get("FEIYU_ASSIST", "").strip().lower() not in ("off", "0", "no")
+# **为什么要拆**：三样捆在一个开关上，量出来好也好坏也好，都说不清是谁的 ——
+# 语法检查几乎肯定是正的，「动手前先复现」是最像会加轮数的那个，捆着量会互相抵掉
+#
+# **总闸以前多摘了一样**：它把整个 symbol 工具拿掉了，连 0.36.0 就有的
+# definition / references 也一起没了，比它自称关掉的「0.68.0 那几样」多 现在总闸
+# = 三个分开关都关，只摘 outline 拿 FEIYU_ASSIST=off 跟 0.79.0 之前的存档比时记着这条
+#
+# 平时不要用它们。它们只在 `evals/` 里出现，**每加一个都要进 tbench 适配器的转发名单**
+def _assist(name: str) -> bool:
+    off = ("off", "0", "no")
+    if os.environ.get("FEIYU_ASSIST", "").strip().lower() in off:
+        return False
+    return os.environ.get(name, "").strip().lower() not in off
+
+
+def syntax_check_on() -> bool:
+    return _assist("FEIYU_SYNTAX_CHECK")
+
+
+def reproduce_on() -> bool:
+    return _assist("FEIYU_REPRODUCE")
+
+
+def outline_on() -> bool:
+    return _assist("FEIYU_OUTLINE")
+
+
+def trust_outside() -> bool:
+    """`FEIYU_TRUST_OUTSIDE=1` 把「读过外部内容之后，联网要人点头」那道闸整个关掉
+
+    给评测用：跑分的地方没人能点头，那道闸在那儿只会拒，量到的就不是它本来的本事了
+    （而且容器本身就是一次性的，里面没有值得偷的东西）平时别开
+    """
+    return os.environ.get("FEIYU_TRUST_OUTSIDE", "").strip().lower() in ("1", "on", "yes")
+
+
+# 连不了网的命令 读过外部内容、而沙箱没开断不了网的时候，只有这些不用问（`agent._egress`）
+#
+# **只收自己拉不起别的程序的。** find（-exec）、rg（--pre）、sort（--compress-program）、
+# sed / awk（e 命令、system()）、xargs、env 都能执行任意程序，看着再"只读"也一个不收
+# **git 也不收**：它会执行仓库配置里写的程序（`git status` 跑 core.fsmonitor、`git diff`
+# 跑 diff.external 和 textconv），而 `.git/config` 就在工作区里、auto 模式下 write_file 不用问
+# 重定向照 permissions.segments 切成单独一段：`> /dev/tcp/主机/端口` 那段不在名单里，整条就不算
+OFFLINE_SAFE = ("ls", "pwd", "echo", "wc", "which", "cat", "head", "tail", "grep", "diff",
+                "stat", "file", "du", "df", "date", "tree")
+
+
+def offline_safe(command: str) -> bool:
+    if permissions._SUBSTITUTION.search(command):
+        return False
+    parts = permissions.segments(command)
+    return bool(parts) and all(
+        any(p == head or p.startswith(head + " ") for head in OFFLINE_SAFE) for p in parts)
+
+
+# 上面那份名单认的是**名字**，名字背后是哪个程序要另外钉住：auto 模式下 write_file
+# 不用问，写一个 `.venv/bin/cat` 进去，venv 激活过的话 PATH 里它排在前面，于是
+# 「cat 连不了网」就不成立了 shell 状态里留着的同名函数同理 所以这几条在子 shell 里
+# 跑、PATH 钉死成系统目录、同名函数先摘掉 —— 子 shell 里改的东西不会写回 shell 状态
+_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def pinned(command: str) -> str:
+    heads = sorted({h.split(" ")[0] for h in OFFLINE_SAFE})
+    return "( PATH=%s; unset -f %s 2>/dev/null; %s\n)" % (
+        _SYSTEM_PATH, " ".join(heads), command)
+
+
+def without_outline(schema: dict) -> dict:
+    """outline 关掉那一档的 symbol：enum 里去掉它，**说明里也不许再提** ——
+    提了它照样会去调，撞一句"没有这一档"白花一轮，那一档量到的就不只是"没有 outline"了"""
+    out = copy.deepcopy(schema)
+    out["description"] = (out["description"].replace(_OUTLINE_DESC, "")
+                          .replace(_OUTLINE_ARGS, ""))
+    props = out["input_schema"]["properties"]
+    props["action"]["enum"] = [a for a in props["action"]["enum"] if a != "outline"]
+    props["name"]["description"] = "符号名 "
+    return out
 
 
 # 整写一个已存在的文件、而内容跟原文大面积重合时，在结果里说一句改用 edit_file。
@@ -625,8 +717,10 @@ def _keep_secrets() -> bool:
 # 加错了比不加更误导
 _SSH_FAILS = ("Host key verification failed", "Permission denied (publickey",
               "Could not read from remote repository", "No such file or directory: .ssh")
-_NET_FAILS = ("Could not resolve host", "Network is unreachable",
-              "Temporary failure in name resolution", "Name or service not known")
+_NET_FAILS = ("Could not resolve host", "Couldn't resolve host", "Network is unreachable",
+              "Temporary failure in name resolution", "Name or service not known",
+              # pip / npm / node 的写法
+              "Failed to establish a new connection", "getaddrinfo", "ENOTFOUND", "EAI_AGAIN")
 
 
 _BARE_PY = re.compile(r"(?:^|[\s;&|(])(?:python3?|pytest|ruff|pip3?|mypy|black)\b")
@@ -650,12 +744,21 @@ def _venv_hint(command: str, out: str, root: Path) -> str:
     return ""
 
 
-def _sandbox_note(out: str, level: str) -> str:
+def _sandbox_note(out: str, level: str, outside: str = "") -> str:
     """返回该追加在输出末尾的说明，不是沙箱造成的就返回空串 只说原因和出路，
-    模型才不会闷头重试同一条命令 """
+    模型才不会闷头重试同一条命令
+
+    outside 非空 = 这一条是因为读过外部内容才断网跑的 撞上没网要说可以带 network，
+    不说的话它会以为是依赖坏了、镜像挂了，绕着一个不存在的问题打转 """
     if "Read-only file system" in out:
         return ("\n\n（bash 跑在沙箱里，工作区以外一律只读 "
                 "要动工作区外的东西，跟用户说一声让他自己做，或者让他 /sandbox off ）")
+    if "Cannot connect to the Docker daemon" in out or "docker.sock: connect" in out:
+        return ("\n\n（bash 跑在沙箱里，docker 的 socket 被挡在外面 —— 碰得到它就能绕过沙箱"
+                "往任何地方写 要用 docker 的话跟用户说一声让他自己跑，或者让他 /sandbox off ）")
+    if outside and level != "strict" and any(mark in out for mark in _NET_FAILS):
+        return ("\n\n（这段对话读过外部内容（%s），bash 现在是断网跑的 "
+                "这条要是确实得联网，带上 network: true 再跑一次 —— 会先问用户 ）" % outside)
     if level == "strict" and any(mark in out for mark in _NET_FAILS):
         return ("\n\n（bash 跑在 strict 档沙箱里，不联网 push / 拉依赖这类要出网的操作"
                 "跟用户说一声，让他自己做或者 /sandbox workspace ）")
@@ -934,6 +1037,21 @@ _FETCH_NOTES = {
     404: "这个地址不存在 如果它是你拼出来或者凭记忆写的，别接着猜下一个，"
          "用 web_search 搜到真实地址再抓 ",
 }
+
+
+def _error_body(exc, limit: int) -> str:
+    """HTTPError 的正文读出来（额度用完 / key 不对只看状态码分不清），然后关掉 ——
+    它也是个响应体，不关就是一条 ResourceWarning（跟 mcp.py 那处同一个理由）
+    读的时候连接断了就当没有正文，别让一个 OSError 顶替掉真正的报错"""
+    try:
+        return exc.read().decode("utf-8", "replace")[:limit] if hasattr(exc, "read") else ""
+    except OSError:
+        return ""
+    finally:
+        try:
+            exc.close()
+        except Exception:
+            pass
 
 
 def _fetch_note(short: str) -> str:
@@ -1362,6 +1480,14 @@ class Toolbox:
         # 技能：名字 -> Skill 由 agent 在载入时写进来（项目那份要先经用户同意）
         self.skills: dict[str, skills_mod.Skill] = {}
         self.mcp = mcp.Registry(self.root)  # 外部 MCP 服务器的工具，启动时载入
+        # 这段对话读过的第一份外部内容（网页 / 搜索 / MCP），空串就是没读过
+        # 由 agent 记（它看得见每条结果），这里只拿它决定 bash 断不断网
+        self.outside = ""
+
+    def _offline(self, args: dict) -> bool:
+        """这一条 bash 要不要断网跑：读过外部内容、又没说要联网
+        要联网的那条在 agent 的闸上已经问过人了（`agent._egress`），到这儿就放它出网"""
+        return bool(self.outside) and not args.get("network") and not trust_outside()
 
     def _diagnose(self, target: Path, text: str, before: str | None = None) -> tuple[str, bool]:
         """写完之后这个文件的语法还成立吗 返回 (给模型看的话, 算不算写失败)
@@ -1382,7 +1508,7 @@ class Toolbox:
         这次编辑没让它更坏，就不该赖在模型头上 —— 那会让它去修一个它没造成、
         也未必该由它修的问题。
         """
-        if not assist_on():
+        if not syntax_check_on():
             return "", False
         bad = _syntax_error(target, text)
         if bad and (before is None or not _syntax_error(target, before)):
@@ -1468,19 +1594,25 @@ class Toolbox:
         # 直接从 background 那条路返回了，reset 被默默吃掉 —— 模型以为环境清干净了
         if args.get("reset"):
             self.shell_reset()
+        offline = self._offline(args)
+        # 断不了网又不用问的那几条，照 `pinned` 那段钉住它们到底是哪个程序；
+        # 只改实际跑的那一串，下面的提示照旧看原命令
+        run = command
+        if offline and not sandbox.can_cut_net() and offline_safe(command):
+            run = pinned(command)
         if args.get("background"):
-            return self._start_job(command)
+            return self._start_job(command, offline=offline, run=run)
         timeout = int(args.get("timeout", 120))
         # 命令末尾把 PWD 写进临时文件，这样 cd 能跨调用保持；
         # 走文件而不是 stdout，免得污染给模型看的输出
         fd, pwd_file = tempfile.mkstemp(prefix="feiyu-pwd-")
         os.close(fd)
         state = self._shell_state_path()
-        wrapped = _state_restore(state) + _save_trap(pwd_file, state) + command
+        wrapped = _state_restore(state) + _save_trap(pwd_file, state) + run
         # 沙箱里的 /tmp 是自己的 tmpfs，记 pwd 和 shell 状态的那两个文件得单独
         # 放行写入，否则外面读不到，cd 和 export 就都跨不了调用
         boxed = sandbox.wrap(wrapped, workspace=self.root, cwd=self.cwd,
-                             writable=[pwd_file, state])
+                             writable=[pwd_file, state], offline=offline)
         try:
             proc = subprocess.run(
                 boxed or [sandbox.SHELL, "-c", wrapped],
@@ -1506,7 +1638,8 @@ class Toolbox:
         if proc.returncode != 0:
             out += _venv_hint(command, out, self.root)
             if boxed:
-                out += _sandbox_note(out, sandbox.effective()[0])
+                out += _sandbox_note(out, sandbox.effective()[0],
+                                     self.outside if offline else "")
         out = _truncate(out)
         body = out if out.strip() else "（无输出）"
         native = _native_for(command)
@@ -1528,15 +1661,16 @@ class Toolbox:
             detail=detail,
         )
 
-    def _start_job(self, command: str) -> ToolResult:
+    def _start_job(self, command: str, offline: bool = False, run: str = "") -> ToolResult:
         """挂后台 **继承 shell 状态但不写回**：它跟后面的命令是并行的，
         cd 和 export 跟着它走只会串味；而继承是必要的 —— 前面刚 activate 了 venv，
         挂后台跑的 pytest 也该在那个 venv 里
         """
         state = self.shell_state
-        script = (_state_restore(state) + command) if state else command
+        run = run or command
+        script = (_state_restore(state) + run) if state else run
         boxed = sandbox.wrap(script, workspace=self.root, cwd=self.cwd,
-                             writable=[state] if state else ())
+                             writable=[state] if state else (), offline=offline)
         proc = subprocess.Popen(
             boxed or [sandbox.SHELL, "-c", script],
             cwd=None if boxed else self.cwd,
@@ -1889,6 +2023,7 @@ class Toolbox:
                 raw = reply.read(_WEB_MAX_BYTES)
                 final = reply.geturl()
         except urllib.error.HTTPError as exc:
+            _error_body(exc, 0)
             return None, f"HTTP {exc.code} {exc.reason}", f"HTTP {exc.code}"
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return None, f"抓取失败：{exc}", "抓取失败"
@@ -1905,7 +2040,7 @@ class Toolbox:
                 raw = json.loads(reply.read(_WEB_MAX_BYTES).decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             # 报错正文要带上 额度用完（402）和 key 不对（401）只看状态码分不清
-            detail = exc.read().decode("utf-8", "replace")[:200] if hasattr(exc, "read") else ""
+            detail = _error_body(exc, 200)
             return None, "HTTP %s %s" % (exc.code, " ".join(detail.split()))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return None, "%s" % exc
@@ -2128,7 +2263,7 @@ class Toolbox:
             with _opener.open(request, timeout=IMAGE_TIMEOUT) as reply:
                 raw = json.loads(reply.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:300] if hasattr(exc, "read") else ""
+            detail = _error_body(exc, 300)
             return ToolResult("出图接口报错 HTTP %s %s" % (exc.code, detail),
                               is_error=True, summary="HTTP %s" % exc.code)
         except (urllib.error.URLError, OSError, ValueError) as exc:
@@ -2272,7 +2407,15 @@ class Toolbox:
                           summary="记住了" if ok else "没记：" + note[:40])
 
     def _git(self, *argv: str) -> tuple[int, str]:
-        """在工作区根目录跑一条 git，返回 (退出码, 合并后的输出) """
+        """在工作区根目录跑一条 git，返回 (退出码, 合并后的输出)
+
+        **读的那几样不许拉起仓库配置里写的程序。** git 工具在沙箱外跑、而且出厂就放行
+        （Git(status/diff/log)），可 `.git/config` 在工作区里、auto 模式下 write_file
+        不用问 —— 往里写一句 `core.fsmonitor = curl …`，下一次 `git status` 就把它跑了，
+        沙箱开着也挡不住 fsmonitor 对这几样没用处，关掉只是慢一点
+        """
+        if argv and argv[0] in ("status", "diff", "log", "rev-parse"):
+            argv = ("-c", "core.fsmonitor=false", *argv)
         try:
             done = subprocess.run(
                 ["git", *argv], cwd=self.root, capture_output=True, text=True,
@@ -2316,12 +2459,13 @@ class Toolbox:
     def _git_diff(self, args: dict, paths: list[str]) -> ToolResult:
         scope = ["--staged"] if args.get("staged") else []
         tail = ["--"] + paths if paths else []
-        code, stat = self._git("diff", "--stat", *scope, *tail)
+        # 外部 diff 程序和 textconv 同理：配置里写的命令，git diff 会照着跑
+        code, stat = self._git("diff", "--no-ext-diff", "--no-textconv", "--stat", *scope, *tail)
         if code != 0:
             return ToolResult(stat, is_error=True, summary="git diff 失败")
         if not stat.strip():
             return ToolResult("没有%s改动 " % ("已暂存的" if scope else ""), summary="没有改动")
-        code, body = self._git("diff", *scope, *tail)
+        code, body = self._git("diff", "--no-ext-diff", "--no-textconv", *scope, *tail)
         if code != 0:
             return ToolResult(body, is_error=True, summary="git diff 失败")
         summary = stat.strip().splitlines()[-1].strip()
@@ -2377,9 +2521,10 @@ class Toolbox:
 
     def _tool_symbol(self, args: dict) -> ToolResult:
         action = args.get("action")
-        if action not in ("definition", "references", "outline"):
-            return ToolResult("action 只能是 definition / references / outline ",
-                              is_error=True)
+        allowed = ("definition", "references", "outline") if outline_on() else (
+            "definition", "references")
+        if action not in allowed:
+            return ToolResult("action 只能是 %s " % " / ".join(allowed), is_error=True)
         target = self._resolve(args["path"])
         if not target.is_file():
             return ToolResult(f"{args['path']} 不存在 ", is_error=True, summary="文件不存在")

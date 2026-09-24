@@ -136,3 +136,37 @@ class TestOutline(unittest.TestCase):
         for r in self.rows():
             self.assertIn(r["name"], text[r["line"] - 1],
                           "%s 说在第 %d 行，那一行是 %r" % (r["name"], r["line"], text[r["line"]-1]))
+
+
+class TestClose(unittest.TestCase):
+    """关语言服务器要收尸、关管道 —— `--serve` 一跑一整天，它死一次重起一次，
+    只 kill 不收的话每次漏一对 fd，还挂着一个僵尸 """
+
+    def test_收了尸也关了管道(self):
+        import subprocess
+        client = object.__new__(lsp.Client)
+        client.proc = subprocess.Popen(["sleep", "30"], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE)
+        client.close()
+        self.assertIsNotNone(client.proc.returncode)
+        self.assertTrue(client.proc.stdin.closed)
+        self.assertTrue(client.proc.stdout.closed)
+
+    def test_死了的那个先关掉再重起(self):
+        import types
+        import unittest.mock
+        closed = []
+
+        class Dead:
+            proc = types.SimpleNamespace(poll=lambda: 1)
+
+            def close(self):
+                closed.append(1)
+
+        pool = lsp.Pool(Path("/tmp"))
+        pool.clients["pyright-langserver"] = Dead()
+        with unittest.mock.patch.object(lsp, "server_for",
+                                        return_value=["pyright-langserver", "--stdio"]), \
+             unittest.mock.patch.object(lsp, "Client", lambda argv, root: "新起的"):
+            self.assertEqual(pool.get(Path("/tmp/x.py")), "新起的")
+        self.assertEqual(closed, [1])

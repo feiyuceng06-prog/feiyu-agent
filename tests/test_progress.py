@@ -2,7 +2,6 @@
 整份替换、会过期、做完就删、措辞里必须写明"可能已经过时"
 """
 
-import json
 import os
 import tempfile
 import time

@@ -560,7 +560,8 @@ class TestThinking(Base):
         """顺序反了的话前端会先收到正文、再收到属于它前面那段的思考。"""
         stream = ui.Stream()
         stream.thinking(5, "先想")
-        stream.write("再说")
+        with contextlib.redirect_stdout(io.StringIO()):     # 非 tty 时 write 是真打印
+            stream.write("再说")
         self.assertEqual(self.sink.kinds(), ["thinking", "text"])
 
     def test_没想过就不报空事件(self):

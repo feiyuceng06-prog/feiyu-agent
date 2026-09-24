@@ -4,7 +4,6 @@ import json
 import os
 import stat
 import tempfile
-import time
 import unittest
 
 from feiyu import trace

@@ -278,6 +278,19 @@ class Client:
             self.proc.kill()
         except OSError:
             pass
+        # **光 kill 不够，还得收尸、关管道。** 不 wait 的话它挂成僵尸，stdin / stdout
+        # 两根管道一直开着 —— 退出时无所谓，可 `--serve` 一跑一整天，语言服务器
+        # 死一次重起一次（`Pool.get`），每次漏一对 fd
+        try:
+            self.proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        for pipe in (self.proc.stdin, self.proc.stdout):
+            try:
+                if pipe:
+                    pipe.close()
+            except OSError:
+                pass
 
 
 class Pool:
@@ -296,7 +309,8 @@ class Pool:
         with self.lock:
             client = self.clients.get(key)
             if client is not None and client.proc.poll() is not None:
-                client = None      # 死了就重起一个
+                client.close()     # 死了就重起一个，旧的那对管道先关掉
+                client = None
             if client is None:
                 client = Client(argv, self.root)
                 self.clients[key] = client

@@ -556,3 +556,32 @@ class TestCompare表(unittest.TestCase):
         got = report.compare(甲, 乙)
         self.assertIn("0.365", got)
         self.assertIn("0.912", got)
+
+
+class TestForwardedSwitches(unittest.TestCase):
+    """A/B 开关得转发进容器，不然两档跑出来一模一样（0.73.0 的坑：`FEIYU_ASSIST`
+    压根没到容器里，看着像"这个改动没影响"）
+
+    适配器 `import harbor` 进不了主用例集，所以从源码里把名单抠出来比
+    """
+
+    @staticmethod
+    def forwarded() -> set[str]:
+        import ast
+        src = (Path(__file__).resolve().parent.parent / "evals" / "tbench.py").read_text(
+            encoding="utf-8")
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.Assign) and any(
+                    getattr(t, "id", "") == "AB_SWITCHES" for t in node.targets):
+                return set(ast.literal_eval(node.value))
+        raise AssertionError("tbench.py 里找不到 AB_SWITCHES")
+
+    def test_feiyu_认的开关都转发了(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "feiyu" / "tools.py").read_text(
+            encoding="utf-8")
+        names = set(re.findall(r'_assist\("(FEIYU_\w+)"\)', src))
+        names |= set(re.findall(r'os\.environ\.get\("(FEIYU_\w+_HINT)"', src))
+        names.add("FEIYU_ASSIST")
+        self.assertGreaterEqual(len(names), 6, names)
+        self.assertEqual(names - self.forwarded(), set())

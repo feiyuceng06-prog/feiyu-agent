@@ -379,11 +379,13 @@ def connect(workspace: str):
         target = info.get("socket")
         if not target or not isinstance(target, str):
             continue
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(CONNECT)
             sock.connect(target)
         except OSError:
+            # 连不上的这个要关掉：挨个试编辑器，每试失败一个就漏一个 fd
+            sock.close()
             continue
         bridge = Bridge(sock, info)
         # 握一次手再用：lock 文件在、进程也在，但 socket 可能是上一次会话留下的

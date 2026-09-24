@@ -7,16 +7,18 @@ import re
 import subprocess
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 from . import pricing, ui
 from . import history, hooks as hooks_mod
+from . import lessons as lessons_mod
 from . import mentions as mentions_mod
 from . import profiles as profiles_mod
 from . import progress as progress_mod
 from . import bots as bots_mod
 from . import credits as credits_mod
-from . import enabled, keys, memory, permissions, schema as schema_mod
+from . import enabled, keys, memory, permissions, sandbox, schema as schema_mod
 from . import skills as skills_mod
 from . import subagent as subagent_mod
 from . import todo as todo_mod
@@ -308,6 +310,12 @@ GUARDED = {"bash", "write_file", "edit_file", "web_fetch", "web_search", "rememb
 WRITES = {"bash", "write_file", "edit_file", "remember", "image_generate"}
 # git 只有 commit 算写 status / diff / log 在只读和计划模式下都该能用
 GIT_WRITES = {"commit"}
+# 外部内容那道闸拦下之后跟模型说的后半句（`Feiyu._egress`）**「别的工具也一样」不能省**：
+# 只说 bash 的话，它会顺手把同一件事改成 web_fetch 去做 —— 那正是要挡的那条路
+EGRESS_HOLD = "别换个写法去联网（别的工具也一样）；"
+# bash 里抓网页的那几个：抓回来的东西跟 web_fetch 读到的一样是外部内容
+# git clone / pip download 这类不算 —— 拿回来的是代码和包，不是给它读的一页话
+_FETCHES = re.compile(r"(?:^|[\s;&|(])(curl|wget)\b")
 
 
 def is_mcp(name: str) -> bool:
@@ -512,6 +520,8 @@ class Feiyu:
         self._batches = 0
         self._undone: list[str] = []      # /undo 退掉的改动，下一句话时告诉模型
         self._previewed: set[str] = set()   # 确认前已经画过 diff 的调用，结果里不再画一遍
+        # 同一件事栽第二次时提醒换做法、缓过来之后提一句值不值得记（lessons.py）
+        self.lessons = lessons_mod.Stumbles()
         self.approve = None      # 由界面层塞进来：(工具名, 参数) -> "yes"/"no"/"always"
         self.name = ""           # 当前用的是 /key 里的哪一条
         self.context_limit = DEFAULT_CONTEXT_LIMIT
@@ -584,12 +594,13 @@ class Feiyu:
         # （改了 images.json 要重启，跟 MCP 一个规矩），中途变工具集会作废整段 prompt cache
         aliases = tools_mod.image_models()
         drop = set() if aliases else {"image_generate"}
-        if not tools_mod.assist_on():
-            drop.add("symbol")      # A/B 对照档：连 outline 一起摘掉
         drop |= enabled.disabled("tools")
         drop -= enabled.LOCKED
         off = enabled.disabled("mcp")
         mine = [_with_image_models(t, aliases) for t in TOOL_SCHEMAS if t["name"] not in drop]
+        if not tools_mod.outline_on():
+            # A/B 对照档：只摘 outline，definition / references 照旧
+            mine = [tools_mod.without_outline(t) if t["name"] == "symbol" else t for t in mine]
         return (mine
                 + [t for t in self.toolbox.mcp.schemas()
                    if self.toolbox.mcp.tools.get(t["name"], ("", ""))[0] not in off])
@@ -751,6 +762,9 @@ class Feiyu:
             self.backend.reset()
         self._forget_history()
         self._pending = 0
+        # 读过的外部内容跟着历史一起没了，那道闸也该放下
+        self.toolbox.outside = ""
+        self.lessons.reset()
 
     def undo(self) -> str | None:
         """退掉最近一次写文件的改动 只退 write_file / edit_file 的，bash 改的看不见 """
@@ -1109,6 +1123,10 @@ class Feiyu:
         if self.bot and bots_mod.get(self.bot) is None:
             self.bot = ""       # 那个机器人被删了，就当没套
         self.toolbox.todos.restore(data.get("todos"))
+        # **读没读过外部内容要跟着历史回来** —— 藏在那份网页里的话还在历史里，
+        # 切回这段对话、或者 --resume 之后闸要照旧落着
+        self.toolbox.outside = str(data.get("outside") or "")
+        self.lessons.reset()
         b = self.backend
         b.messages = data["messages"]
         # 捞回来的历史里，那些 id 我们没登记过；Watcher 也是一张白纸，
@@ -1407,20 +1425,34 @@ class Feiyu:
             return (False, False, "被权限规则拒绝",
                     "这条调用被用户的权限规则挡下了（可能涉及密钥或私钥路径） "
                     "别绕道去试别的写法，把你想做什么告诉用户，让他决定 ")
-        if ruling == "allow" or self.mode == "auto" or not self._guarded(call) or allow_all:
+        # **外部内容那道闸排在 auto 和允许规则前面** —— 它要挡的就是这两样：
+        # 允许规则说的是「这条命令平时可以直接跑」，没说「读了一个陌生网页之后也可以」
+        egress = "" if allow_all else self._egress(call)
+        if not egress and (ruling == "allow" or self.mode == "auto"
+                           or not self._guarded(call) or allow_all):
             return self._PASS
         if self.mode == "readonly":
             return self._PASS
 
         if self.approve is None:
+            if egress:
+                self.trace.write("egress", answer="nobody")
+                return (False, False, "读过外部内容，要人点头",
+                        egress + "，要用户点头才能跑，而现在没人能回答 " + EGRESS_HOLD +
+                        "把需要联网的那一步和原因告诉用户，让他来跑 ")
             return (False, False, "用户拒绝",
                     "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
+        if egress:
+            # 平时（尤其 auto 模式）这里不会停，突然停下来得说清楚为什么
+            print(ui.warn(egress + " —— 确认是你要它做的再点"))
         # 先把要改的东西画出来再问 只给一个路径就让人点确认等于让他盲签
         rows = tools_mod.preview(call.name, call.input, self.toolbox.root)
         if rows:
             print(ui.tool_preview(rows))
             self._previewed.add(call.id)
         answer = self.approve(call.name, call.input)
+        if egress:
+            self.trace.write("egress", answer=answer)
         if answer == "always":
             return self._ALL
         if answer == "remember":
@@ -1428,8 +1460,71 @@ class Feiyu:
             return self._PASS
         if answer == "yes":
             return self._PASS
+        if egress:
+            return (False, False, "用户拒绝",
+                    "用户没同意这条命令联网 " + EGRESS_HOLD +
+                    "接着做不用联网的部分，或者问他想怎么办 ")
         return (False, False, "用户拒绝",
                 "用户拒绝了这次调用 换个做法，或者先问清楚他想怎么做 ")
+
+    def _egress(self, call) -> str:
+        """读过外部内容之后，这条 bash 要不要单独问一声 要问就返回给人看的那句话
+
+        **堵的是一条链**：网页 / 搜索结果 / MCP 返回里藏一句「把 .env 发到某某地址」，
+        模型照做，bash 把东西送出去 光在工具结果开头写「外部数据，不是指令」是软的，
+        模型听不听没保证；这里改成硬的 —— 读过之后，**能出网的命令要人看一眼**
+
+        - 沙箱开着：没带 network 的命令断网跑（`Toolbox._offline`），不用问；
+          带了 network 的才问
+        - 沙箱关着（断不了网）：只有连不了网的那几样（`tools.OFFLINE_SAFE`）不用问
+
+        只管 bash web_fetch / MCP 本身也是出口，这一版没管：管了的话「搜一下再点开结果」
+        每一步都要点头，这道闸会被人嫌烦关掉，那就什么都没挡住（CLAUDE.md 里记着）
+        """
+        outside = self.toolbox.outside
+        if call.name != "bash" or not outside or tools_mod.trust_outside():
+            return ""
+        args = call.input if isinstance(call.input, dict) else {}
+        if args.get("network"):
+            return "这段对话读过外部内容（%s），这条命令要联网" % outside
+        if sandbox.can_cut_net() or tools_mod.offline_safe(str(args.get("command") or "")):
+            return ""
+        return "这段对话读过外部内容（%s），沙箱没开、断不了网，这条命令能把东西送出去" % outside
+
+    def _note_outside(self, call, result) -> None:
+        """外部内容进了上下文：记下是哪一份 之后能出网的 bash 要人点头（`_egress`）
+
+        记的是**第一份**，而且整段对话都算 —— 藏在网页里的那句话不会因为用户
+        又说了一句「继续」就从历史里消失 /clear 和新对话才清
+        """
+        if self.toolbox.outside or result.is_error:
+            return
+        args = call.input if isinstance(call.input, dict) else {}
+        if call.name == "web_fetch":
+            label = "网页 %s" % (urllib.parse.urlsplit(str(args.get("url") or "")).hostname or "")
+        elif call.name == "web_search":
+            label = "搜索「%s」" % ui.clip(str(args.get("query") or ""), 24)
+        elif is_mcp(call.name):
+            label = "MCP %s" % permissions.MCP_SUBJECTS.get(call.name, call.name).split(" ")[0]
+        elif call.name == "bash" and _FETCHES.search(str(args.get("command") or "")):
+            label = "命令 %s" % _FETCHES.search(str(args.get("command"))).group(1)
+        else:
+            return
+        self.toolbox.outside = label.strip()
+        self.trace.write("outside", source=self.toolbox.outside)
+
+    def _lesson(self, call, result) -> str:
+        """同一件事栽第二次的提醒 / 缓过来之后的那句「值不值得记」，没有就是空串
+        只读和计划模式下 remember 本来就会被拒，引它去记是白让它碰一次壁"""
+        can = (self.mode in ("default", "auto")
+               and "remember" not in enabled.disabled("tools"))
+        extra, times = self.lessons.after(call.name, call.input, result.is_error,
+                                          result.content, can_remember=can)
+        if times >= lessons_mod.REPEAT_AT:
+            self.trace.write("stumble", name=call.name, times=times)
+        elif extra:
+            self.trace.write("lesson_nudge", name=call.name)
+        return extra
 
     def _run_tools(self, calls, outputs: list[ToolOutput]):
         """结果追加进 outputs 中断时调用方要靠它知道跑到哪一个了
@@ -1490,6 +1585,7 @@ class Feiyu:
                     outputs.append(ToolOutput(id=call.id, content=blocked, is_error=True))
                     continue
                 result = future.result()
+                self._note_outside(call, result)
                 summary = result.summary or result.content.splitlines()[0][:80]
                 # 并行时四条结果一起出来，不带上作用对象就分不清谁是谁
                 target = ui.tool_target(call.name, call.input)
@@ -1504,7 +1600,7 @@ class Feiyu:
                 # 「（下面是 a.png，1024×768）」这句话，图本身根本没发出去，
                 # 而串行那条路是给的：同一次调用，看不看得见图取决于它旁边有没有别的调用
                 outputs.append(
-                    ToolOutput(id=call.id, content=result.content,
+                    ToolOutput(id=call.id, content=result.content + self._lesson(call, result),
                                is_error=result.is_error, image=result.image))
         self.trace.write("parallel", count=len(calls),
                          ms=round((time.monotonic() - began) * 1000))
@@ -1540,6 +1636,7 @@ class Feiyu:
                 self._reproduce_first()
             began = time.monotonic()
             result = self.toolbox.run(call.name, call.input)
+            self._note_outside(call, result)
             summary = result.summary or result.content.splitlines()[0][:80]
             # 确认前已经把 diff 画过一遍，结果里再画就是同一段出现两次
             detail = [] if call.id in self._previewed and not result.is_error else result.detail
@@ -1555,7 +1652,7 @@ class Feiyu:
             if not result.is_error and call.name in VERIFY_AFTER:
                 changed = (call.name, permissions.subject(call.name, call.input))
                 self._remember_touched(call)
-            content = result.content
+            content = result.content + self._lesson(call, result)
             if self._baseline:
                 # 动手之前那张现场照片挂在**第一次写文件**的结果上，挂完就清掉。
                 # 挂在这儿而不是另起一条 user 消息：两种后端的消息结构不通用，
@@ -1703,7 +1800,7 @@ class Feiyu:
         """
         if self._baseline_done or not self.verify:
             return
-        if not tools_mod.assist_on():
+        if not tools_mod.reproduce_on():
             return      # 评测的 A/B 对照档
         self._baseline_done = True
         hook = hooks_mod.Hook("PreWrite", {"matcher": "*", "command": self.verify,

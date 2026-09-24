@@ -7,7 +7,6 @@
 这两条要分开测，也要分开说
 """
 
-import json
 import os
 import tempfile
 import unittest
@@ -92,6 +91,47 @@ class TestWrap(Base):
         self.assertNotIn("--unshare-net", sandbox.wrap("ls", workspace="/w", cwd="/w"))
         sandbox.set_level("strict")
         self.assertIn("--unshare-net", sandbox.wrap("ls", workspace="/w", cwd="/w"))
+
+    @需要沙箱
+    def test_读过外部内容的那一条单独断网(self):
+        sandbox.set_level("workspace")
+        self.assertIn("--unshare-net",
+                      sandbox.wrap("ls", workspace="/w", cwd="/w", offline=True))
+
+    @需要沙箱
+    def test_断网的两档把_run_整个盖掉(self):
+        """光 --unshare-net 不够：nss-resolve 走 /run 下的 Unix socket，断了网照样解析域名
+        **tmpfs 要排在工作区的 bind 前面**，工作区在 /run/media 下时才不会被它遮住"""
+        for level, offline in (("strict", False), ("workspace", True)):
+            sandbox.set_level(level)
+            argv = sandbox.wrap("ls", workspace="/w", cwd="/w", offline=offline)
+            at = [i for i in range(len(argv) - 1) if argv[i:i + 2] == ["--tmpfs", "/run"]]
+            self.assertEqual(len(at), 1, level)
+            self.assertLess(at[0], argv.index("/w"), level)
+
+    @需要沙箱
+    def test_联网那档不盖_run_只盖容器引擎的_socket(self):
+        # 盖整个 /run 的话 /etc/resolv.conf 指向的那份没了，联网的命令也解析不了域名
+        fake = Path(self.tmp.name) / "docker.sock"
+        fake.write_text("")
+        self.addCleanup(setattr, sandbox, "DAEMON_SOCKETS", sandbox.DAEMON_SOCKETS)
+        sandbox.DAEMON_SOCKETS = (str(fake), str(fake), "$FEIYU_NO_SUCH_VAR/x.sock")
+        sandbox.set_level("workspace")
+        argv = sandbox.wrap("ls", workspace="/w", cwd="/w")
+        self.assertNotIn("/run", argv)
+        self.assertEqual(argv.count(str(fake)), 1)
+        self.assertEqual(argv[argv.index(str(fake)) - 1], "/dev/null")
+
+    def test_关着的沙箱断不了网(self):
+        sandbox.set_level("off")
+        self.assertFalse(sandbox.can_cut_net())
+        self.assertIsNone(sandbox.wrap("ls", workspace="/w", cwd="/w", offline=True))
+
+    @需要沙箱
+    def test_开着就断得了(self):
+        for level in ("workspace", "strict"):
+            sandbox.set_level(level)
+            self.assertTrue(sandbox.can_cut_net(), level)
 
     @需要沙箱
     def test_额外放行的路径会绑进去(self):
@@ -181,6 +221,14 @@ class TestConfinement(Base):
     def test_超时照常生效(self):
         self.assertTrue(self.box.run("bash", {"command": "sleep 5", "timeout": 1}).is_error)
 
+    @unittest.skipUnless(os.access("/run/docker.sock", os.R_OK | os.W_OK),
+                         "这台机器上没有能碰到的 docker socket")
+    def test_碰不到_docker(self):
+        """碰得到 docker 就能 `docker run -v /:/host`，「只有工作区可写」当场作废 """
+        out = self.sh("docker ps")
+        self.assertTrue(out.is_error, out.content)
+        self.assertIn("socket 被挡在外面", out.content)
+
     def test_密钥环境变量照样过滤(self):
         # 沙箱管路径，_child_env 管环境变量，两层是独立的
         os.environ["FEIYU_SBTEST_TOKEN"] = "机密"
@@ -188,6 +236,39 @@ class TestConfinement(Base):
             self.assertNotIn("机密", self.sh("echo $FEIYU_SBTEST_TOKEN").content)
         finally:
             del os.environ["FEIYU_SBTEST_TOKEN"]
+
+
+@需要沙箱
+class TestOffline(Base):
+    """读过外部内容之后 bash 断网跑：真的跑一遍，别只断言 argv 拼对了"""
+
+    def setUp(self):
+        super().setUp()
+        sandbox.set_level("workspace")
+        self.ws = tempfile.TemporaryDirectory()
+        self.addCleanup(self.ws.cleanup)
+        self.box = Toolbox(Path(self.ws.name))
+        self.box.outside = "网页 evil.example"
+
+    def test_真的断网_而且告诉它可以带_network(self):
+        out = self.box.run("bash", {"command": "timeout 5 curl -sS -o /dev/null "
+                                               "https://example.com", "timeout": 15})
+        self.assertTrue(out.is_error)
+        self.assertIn("network: true", out.content)
+        self.assertIn("evil.example", out.content)
+
+    def test_断网时域名也解析不了(self):
+        # 只加 --unshare-net 时这条是能解析出 IP 的 —— DNS 外带就走这条
+        out = self.box.run("bash", {"command": "getent hosts example.com"})
+        self.assertTrue(out.is_error, out.content)
+
+    def test_带了_network_就不断(self):
+        self.assertTrue(self.box._offline({"command": "x"}))
+        self.assertFalse(self.box._offline({"command": "x", "network": True}))
+
+    def test_没读过就不断(self):
+        self.box.outside = ""
+        self.assertFalse(self.box._offline({"command": "x"}))
 
 
 @需要沙箱
@@ -202,10 +283,6 @@ class TestStrict(Base):
             self.assertNotIn("200", out.content)
         finally:
             ws.cleanup()
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestExecWrapper(unittest.TestCase):
@@ -260,3 +337,7 @@ class TestExecWrapper(unittest.TestCase):
         os.environ["FEIYU_EXEC_WRAPPER"] = "   "
         got = sandbox.wrap("ls", workspace=self.root, cwd=self.root)
         self.assertTrue(got is None or got[0] == "bwrap", got)
+
+
+if __name__ == "__main__":
+    unittest.main()

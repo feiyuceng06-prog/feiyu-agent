@@ -302,6 +302,7 @@ class TestImages(Base):
         self.agent.toolbox.run = self.one_image
         quiet(self.agent.send, "看一张")
         alone = len(self.images(solo))
+        self.tearDown()     # 再 setUp 一次会盖掉上一份临时目录，先把它收了
         self.setUp()
         pair = self.use([call("c1", "read_file", path="a.png"),
                          call("c2", "read_file", path="b.txt")])

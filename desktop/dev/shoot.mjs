@@ -526,10 +526,16 @@ const code = JSON.parse(await cdp.eval(`JSON.stringify((() => {
   if (!fig) return null;
   const nums = fig.querySelector(".code__nums");
   const codeEl = fig.querySelector("code");
-  const line = getComputedStyle(codeEl).lineHeight;
+  /* **量画出来的位置，不量属性。** 原来比的是两边的 line-height 属性，那俩一直都是
+     20px —— 而行距是 <pre> 那个块撑的（24px），四行错开半行，这条照样绿了三个版本。
+     现在比最后一个行号和最后一行代码的顶边：差过 2px 就是没对齐 */
+  const lastTop = (el) => { const r = document.createRange(); r.selectNodeContents(el);
+    const all = [...r.getClientRects()].filter((b) => b.width > 0);
+    return all.length ? all[all.length - 1].top : NaN; };
   return { nums: nums ? nums.textContent.split("\\n").length : 0,
            rows: codeEl.textContent.split("\\n").length,
-           sameLead: nums ? getComputedStyle(nums).lineHeight === line : false,
+           drift: nums ? Math.round(lastTop(codeEl) - lastTop(nums)) : NaN,
+           sameLead: nums ? Math.abs(lastTop(codeEl) - lastTop(nums)) <= 2 : false,
            dirty: /^\\s*\\d/.test(codeEl.textContent),
            copy: !!fig.querySelector("[data-copy]") };
 })())`));
@@ -925,25 +931,20 @@ if (before.bg === after.bg || before.accent === after.accent) {
 await cdp.eval(`document.querySelector('[data-tab="skills"]') && 0; true`);
 console.log("拍了", await cdp.shot("12_retro", { width: 1280, height: 900 }));
 
-/* Anthropic 那套走同一道检查 —— **换主题只换颜色，版面一格不动**。
-   另外量一下它跟复古分不分得开：两套都偏暖，底色要是撞在一起，
-   那就是白加了一套。 */
+/* Anthropic 那套从 0.79.0 起**是一整套皮**（claude.ai 的观感），版面本来就变 ——
+   「版面一格不动」那条只剩复古还守着。这儿只量它跟另两套分不分得开
+   （都偏暖，底色撞了就是白加一套）；皮自己承诺的那几件事在文末那一节量。 */
 await cdp.eval(`setTheme("anthropic"); drawShelf(); true`);
 await sleep(400);
 const anth = JSON.parse(await cdp.eval(`JSON.stringify({
   bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
   accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(),
-  box: (() => { const r = document.querySelector("#shelf-list").getBoundingClientRect();
-    return [Math.round(r.x), Math.round(r.width)]; })(),
 })`));
-if (String(anth.box) !== String(before.box)) {
-  console.error("Anthropic 主题动了版面：", JSON.stringify([before.box, anth.box]));
-  process.exitCode = 1;
-} else if (anth.bg === after.bg || anth.bg === before.bg) {
+if (anth.bg === after.bg || anth.bg === before.bg) {
   console.error("Anthropic 的底色跟别的主题撞了：", anth.bg);
   process.exitCode = 1;
 } else {
-  console.log(`Anthropic 主题 ${anth.bg} / ${anth.accent}，版面一格没动`);
+  console.log(`Anthropic 主题 ${anth.bg} / ${anth.accent}`);
 }
 console.log("拍了", await cdp.shot("13_anthropic", { width: 1280, height: 900 }));
 
@@ -1131,6 +1132,107 @@ for (const width of [1280, 390]) {
   } else {
     console.log(`${width}px 下标题栏记号 ${w}×${h}`);
   }
+}
+
+/* ── Anthropic 这套皮（0.79.0）────────────────────────────────
+   它推翻了「直角」和「主题只换调色板」，所以上面那些网格断言管不到它。
+   这儿量它自己承诺的几件事 —— **颜色和圆角光看图会放过去，得量**：
+     气泡是圆的且有底色、它说的话是衬线、输入区是一张浮起来的卡片、
+     meta-rail 真的没了、带字的实心按钮过得了 AA、窄屏不横滚、代码行号对得上，
+   最后切回默认，确认这套皮**一点都没漏到别的主题上**。 */
+const contrast = (fg, bg) => {
+  const lum = (c) => { const [r, g, b] = (c.match(/[\d.]+/g) || [0, 0, 0]).slice(0, 3).map(Number)
+    .map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const [a, b] = [lum(fg), lum(bg)];
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+};
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await cdp.eval(`setTheme("anthropic"); true`);
+await feed(FLOW);
+await feed(ASK);
+await sleep(900);
+const skin = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const cs = (sel, pseudo) => { const el = document.querySelector(sel);
+    return el ? getComputedStyle(el, pseudo) : null; };
+  const you = cs(".block--you .block__body");
+  const say = cs(".block--say .prose");
+  const row = cs(".composer__row");
+  const go = cs(".btn--primary");
+  const lastTop = (el) => { const r = document.createRange(); r.selectNodeContents(el);
+    const all = [...r.getClientRects()].filter((b) => b.width > 0);
+    return all.length ? all[all.length - 1].top : NaN; };
+  const fig = document.querySelector("figure.code");
+  return {
+    bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
+    youRadius: you ? parseFloat(you.borderTopLeftRadius) : 0,
+    youBg: you ? you.backgroundColor : "",
+    sayFont: say ? say.fontFamily : "",
+    rowRadius: row ? parseFloat(row.borderTopLeftRadius) : 0,
+    rowShadow: row ? row.boxShadow : "none",
+    rail: getComputedStyle(document.getElementById("stream"), "::before").content,
+    label: cs(".block--say .block__label").display,
+    goBg: go ? go.backgroundColor : "", goFg: go ? go.color : "",
+    codeDrift: fig ? Math.round(lastTop(fig.querySelector("code")) - lastTop(fig.querySelector(".code__nums"))) : NaN,
+  };
+})())`));
+console.log("拍了", await cdp.shot("16_anthropic_flow", { width: 1280, height: 900, beyond: false }));
+const skinBad = [];
+if (skin.youRadius < 12 || /rgba\(0, 0, 0, 0\)|transparent/.test(skin.youBg)) skinBad.push("「你」那句不是圆角气泡");
+if (!/serif/i.test(skin.sayFont) || /^\s*"?(Adwaita Sans|Inter)/.test(skin.sayFont)) skinBad.push("它说的话不是衬线");
+if (skin.rowRadius < 16 || skin.rowShadow === "none") skinBad.push("输入区不是一张浮起来的卡片");
+if (skin.rail !== "none") skinBad.push("meta-rail 那条竖线还在");
+if (skin.label !== "none") skinBad.push("「它说」那个大写标签还在");
+if (!skin.goBg || contrast(skin.goFg, skin.goBg) < 4.5) skinBad.push(`实心按钮上的字不够 AA（${skin.goFg} on ${skin.goBg}）`);
+if (!(Math.abs(skin.codeDrift) <= 2)) skinBad.push(`代码行号跟代码错开了 ${skin.codeDrift}px`);
+
+await cdp.call("Page.navigate", { url });
+await sleep(1200);
+await cdp.eval(`setTheme("anthropic"); true`);
+await feed(TALK);
+console.log("拍了", await cdp.shot("17_anthropic_talk", { width: 1280, height: 900, beyond: false }));
+await feed([{ kind: "cleared" }]);
+await sleep(400);
+const greet = await cdp.eval(`(() => { const h = document.querySelector(".hello__greet");
+  return h ? getComputedStyle(h).display + "|" + h.textContent : "没有"; })()`);
+if (!greet.startsWith("flex|") || greet.length < 7) skinBad.push(`空对话那句问候没画出来（${greet}）`);
+console.log("拍了", await cdp.shot("18_anthropic_hello", { width: 1280, height: 900, beyond: false }));
+
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 390, height: 900, deviceScaleFactor: 1, mobile: false });
+await feed(FLOW.slice(0, 9));
+await sleep(600);
+const wideOut = JSON.parse(await cdp.eval(`JSON.stringify({
+  page: document.documentElement.scrollWidth,
+  sheet: sheet.scrollWidth - sheet.clientWidth,
+  row: Math.round(document.querySelector(".composer__row").getBoundingClientRect().right),
+})`));
+if (wideOut.page > 390 || wideOut.sheet > 1 || wideOut.row > 390) skinBad.push(`390px 下横滚了：${JSON.stringify(wideOut)}`);
+console.log("拍了", await cdp.shot("19_anthropic_narrow", { width: 390, height: 900, beyond: false }));
+
+// 切回默认：meta-rail 和大写标签得原样回来 —— 皮漏到别的主题上就是这条红
+await cdp.call("Emulation.setDeviceMetricsOverride",
+  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await cdp.eval(`setTheme("light"); true`);
+await feed(FLOW.slice(0, 6));
+await sleep(600);
+const back = JSON.parse(await cdp.eval(`JSON.stringify({
+  rail: getComputedStyle(document.getElementById("stream"), "::before").content,
+  label: getComputedStyle(document.querySelector(".block__label")).display,
+  radius: parseFloat(getComputedStyle(document.querySelector(".composer__row")).borderTopLeftRadius),
+})`));
+if (back.rail === "none" || back.label === "none" || back.radius !== 0) {
+  skinBad.push(`切回默认之后没复原：${JSON.stringify(back)}`);
+}
+if (skinBad.length) {
+  console.error("Anthropic 那套皮：", skinBad.join("；"), JSON.stringify(skin));
+  process.exitCode = 1;
+} else {
+  console.log(`Anthropic 皮：气泡 ${skin.youRadius}px、衬线正文、输入卡片 ${skin.rowRadius}px、`
+    + `按钮对比 ${contrast(skin.goFg, skin.goBg).toFixed(2)}:1、390px 不横滚、切回默认复原`);
 }
 
 const pageErrors = await cdp.eval("JSON.stringify(window.__errs || [])");

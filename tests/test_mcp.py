@@ -13,7 +13,6 @@ from pathlib import Path
 
 from feiyu import enabled, keys, mcp, permissions
 from feiyu.agent import Feiyu
-from feiyu.tools import Toolbox
 from tests import mcp_http_server as http_server
 from tests.fakes import FakeBackend, call
 

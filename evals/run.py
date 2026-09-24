@@ -59,6 +59,9 @@ def _isolate(box: str) -> None:
             pass        # 没有就算了，keys.load() 自己会返回空，main() 会报"没有可用模型"
     os.environ["XDG_CONFIG_HOME"] = box
     os.environ["XDG_STATE_HOME"] = box
+    # 「读过外部内容之后联网要人点头」那道闸在这儿只会拒 —— 跑分没人能点头，
+    # 留着它量到的就不是它本来的本事了（0.79.0 之前的存档都是没这道闸时跑的）
+    os.environ["FEIYU_TRUST_OUTSIDE"] = "1"
     # bash 工具靠一个临时文件跨调用带回 pwd（tools.py 里 mkstemp 那处）。
     # 它落在 TMPDIR 下，而 SWE-bench 那条路要把这个目录一起挂进容器 ——
     # 不指到 box 里的话，容器里看不见它，`cd` 就静默失效了。

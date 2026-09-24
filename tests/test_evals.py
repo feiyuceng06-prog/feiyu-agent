@@ -229,7 +229,8 @@ class TestJot(unittest.TestCase):
             for turn in range(3):
                 run._jot(path, case, turn, {"ok": True, "why": "", "detail": {"a": 1}},
                          "某模型", "auto")
-            rows = [json.loads(l) for l in open(path, encoding="utf-8")]
+            with open(path, encoding="utf-8") as f:
+                rows = [json.loads(l) for l in f]
         self.assertEqual(len(rows), 3)
         self.assertEqual([r["turn"] for r in rows], [0, 1, 2])
         self.assertEqual(rows[0]["suite"], "某题")
@@ -412,6 +413,13 @@ class TestHardSubset(unittest.TestCase):
     这一档取的是「1-4 小时」+「>4 小时」的**全部** 45 道 —— 全取而不抽样，
     于是"这把尺子是哪几道"由数据集本身定死，没有抽样规则要记，也就没得漂。
     """
+
+    def setUp(self):
+        # 数据集缓存不进版本库（evals/.cache/，几 MB，重拉一次就有）——
+        # 新检出的仓库上没有它，这两条直接报 FileNotFoundError 而不是在测什么
+        from evals import swebench
+        if not swebench.CACHE.exists():
+            self.skipTest("没有 SWE-bench 数据集缓存，先跑一次 python -m evals.swebench --hard")
 
     def ids(self, name):
         from evals import swebench

@@ -297,6 +297,174 @@ class TestOpenAIStream(unittest.TestCase):
         self.assertEqual("".join(said), "你好世界")
         self.assertEqual(turn.text, "你好世界")
 
+    def test_OpenRouter_的思考也要报出来(self):
+        """OpenRouter 把思考放在 `reasoning`，不是 DeepSeek 的 `reasoning_content`
+        只认后者的话，经它跑的模型（Claude / GPT / Qwen）想多久屏幕上都一个字没有 """
+        chunks = [_Chunk(_ORDelta("先看")), _Chunk(_ORDelta("测试")),
+                  _Chunk(_Delta(content="好"), finish="stop")]
+        seen = []
+        b = self.backend(chunks)
+        b.run_turn(on_text=lambda t: None, on_think=lambda n, piece: seen.append((n, piece)))
+        self.assertEqual(seen, [(2, "先看"), (4, "测试")])
+
+    def test_OpenRouter_的思考不进历史(self):
+        # 进了就会被 `_mind_thinking` 当成思考模式，往每条 assistant 上补 reasoning_content
+        chunks = [_Chunk(_ORDelta("想")), _Chunk(_Delta(content="好"), finish="stop")]
+        b = self.backend(chunks)
+        b.run_turn(on_text=lambda t: None)
+        self.assertTrue(all("reasoning_content" not in m for m in b.messages))
+        self.assertFalse(b.thinking)
+
+    def test_两个字段都有时只算一份(self):
+        # 同一段思考要是两个字段都带（有的网关会），字数不能翻倍
+        d = _Delta(reasoning="想")
+        d.reasoning = "想"
+        seen = []
+        self.backend([_Chunk(d), _Chunk(_Delta(content="好"), finish="stop")]).run_turn(
+            on_text=lambda t: None, on_think=lambda n, piece: seen.append(n))
+        self.assertEqual(seen, [1])
+
+
+class _ORDelta(_Delta):
+    """OpenRouter 的形状：思考在 `reasoning`，没有 `reasoning_content` """
+
+    def __init__(self, reasoning):
+        super().__init__()
+        self.reasoning = reasoning
+
+
+class _Refuse(Exception):
+    status_code = 400
+
+
+class TestClaudeCacheMarks(unittest.TestCase):
+    """经 openai 兼容格式跑的 Claude 要自己打缓存断点（实测不打就是次次全价）"""
+
+    def backend(self, model="anthropic/claude-sonnet-5", create=None):
+        b = object.__new__(providers.OpenAICompatBackend)
+        b.model, b.system, b.tools = model, "s", []
+        b.max_tokens = providers.OpenAICompatBackend.MAX_TOKENS
+        b.messages = [{"role": "system", "content": "系统提示"}]
+        b.thinking = False
+        b.cache = providers._wants_marks(model)
+        b._reset_usage()
+        sent = []
+
+        def fake(**kw):
+            sent.append(kw["messages"])
+            if create:
+                return create(kw)
+            return iter([_Chunk(_Delta(content="好"), finish="stop")])
+
+        b.client = types.SimpleNamespace(chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=fake)))
+        return b, sent
+
+    @staticmethod
+    def marks(messages):
+        return [i for i, m in enumerate(messages) if isinstance(m.get("content"), list)
+                and any("cache_control" in p for p in m["content"] if isinstance(p, dict))]
+
+    def test_只给_Claude_打(self):
+        self.assertTrue(providers._wants_marks("anthropic/claude-opus-5.5"))
+        self.assertTrue(providers._wants_marks("claude-sonnet-5"))
+        for other in ("openai/gpt-6-luna", "qwen/qwen3.8-flash", "deepseek-v4-pro", ""):
+            self.assertFalse(providers._wants_marks(other), other)
+
+    def test_system_和最近两批人这一侧的末尾(self):
+        b, sent = self.backend()
+        b.messages += [
+            {"role": "user", "content": "改一下"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "a", "content": "一"},
+            {"role": "tool", "tool_call_id": "b", "content": "二"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "c", "content": "三"},
+        ]
+        b.run_turn(on_text=lambda t: None)
+        # 0 是 system；4 是上一批（两个 tool 连着）的末尾；6 是这一批的末尾
+        self.assertEqual(self.marks(sent[0]), [0, 4, 6])
+
+    def test_不改存着的那份历史(self):
+        # 存盘的是 self.messages；中途换成 DeepSeek 直连，留在里面的标记会跟着发过去
+        b, sent = self.backend()
+        b.messages.append({"role": "user", "content": "hi"})
+        b.run_turn(on_text=lambda t: None)
+        self.assertTrue(self.marks(sent[0]))
+        self.assertEqual(self.marks(b.messages), [])
+        self.assertIsInstance(b.messages[0]["content"], str)
+
+    def test_最后一块是图就挂在它前面的文字上(self):
+        b, sent = self.backend()
+        b.messages.append({"role": "user", "content": [
+            {"type": "text", "text": "看图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]})
+        b.run_turn(on_text=lambda t: None)
+        parts = sent[0][1]["content"]
+        self.assertIn("cache_control", parts[0])
+        self.assertNotIn("cache_control", parts[1])
+
+    def test_别家的模型一个都不打(self):
+        b, sent = self.backend(model="openai/gpt-6-luna")
+        b.messages.append({"role": "user", "content": "hi"})
+        b.run_turn(on_text=lambda t: None)
+        self.assertEqual(self.marks(sent[0]), [])
+
+    def test_接口不认就去掉重发_之后都不打(self):
+        def create(kw):
+            if self.marks(kw["messages"]):
+                raise _Refuse("messages[0].content: expected string")
+            return iter([_Chunk(_Delta(content="好"), finish="stop")])
+
+        b, sent = self.backend(create=create)
+        b.messages.append({"role": "user", "content": "hi"})
+        turn = b.run_turn(on_text=lambda t: None)
+        self.assertEqual(turn.text, "好")
+        self.assertFalse(b.cache)
+        b.messages.append({"role": "user", "content": "再来"})
+        b.run_turn(on_text=lambda t: None)
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(self.marks(sent[2]), [])
+
+    def test_去掉断点照样挂就不是断点的错(self):
+        # 别为一个无关的 400 把缓存永久关掉 —— 那样之后每轮贵十倍，而且没人看得见
+        def create(kw):
+            raise _Refuse("context too long")
+
+        b, _ = self.backend(create=create)
+        b.messages.append({"role": "user", "content": "hi"})
+        with self.assertRaises(_Refuse):
+            b.run_turn(on_text=lambda t: None)
+        self.assertTrue(b.cache)
+
+    def test_不是请求形状的错不重发(self):
+        class Busy(Exception):
+            status_code = 529
+
+        def create(kw):
+            raise Busy("overloaded")
+
+        b, sent = self.backend(create=create)
+        b.messages.append({"role": "user", "content": "hi"})
+        with self.assertRaises(Busy):
+            b.run_turn(on_text=lambda t: None)
+        self.assertEqual(len(sent), 1)
+
+    def test_写进缓存的按写入价算(self):
+        """OpenRouter 的 cache_write_tokens 包含在 prompt_tokens 里，但价是输入的 1.25 倍 """
+        usage = types.SimpleNamespace(
+            prompt_tokens=1000, completion_tokens=10,
+            prompt_tokens_details=types.SimpleNamespace(cached_tokens=200, cache_write_tokens=700))
+        last = _Chunk(_Delta(content="好"), finish="stop")
+        last.usage = usage
+        b, _ = self.backend(create=lambda kw: iter([last]))
+        b.rates = (1.0, 10.0, 100.0, 12.5)
+        b.messages.append({"role": "user", "content": "hi"})
+        b.run_turn(on_text=lambda t: None)
+        self.assertAlmostEqual(b.cost, (200 * 1 + 100 * 10 + 10 * 100 + 700 * 12.5) / 1e6)
+        self.assertEqual(b.tokens_hit, 200)
+        self.assertEqual(b.last_in, 1000)
+
 
 class TestBilling(unittest.TestCase):
     def setUp(self):

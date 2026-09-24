@@ -372,7 +372,8 @@ class TestCard(Base):
         """别人（或者老版本）直接改了存盘，卡片就过期了 """
         session.save(self.ws, self.agent("旧标题"), "20260101-000000")
         path = session._path(self.ws, "20260101-000000")
-        data = json.load(open(path, encoding="utf-8"))
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
         data["title"] = "新标题"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)

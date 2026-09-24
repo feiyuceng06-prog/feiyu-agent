@@ -228,7 +228,6 @@ class TestExitCode(unittest.TestCase):
 
     def setUp(self):
         import http.server
-        import json
         import threading
 
         class 只会说402(http.server.BaseHTTPRequestHandler):
@@ -246,6 +245,8 @@ class TestExitCode(unittest.TestCase):
 
         self.srv = http.server.HTTPServer(("127.0.0.1", 0), 只会说402)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        # 清理是倒着跑的：先 shutdown 停下循环，再 server_close 关掉监听的那个 socket
+        self.addCleanup(self.srv.server_close)
         self.addCleanup(self.srv.shutdown)
 
         self.tmp = tempfile.TemporaryDirectory()

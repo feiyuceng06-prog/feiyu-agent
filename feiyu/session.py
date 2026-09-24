@@ -138,6 +138,8 @@ def save(workspace, agent, sid: str | None = None) -> None:
         # 这段对话是哪个机器人开的 —— 不存的话切回来人格就没了，
         # 而前面说过的话全是按那个人格说的
         "bot": getattr(agent, "bot", "") or None,
+        # 读过的第一份外部内容 恢复回来那道闸要照旧落着（见 agent._egress）
+        "outside": getattr(agent.toolbox, "outside", "") or None,
         "title": _first_words(messages),
         # 图片不进存盘：一张就是几十万字，恢复回来也未必是当初那张
         "messages": messages,

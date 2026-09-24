@@ -155,45 +155,76 @@
 
 /* ── Anthropic ──────────────────────────────────────────────
    用户整台机器（kitty / GTK / 壁纸 / nvim）都是这套配色，桌面端跟上。
+   **0.79.0 起它不只是一套调色板**，是一整套 claude.ai 观感的皮 ——
+   圆角、衬线、气泡、输入卡片全在文末「Anthropic 这套皮」那一节，只对它生效。
 
    **跟「复古」不是一回事**，虽然都偏暖：复古是泛黄的纸（#fbf6ea）+ 赭色，
-   做旧；这套是近乎白的暖中性（#FBF9F5）+ 陶土橘（#D87756），干净。
-   两套并存，别把谁当谁的变体。
+   做旧、版面照旧；这套是近乎白的暖中性（#FBF9F5）+ 陶土橘（#C96442），
+   版面也换了。两套并存，别把谁当谁的变体。
 
-   墨色照旧单一色相构造式（`rgba(38, 34, 30, α)`）—— 暖灰，跟这张纸同温。
+   颜色以用户自己那套为准：主色 #C96442、按下 #B3552F、浅底 #FBF9F5、深底 #141414
+   （2026-09-20 定案；0.74.0 那版写的 #D87756 是更早的一档，已经换掉）。
+   中间色（侧栏、卡片、发丝线）取 claude 那份 DESIGN.md 的 token。
 
-   **α 是量出来的，不是照抄默认那套。** 这张纸比纯白暗一点点，照搬 0.56/0.44
-   会掉到 3.69:1 / 2.66:1，两个都够不着。按 panel 那一侧（更难的那面）反解：
-     --muted 0.67 → 纸 5.19:1 / panel 4.63:1（正文 AA 4.5）
-     --faint 0.53 → 纸 3.40:1 / panel 3.03:1（非文本与大字 AA 3.0）
-   要再动先把这两个数重新量一遍。
+   墨色照旧单一色相构造式，基色换成用户那档深底 `rgba(20, 20, 19, α)`。
+   **α 是量出来的**，四个面（纸 / 侧栏 / 卡片 / 白）挨个量，取最难的那面：
+     --muted 0.64 → 纸 5.45 / 侧栏 5.28 / 卡片 5.20（正文 AA 4.5）
+     --faint 0.50 → 纸 3.45 / 侧栏 3.38 / 卡片 3.32（非文本与大字 AA 3.0）
+   要再动先把这几个数重新量一遍。
 
-   **`--accent` 就是 #D87756，而它对这张纸只有 2.98:1** —— 够不着任何文字标准。
-   这不是问题，因为这套系统里 accent 「只做线和面，永远不做字」，那条规矩
-   在这儿反而成了安全网。`--plus`（diff 加号）单独走墨绿：整页暖色，
-   加号再用陶土就跟减号的红糊在一起了（跟复古同一个理由）。 */
+   **陶土色上放白字只有 3.90:1**，够不着正文的 4.5 —— 所以带字的实心按钮用
+   深一档的 `--accent-deep`（#B3552F，白字 4.93:1），按下再深一档；
+   `--accent` 本身只给线、点、图标和发送键（图形只要 3:1）。链接字也走
+   `--accent-deep`（纸上 4.69:1）。`--plus` 走墨绿、`--alert` 压到 #a4262c，
+   理由跟以前一样：整页暖色，加号减号和「需要你动手」都得跟陶土分得开。 */
 :root[data-theme="anthropic"] {
   --bg: #fbf9f5;
-  --text: rgba(38, 34, 30, 0.84);
-  --soft: rgba(38, 34, 30, 0.72);
-  --muted: rgba(38, 34, 30, 0.67);
-  --faint: rgba(38, 34, 30, 0.53);
-  --line: rgba(38, 34, 30, 0.12);
-  --line-strong: rgba(38, 34, 30, 0.24);
-  --accent: #d87756;
+  --text: rgba(20, 20, 19, 0.86);
+  --soft: rgba(20, 20, 19, 0.74);
+  --muted: rgba(20, 20, 19, 0.64);
+  --faint: rgba(20, 20, 19, 0.5);
+  --line: #e6dfd8;
+  --line-strong: #d3c9bc;
+  --accent: #c96442;
+  --accent-deep: #b3552f;
+  --accent-deeper: #9c4827;
   --plus: #2f6b58;
-  --link-line: #e0a184;
-  --panel: rgba(38, 34, 30, 0.06);
-  --code-bg: rgba(38, 34, 30, 0.05);
-  --selection: rgba(216, 119, 86, 0.18);
-  /* 陶土橘本身就偏红，第二色必须压得更深才分得开 —— 不然「需要你动手」
-     跟满页的 accent 混成一片。#a4262c 对这张纸 6.91:1。 */
+  --link-line: rgba(179, 85, 47, 0.45);
+  --panel: #f5f0e8;
+  --code-bg: rgba(94, 70, 40, 0.08);
+  --selection: rgba(201, 100, 66, 0.18);
   --alert: #a4262c;
   --alert-wash: rgba(164, 38, 44, 0.06);
+
+  /* 下面这些只有这套皮用 */
+  --side-bg: #f5f0e8;
+  --card: #f0ebe1;
+  --card-strong: #e9e2d5;
+  --raised: #ffffff;
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 22px;
+  --shadow-soft: 0 1px 2px rgba(20, 20, 19, 0.05);
+  --shadow-float: 0 1px 2px rgba(20, 20, 19, 0.05), 0 6px 20px rgba(20, 20, 19, 0.07);
+  --code-surface: #1f1e1b;
+  --code-bar: #292724;
+  --code-ink: #ede9e1;
+  --code-dim: #a09d96;
+  /* 衬线：拉丁字母走 Crimson Pro / IBM Plex Serif，汉字走思源宋体（Noto Serif CJK）。
+     claude 那份 DESIGN.md 用的 Copernicus / Tiempos 是授权字体，拿不到；
+     都是本机装着的字，CSP 只放行 'self'，不能挂外部字体 */
+  --font-sans: "Adwaita Sans", Inter, "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+  --font-serif: "IBM Plex Serif", "Noto Serif CJK SC", "Source Han Serif SC", Georgia, serif;
+  --font-display: "Crimson Pro", "Noto Serif CJK SC", "Source Han Serif SC", Georgia, serif;
+  /* claude.ai 的对话栏是 48rem 左右一条，正文吃满这一栏 */
+  --content: 46rem;
+  --measure: 46rem;
 }
 
 /* 纯黑剪影压在暖纸上偏硬，跟复古同一个处理，但这张纸更白所以收得轻一点 */
-:root[data-theme="anthropic"] .bar__mark { opacity: 0.78; filter: sepia(0.18); }
+:root[data-theme="anthropic"] .bar__mark { opacity: 0.8; }
 
 * { box-sizing: border-box; }
 
@@ -727,6 +758,9 @@ body[data-side="off"] .side { border-right: 0; }
   margin: 0 0 var(--space-3);
   color: var(--soft);
 }
+
+/* 那句问候只有 Anthropic 那套皮画（见文末），这两套的「开始」本来就是安静的一行字 */
+.hello__greet { display: none; }
 
 .hello__list {
   margin: 0 0 var(--space-4);
@@ -1845,8 +1879,18 @@ body[data-side="off"] .scrim { display: none; }
   user-select: none;
 }
 
-/* 行号已经撑出左边那条槽了，`<pre>` 自己不再缩进；下边距归 `<figure>` 管 */
-.prose .code pre { margin: 0; padding-left: 0; }
+/* 行号已经撑出左边那条槽了，`<pre>` 自己不再缩进；下边距归 `<figure>` 管
+   **行高要写在 `<pre>` 上，光写在 `<code>` 上不够**：行盒的高度是块容器的
+   strut 撑起来的，`<code>` 是行内元素，它的 20px 压不低 `<pre>` 继承来的 24px ——
+   于是行号 20px 一行、代码 24px 一行，四行就错开半行（0.77.0 起就这样，
+   夹具比的是两个元素的 `line-height` 属性，那俩一直相等，所以没抓到）
+   **字号和字体也得跟 `<code>` 一样**：strut 用的是 `<pre>` 自己的字（15px、浏览器
+   默认等宽），基线跟 13px 的 `<code>` 对齐时字形会被往下推 —— 量出来恒定差 4px */
+.prose .code pre {
+  margin: 0;
+  padding-left: 0;
+  font: var(--w-regular) var(--text-code) / 20px var(--font-mono);
+}
 
 /* ── 想的过程 ────────────────────────────────────────────────
    在想的时候展开，想完自己收起来（人点过就听人的）。收放用
@@ -2053,4 +2097,798 @@ body[data-side="off"] .scrim { display: none; }
   .fold .tool__lines { transition: none; }
 
   .side__tabs::after, .tabs::after { transition: none; }
+}
+
+/* ════════════════════════════════════════════════════════════
+   Anthropic 这套皮：claude.ai 的观感（0.79.0）
+
+   用户要「往 claude.ai 的观感靠」，而且明确同意推翻两条规矩 ——
+   「除图片外全是直角」和「主题只换调色板」。所以这一节**只对这一套生效**，
+   全挂在 `:root[data-theme="anthropic"]` 下面；默认和复古一个像素不动
+   （`shoot.mjs` 在默认主题上量的那些网格、行长、对齐照旧全过）。
+
+   依据：`~/.claude/awesome-design-md/design-md/claude/DESIGN.md`（claude.com 的 token）。
+   那份文档说了 chat 界面的组件（气泡、输入卡片、会话侧栏）不在它范围内，
+   这几样照 claude.ai 本身做。
+
+   几条从那份文档里搬过来的规矩：
+     · 衬线只在标题和「它说的话」上，界面文字全是无衬线；衬线标题不加粗
+     · 陶土色稀少：实心按钮、发送键、状态点、焦点环，别的地方不刷它
+     · 靠色块分层，阴影很少 —— 只有浮起来的东西（输入卡片、确认卡、浮层）才带一点
+     · 圆角分级：按钮和输入 8、卡片 12、气泡 16、输入卡片 22
+   ════════════════════════════════════════════════════════════ */
+
+/* ── 外壳 ────────────────────────────────────────────────── */
+
+:root[data-theme="anthropic"] .bar { background: var(--bg); }
+
+:root[data-theme="anthropic"] .bar__title {
+  font: 500 16px/1 var(--font-display);
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .chip { border-radius: var(--radius); }
+:root[data-theme="anthropic"] .chip:hover { background: var(--card); }
+:root[data-theme="anthropic"] .win { border-radius: var(--radius-sm); }
+:root[data-theme="anthropic"] .win:hover { background: var(--card); }
+:root[data-theme="anthropic"] .win--close:hover { background: var(--alert); }
+
+/* 状态点：圆的；就绪是墨绿（「可用」的通行说法），干活时是陶土色在呼吸。
+   红只留给「慢得不对劲」—— 在这套皮里「在干活」不是警报 */
+:root[data-theme="anthropic"] .status { background: var(--bg); border-top-color: var(--line); }
+:root[data-theme="anthropic"] .dot { border-radius: 50%; }
+:root[data-theme="anthropic"] .dot[data-state="ready"] { background: var(--plus); }
+:root[data-theme="anthropic"] .dot[data-state="busy"] { background: var(--accent); }
+
+/* ── 侧栏 ────────────────────────────────────────────────── */
+
+:root[data-theme="anthropic"] .side { background: var(--side-bg); border-right-color: var(--line); }
+
+:root[data-theme="anthropic"] .desk {
+  margin: var(--space-2) var(--space-2) var(--space-1);
+  width: calc(100% - var(--space-4));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  padding: var(--space-2) var(--space-3);
+}
+
+:root[data-theme="anthropic"] .desk:hover { background: var(--raised); }
+
+:root[data-theme="anthropic"] .desk__label,
+:root[data-theme="anthropic"] .group__head,
+:root[data-theme="anthropic"] .term__label,
+:root[data-theme="anthropic"] .rules__head,
+:root[data-theme="anthropic"] .shelf__meta,
+:root[data-theme="anthropic"] .facts dt,
+:root[data-theme="anthropic"] .code__lang {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+:root[data-theme="anthropic"] .desk__label { font-size: 11px; color: var(--muted); }
+
+:root[data-theme="anthropic"] .desks {
+  margin: 0 var(--space-2) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+:root[data-theme="anthropic"] .desks li[data-pick="1"] { color: var(--accent-deep); }
+
+:root[data-theme="anthropic"] .side__nav { padding: var(--space-1) var(--space-2); }
+
+:root[data-theme="anthropic"] .nav {
+  border-radius: var(--radius);
+  padding: 7px var(--space-2);
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .nav:hover { background: var(--card); }
+
+/* 「新建会话」前面那个是 claude.ai 的陶土色圆底加号 —— 侧栏里唯一一处实心的陶土 */
+:root[data-theme="anthropic"] #new-talk .nav__icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+}
+
+:root[data-theme="anthropic"] .nav__key { font-family: var(--font-sans); font-size: 11px; }
+
+/* 「会话 / 机器人」做成分段控件：滑的那条线换成一块会滑的白底
+   （位置和宽度还是 `slideInd()` 量出来喂的那两个变量，只是画法换了） */
+:root[data-theme="anthropic"] .side__tabs {
+  margin: var(--space-2) var(--space-2) var(--space-1);
+  padding: 3px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--card);
+}
+
+:root[data-theme="anthropic"] .side__tab {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 5px 0;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+:root[data-theme="anthropic"] .side__tabs::after {
+  top: 3px;
+  bottom: 3px;
+  height: auto;
+  border-radius: var(--radius);
+  background: var(--raised);
+  box-shadow: var(--shadow-soft);
+  z-index: 0;
+}
+
+:root[data-theme="anthropic"] .side__find { border-bottom: 0; padding: var(--space-1) var(--space-2) var(--space-2); }
+
+:root[data-theme="anthropic"] #find {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 4px var(--space-3);
+}
+
+:root[data-theme="anthropic"] #find:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.15);
+}
+
+:root[data-theme="anthropic"] .group__head {
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+:root[data-theme="anthropic"] .talks { padding: 0 var(--space-2); }
+
+:root[data-theme="anthropic"] .talk {
+  border-radius: var(--radius);
+  padding: 6px var(--space-3);
+}
+
+:root[data-theme="anthropic"] .talk:hover { background: var(--card); }
+:root[data-theme="anthropic"] .talk[aria-current="true"] { box-shadow: none; background: var(--card-strong); }
+
+/* claude.ai 的会话列表一条一行；折两行的话侧栏一屏少一半 */
+:root[data-theme="anthropic"] .talk__title {
+  -webkit-line-clamp: 1;
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .talk__meta { margin-top: 0; font-family: var(--font-sans); font-size: 11px; }
+:root[data-theme="anthropic"] .talk__x { border-radius: var(--radius-sm); }
+:root[data-theme="anthropic"] .talk__x:hover { background: var(--card-strong); }
+:root[data-theme="anthropic"] .talk--asking { background: var(--alert-wash); }
+
+/* ── 对话那一栏 ───────────────────────────────────────────────
+   没有 meta-rail 了：左边那列大写标签和整条纵线是瑞士那套的骨架，
+   这套靠「谁说的话长什么样」来分 —— 你说的是气泡，它说的是衬线正文，
+   它动手是一张张小卡片，系统的话是一行小字加一个小标签。 */
+
+:root[data-theme="anthropic"] .sheet { padding: var(--space-6) var(--space-5) var(--space-6); }
+:root[data-theme="anthropic"] .stream::before { content: none; }
+
+:root[data-theme="anthropic"] .block {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  border-top: 0;
+  padding: var(--space-2) 0;
+}
+
+:root[data-theme="anthropic"] .block__label { display: none; }
+
+/* 你说的话：一块暖色气泡，宽度跟着字走 */
+:root[data-theme="anthropic"] .block--you { padding-top: var(--space-5); }
+
+:root[data-theme="anthropic"] .block--you .block__body {
+  justify-self: start;
+  width: fit-content;
+  max-width: min(100%, 38rem);
+  padding: 10px var(--space-4);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  font: var(--w-regular) 15px / 24px var(--font-sans);
+  color: var(--text);
+}
+
+/* 它说的话：衬线正文。claude.ai 就是这么把「它的话」和「界面」分开的 */
+:root[data-theme="anthropic"] .block--say .prose {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 28px;
+  color: rgba(20, 20, 19, 0.9);
+}
+
+:root[data-theme="anthropic"] .prose p { margin-bottom: 14px; }
+
+/* 正文里的标题：小的那几档是 600 —— DESIGN.md 那条「衬线标题不加粗」管的是
+   大字号的展示标题，正文里 16px 的小标题不加粗就跟正文分不开了 */
+:root[data-theme="anthropic"] .prose h1,
+:root[data-theme="anthropic"] .prose h2,
+:root[data-theme="anthropic"] .prose h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+:root[data-theme="anthropic"] .prose h1 { font-size: 22px; font-weight: 500; }
+:root[data-theme="anthropic"] .prose h2 { font-size: 19px; }
+:root[data-theme="anthropic"] .prose h3 { font-size: 16.5px; }
+
+:root[data-theme="anthropic"] .prose ul,
+:root[data-theme="anthropic"] .prose ol { padding-left: 22px; margin-bottom: 14px; }
+:root[data-theme="anthropic"] .prose li { margin: 3px 0; }
+:root[data-theme="anthropic"] .prose li::marker { color: var(--muted); }
+
+:root[data-theme="anthropic"] .prose code {
+  font-size: 0.84em;
+  padding: 0.12em 0.4em;
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .prose a {
+  color: var(--accent-deep);
+  text-decoration-color: var(--link-line);
+  text-underline-offset: 3px;
+}
+
+:root[data-theme="anthropic"] .prose a:hover { text-decoration-color: currentColor; }
+
+:root[data-theme="anthropic"] .prose blockquote {
+  border-left: 3px solid var(--line-strong);
+  padding-left: 14px;
+  color: var(--soft);
+}
+
+:root[data-theme="anthropic"] .prose table {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  margin-bottom: 16px;
+  /* 表格本来是 display: block（宽了要能横滚），边框画在它身上就是整栏宽，
+     而格子只有内容那么宽 —— 表头底色只铺一半。收到内容宽，宽了照样滚 */
+  width: fit-content;
+  max-width: 100%;
+}
+
+:root[data-theme="anthropic"] .prose th,
+:root[data-theme="anthropic"] .prose td {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+:root[data-theme="anthropic"] .prose th { background: var(--panel); font-weight: 600; }
+:root[data-theme="anthropic"] .prose tr:last-child td { border-bottom: 0; }
+
+/* 代码块：深色的一扇窗 —— DESIGN.md 里 Claude 展示代码的那个形状（code-window-card）。
+   颜色全走 --code-* 那几个，换回浅色只动那几个数 */
+:root[data-theme="anthropic"] .code {
+  margin: var(--space-1) 0 var(--space-4);
+  border-top: 0;
+  border-radius: var(--radius-lg);
+  background: var(--code-surface);
+  overflow: hidden;
+}
+
+:root[data-theme="anthropic"] .code__bar {
+  padding: 0 var(--space-2) 0 14px;
+  background: var(--code-bar);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  color: var(--code-dim);
+}
+
+:root[data-theme="anthropic"] .code__copy {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  color: var(--code-dim);
+  border-radius: var(--radius-sm);
+}
+
+:root[data-theme="anthropic"] .code__copy:hover { color: var(--code-ink); background: rgba(255, 255, 255, 0.08); }
+:root[data-theme="anthropic"] .code__nums { padding-left: 14px; color: rgba(160, 157, 150, 0.7); }
+
+:root[data-theme="anthropic"] .prose .code pre {
+  padding: var(--space-3) var(--space-4) var(--space-3) 0;
+  color: var(--code-ink);
+}
+
+:root[data-theme="anthropic"] .prose .code pre code { color: inherit; background: none; font-size: 13px; }
+:root[data-theme="anthropic"] .code ::selection { background: rgba(201, 100, 66, 0.4); }
+
+/* 它动手：一张小卡片，发丝线框、比纸白一点 */
+:root[data-theme="anthropic"] .block--tool .block__body {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--raised) 55%, var(--bg));
+  padding: var(--space-2) 14px;
+}
+
+/* 行高别动：折起来的那个高度是按 --leading-body 算的（`SHUT`），改了就切掉半行 */
+:root[data-theme="anthropic"] .tool { font-size: 12.5px; }
+:root[data-theme="anthropic"] .tool__name { font-family: var(--font-sans); font-weight: 600; font-size: 13px; }
+:root[data-theme="anthropic"] .tool__target { margin-left: 2px; }
+:root[data-theme="anthropic"] .tool__note { font-family: var(--font-sans); font-size: 12.5px; padding-left: 0; }
+:root[data-theme="anthropic"] .tool__pending { padding-left: 0; }
+:root[data-theme="anthropic"] .tool__lines { padding-left: 0; }
+:root[data-theme="anthropic"] .fold__more { padding-left: 0; font-family: var(--font-sans); }
+
+:root[data-theme="anthropic"] .shot { padding-left: 0; }
+:root[data-theme="anthropic"] .shot img { border: 1px solid var(--line); border-radius: var(--radius-lg); }
+
+/* 系统的话（提示 / 注意 / 出错 / 钩子）：一行小字，前面一个小药丸标签。
+   只有这一种块把标签留着 —— 它说明的是「这不是谁说的话，是发生了什么」 */
+:root[data-theme="anthropic"] .block--note {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+:root[data-theme="anthropic"] .block--note .block__label {
+  display: block;
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 11px;
+  line-height: 20px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+  /* 宽屏下基础样式给标签挂了 -16px 的右外边距（为 meta-rail 那条线让位），
+     不抵掉的话小药丸跟后面的字贴在一起 */
+  margin-right: 0;
+}
+
+:root[data-theme="anthropic"] .block--note:has(.note[data-level="error"]) .block__label {
+  background: var(--alert-wash);
+  color: var(--alert);
+}
+
+:root[data-theme="anthropic"] .block--note .note { font-size: 13px; }
+
+/* 方案：交给你过目的那份，一张浅色卡片把它框出来 */
+:root[data-theme="anthropic"] .block--plan .block__body {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+  background: var(--panel);
+}
+
+/* 想的过程：一行小灰字 + 一个会呼吸的圆点，展开是缩进的衬线小字 */
+:root[data-theme="anthropic"] .think__head { font-size: 13px; }
+:root[data-theme="anthropic"] .think__mark { width: 7px; height: 7px; border-radius: 50%; }
+
+:root[data-theme="anthropic"] .think__body .prose {
+  border-left: 2px solid var(--line);
+  padding-left: 14px;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  line-height: 24px;
+}
+
+/* 等模型：九宫格换成 claude.ai 那种慢慢转的星芒 */
+:root[data-theme="anthropic"] .churn__grid { display: none; }
+
+:root[data-theme="anthropic"] .churn::before {
+  content: "✻";
+  display: inline-block;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--accent);
+  animation: spark 2.8s ease-in-out infinite;
+}
+
+@keyframes spark {
+  0%   { rotate: 0deg; scale: 1; }
+  50%  { rotate: 90deg; scale: 0.82; }
+  100% { rotate: 180deg; scale: 1; }
+}
+
+/* ── 要你点头的那张卡 ────────────────────────────────────── */
+
+:root[data-theme="anthropic"] .ask {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  padding: 14px 18px;
+  box-shadow: var(--shadow-float);
+}
+
+:root[data-theme="anthropic"] .ask--danger {
+  border-color: rgba(164, 38, 44, 0.4);
+  background: color-mix(in srgb, var(--alert) 4%, var(--raised));
+}
+
+:root[data-theme="anthropic"] .ask--danger .ask__q::before {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+:root[data-theme="anthropic"] .ask__q { font: 600 15px / 22px var(--font-sans); }
+
+:root[data-theme="anthropic"] .ask__what,
+:root[data-theme="anthropic"] .ask__diff {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--panel);
+  font-size: 12.5px;
+}
+
+:root[data-theme="anthropic"] .ask--done { box-shadow: none; background: transparent; }
+
+:root[data-theme="anthropic"] .ask__answer {
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 12.5px;
+}
+
+/* ── 按钮 ────────────────────────────────────────────────────
+   不再全大写：DESIGN.md 的按钮是 14px / 500 的正常大小写 */
+:root[data-theme="anthropic"] .btn {
+  padding: 9px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--raised);
+  font: 500 13.5px / 1 var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .btn:hover { border-color: var(--line-strong); background: var(--panel); }
+
+:root[data-theme="anthropic"] .btn--primary,
+:root[data-theme="anthropic"] .act--go,
+:root[data-theme="anthropic"] .act--now {
+  border-color: var(--accent-deep);
+  background: var(--accent-deep);
+  color: #fff;
+}
+
+:root[data-theme="anthropic"] .btn--primary:hover,
+:root[data-theme="anthropic"] .act--go:hover,
+:root[data-theme="anthropic"] .act--now:hover {
+  border-color: var(--accent-deeper);
+  background: var(--accent-deeper);
+}
+
+:root[data-theme="anthropic"] .btn--wide { border-color: transparent; background: none; color: var(--muted); }
+:root[data-theme="anthropic"] .btn--wide:hover { background: var(--panel); color: var(--text); }
+:root[data-theme="anthropic"] .btn--danger { color: var(--alert); border-color: rgba(164, 38, 44, 0.45); }
+:root[data-theme="anthropic"] .btn--danger:hover { background: var(--alert); color: #fff; }
+
+:root[data-theme="anthropic"] .act { border-radius: var(--radius); padding: 5px var(--space-3); }
+
+/* ── 输入区：一张浮起来的卡片 ─────────────────────────────────
+   上面一整行是输入框，下面一行左边附件、右边模型和发送 —— claude.ai 的形状。
+   四个格子本来就在同一个 grid 里，换的只是 grid-template-areas，DOM 一个没动 */
+:root[data-theme="anthropic"] .composer {
+  border-top: 0;
+  padding: var(--space-1) var(--space-5) var(--space-3);
+  background: var(--bg);
+}
+
+:root[data-theme="anthropic"] .composer__row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "input input input input"
+    "attach . model send";
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-3) 10px 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2xl);
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+}
+
+:root[data-theme="anthropic"] .composer__row:focus-within { border-color: var(--line-strong); }
+
+:root[data-theme="anthropic"] #input {
+  grid-area: input;
+  min-height: 48px;
+  padding: 2px var(--space-1);
+  font: var(--w-regular) 15px / 24px var(--font-sans);
+}
+
+:root[data-theme="anthropic"] .composer__row > .chip--attach {
+  grid-area: attach;
+  justify-self: start;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 16px;
+}
+
+:root[data-theme="anthropic"] #model {
+  grid-area: model;
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+}
+
+:root[data-theme="anthropic"] .pick:hover { border-color: transparent; background: var(--panel); }
+
+/* 发送键：陶土色的小方块，里面一个朝上的箭头。原来那个「→」字形不动，
+   只是不画它 —— 换 DOM 的话默认主题那条「敲的字和正文对齐」要跟着重量 */
+:root[data-theme="anthropic"] #send,
+:root[data-theme="anthropic"] #stop {
+  grid-area: send;
+  /* 不能用 grid：按钮里那个藏起来的「→ / ■」字形是一个匿名格子，
+     会占掉一行，把画出来的记号挤到上半截 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  font-size: 0;
+}
+
+:root[data-theme="anthropic"] .go { background: var(--accent); color: #fff; }
+:root[data-theme="anthropic"] .go:hover { background: var(--accent-deep); }
+:root[data-theme="anthropic"] #send::before { content: "↑"; font: 600 17px / 1 var(--font-sans); }
+
+:root[data-theme="anthropic"] .go--stop { background: rgba(20, 20, 19, 0.86); }
+:root[data-theme="anthropic"] .go--stop:hover { background: #141413; }
+
+:root[data-theme="anthropic"] #stop::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: #fff;
+}
+
+:root[data-theme="anthropic"] .clip { border-radius: var(--radius); border-color: var(--line); background: var(--raised); }
+
+:root[data-theme="anthropic"] .palette {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+  padding: var(--space-1);
+}
+
+:root[data-theme="anthropic"] .palette__item { border-bottom: 0; border-radius: var(--radius); }
+:root[data-theme="anthropic"] .palette__item[aria-selected="true"] { background: var(--card); }
+
+/* ── 空对话：衬线大字的问候 ───────────────────────────────────
+   claude.ai 第一屏那句「下午好」是它最认得出来的一处。星芒换成 feiyu 自己的那只狗，
+   `logo.svg` 当遮罩用、染成陶土色 —— <img> 里的 currentColor 染不上 */
+:root[data-theme="anthropic"] .sheet:has(#hello) { justify-content: center; }
+
+:root[data-theme="anthropic"] .hello .block__body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding-bottom: 8vh;
+}
+
+:root[data-theme="anthropic"] .hello__greet {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 var(--space-2);
+  font: 400 42px / 1.15 var(--font-display);
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .hello__mark {
+  width: 36px;
+  height: 36px;
+  background: var(--accent);
+  -webkit-mask: url("logo.svg") center / contain no-repeat;
+  mask: url("logo.svg") center / contain no-repeat;
+}
+
+:root[data-theme="anthropic"] .hello__lead { margin-bottom: var(--space-5); font-size: 15px; color: var(--muted); }
+
+:root[data-theme="anthropic"] .hello__list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  max-width: 40rem;
+}
+
+:root[data-theme="anthropic"] .hello__pick {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  box-shadow: none;
+  font-size: 13.5px;
+  line-height: 20px;
+  color: var(--soft);
+  text-align: center;
+}
+
+:root[data-theme="anthropic"] .hello__pick:hover {
+  border-color: var(--line-strong);
+  background: var(--panel);
+  box-shadow: none;
+  color: var(--text);
+}
+
+:root[data-theme="anthropic"] .hello__keys { margin-top: var(--space-3); color: var(--faint); }
+:root[data-theme="anthropic"] .hello__keys code { border-radius: 5px; padding: 1px 6px; }
+
+/* ── 设置 / 机器人面板 ──────────────────────────────────────── */
+
+:root[data-theme="anthropic"] .tabs { padding: 6px 0; }
+
+:root[data-theme="anthropic"] .tab {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 6px var(--space-3);
+  border: 0;
+  border-radius: var(--radius);
+}
+
+:root[data-theme="anthropic"] .tabs::after {
+  top: 6px;
+  bottom: 6px;
+  height: auto;
+  border-radius: var(--radius);
+  background: var(--card);
+  z-index: 0;
+}
+
+:root[data-theme="anthropic"] #shelf-find,
+:root[data-theme="anthropic"] #bot-find {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 5px var(--space-3);
+  background: var(--raised);
+}
+
+:root[data-theme="anthropic"] .shelf__list { padding: var(--space-2); border-right-color: var(--line); }
+
+:root[data-theme="anthropic"] .shelf__row {
+  border-bottom: 0;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+:root[data-theme="anthropic"] .shelf__row:hover { background: var(--panel); }
+:root[data-theme="anthropic"] .shelf__row[aria-current="true"] { background: var(--card); }
+:root[data-theme="anthropic"] .shelf__meta { font-size: 11px; color: var(--muted); }
+
+/* 开关：胶囊 + 圆钮（DESIGN.md 里 pill 那一档），开着是陶土色 */
+:root[data-theme="anthropic"] .sw {
+  width: 34px;
+  height: 20px;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+:root[data-theme="anthropic"] .sw::before {
+  width: 16px;
+  border-radius: 50%;
+  background: var(--raised);
+  box-shadow: var(--shadow-soft);
+}
+
+:root[data-theme="anthropic"] .sw[aria-checked="true"] { background: var(--accent); }
+:root[data-theme="anthropic"] .sw[aria-checked="true"]::before { background: var(--raised); }
+
+:root[data-theme="anthropic"] .shelf__pane h2 {
+  font: 400 26px / 1.2 var(--font-display);
+  letter-spacing: -0.015em;
+}
+
+:root[data-theme="anthropic"] .opt { border-top: 0; border-radius: var(--radius); padding-left: var(--space-3); }
+:root[data-theme="anthropic"] .opt:last-child { border-bottom: 0; }
+:root[data-theme="anthropic"] .opt:hover { background: var(--panel); }
+:root[data-theme="anthropic"] .opt--now { box-shadow: none; background: var(--card); }
+
+:root[data-theme="anthropic"] .line,
+:root[data-theme="anthropic"] .newname {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--raised);
+  padding: 5px var(--space-2);
+}
+
+:root[data-theme="anthropic"] .line:focus,
+:root[data-theme="anthropic"] .newname:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.15);
+}
+
+:root[data-theme="anthropic"] .soul {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  padding: var(--space-3);
+}
+
+:root[data-theme="anthropic"] .soul:focus { border-color: var(--accent); }
+
+/* ── 浮起来的小东西 ─────────────────────────────────────────── */
+
+:root[data-theme="anthropic"] .pick-bar {
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+}
+
+:root[data-theme="anthropic"] .to-end {
+  width: 34px;
+  height: 34px;
+  border-color: var(--line);
+  border-radius: 50%;
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+}
+
+:root[data-theme="anthropic"] .term { border-top-color: var(--line); }
+
+/* 焦点：陶土色的环。瑞士那套靠浏览器默认的 outline，这套的底色和圆角
+   让默认那圈蓝看着像别人家的东西 */
+:root[data-theme="anthropic"] button:focus-visible,
+:root[data-theme="anthropic"] [role="switch"]:focus-visible,
+:root[data-theme="anthropic"] .talk:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:root[data-theme="anthropic"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+
+:root[data-theme="anthropic"] ::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(20, 20, 19, 0.16) content-box;
+}
+
+:root[data-theme="anthropic"] ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 窄屏 ────────────────────────────────────────────────── */
+
+@media (max-width: 46rem) {
+  :root[data-theme="anthropic"] .sheet { padding: var(--space-4) var(--space-3); }
+  :root[data-theme="anthropic"] .composer { padding: var(--space-1) var(--space-3) var(--space-2); }
+  :root[data-theme="anthropic"] .hello__greet { font-size: 32px; }
+  :root[data-theme="anthropic"] .side { background: var(--side-bg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="anthropic"] .churn::before { animation: none; }
 }

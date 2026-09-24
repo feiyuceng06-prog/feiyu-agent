@@ -95,6 +95,13 @@ const HELLO = [
   "最近这次改动有什么风险？",
 ];
 
+/* 问候那一行只有 Anthropic 那套皮画出来（claude.ai 那句衬线大字），
+   别的主题里它是 `display: none` —— 那两套的「开始」本来就是安静的一行字 */
+function greeting() {
+  const h = new Date().getHours();
+  return h < 5 ? "夜深了" : h < 11 ? "早上好" : h < 13 ? "中午好" : h < 18 ? "下午好" : "晚上好";
+}
+
 function syncHello() {
   let el = $("hello");
   // **"有没有内容"不能把这块自己算进去。** 第一版写的是
@@ -109,6 +116,8 @@ function syncHello() {
   el.id = "hello";
   el.className = "block hello";
   el.innerHTML = `<div class="block__label">开始</div><div class="block__body">`
+    + `<h1 class="hello__greet"><span class="hello__mark" aria-hidden="true"></span>`
+    + `${greeting()}</h1>`
     + `<p class="hello__lead">问它点什么，或者直接把要做的事说出来。</p>`
     + `<ul class="hello__list">`
     + HELLO.map((t) => `<li><button type="button" class="hello__pick">${esc(t)}</button></li>`).join("")
@@ -795,9 +804,9 @@ function handle(ev) {
     case "resumed":
       rowsOf(ev.history).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
-        else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
+        else block("它说", "block--say").innerHTML = `<div class="prose">${md(row.text)}</div>`;
       });
-      block("提示").innerHTML =
+      block("提示", "block--note").innerHTML =
         `<p class="note">接上了上次的对话（${esc(ev.about || "")}）</p>`;
       break;
 
@@ -928,7 +937,7 @@ function handle(ev) {
     }
 
     case "hook": {
-      const body = block("钩子");
+      const body = block("钩子", "block--note");
       body.innerHTML = `<p class="note" data-level="${ev.ok ? "notice" : "error"}">${esc(ev.text)}</p>`;
       break;
     }
@@ -938,7 +947,7 @@ function handle(ev) {
       closeThinking();          // 开口 = 上一段想完了，把轨迹收起来
       showWait(false);
       if (!saying) {
-        saying = block("它说");
+        saying = block("它说", "block--say");
         // `.prose` 要一次建好、之后只换它的孩子 —— paintInto 的缓存挂在它身上
         saying.innerHTML = '<div class="prose"></div>';
         saying.dataset.live = "1";
@@ -949,12 +958,12 @@ function handle(ev) {
       break;
 
     case "note":
-      block(ev.level === "error" ? "出错" : ev.level === "warn" ? "注意" : "提示")
+      block(ev.level === "error" ? "出错" : ev.level === "warn" ? "注意" : "提示", "block--note")
         .innerHTML = `<p class="note" data-level="${esc(ev.level)}">${esc(ev.text)}</p>`;
       break;
 
     case "plan":
-      block("方案").innerHTML = `<div class="prose">${md(ev.text)}</div>`;
+      block("方案", "block--say block--plan").innerHTML = `<div class="prose">${md(ev.text)}</div>`;
       break;
 
     case "preview":
@@ -991,7 +1000,7 @@ function handle(ev) {
       showBotShop(false);
       rowsOf(ev.history).forEach((row) => {
         if (row.role === "user") block("你", "block--you").textContent = row.text;
-        else block("它说").innerHTML = `<div class="prose">${md(row.text)}</div>`;
+        else block("它说", "block--say").innerHTML = `<div class="prose">${md(row.text)}</div>`;
       });
       break;
 
@@ -1017,7 +1026,7 @@ function handle(ev) {
         wantHelp = false;
         const rows = commands.map((c) =>
           `<tr><td><code>${esc(c.name)}</code></td><td>${esc(c.about)}</td></tr>`).join("");
-        block("命令").innerHTML =
+        block("命令", "block--say").innerHTML =
           `<div class="prose"><table><tbody>${rows}</tbody></table></div>`;
       }
       break;
@@ -1075,6 +1084,9 @@ function askCard(ev) {
   let choices = [];
   if (ev.type === "approve") {
     question = `要 ${ev.label}${ev.target ? " " + ev.target : ""} 吗？`;
+    // 读过外部内容之后要联网的那条（agent 的 `_egress`）：平时它不会停下来问，
+    // 突然停了得一眼看出为什么 —— 光靠卡片上面那行提示，眼睛扫过去容易漏
+    if (ev.args && ev.args.network) question += "（要联网）";
     // **按「点错了会怎样」排，不按「多常用」排。**
     // 点错「同意一次」最多白跑一步；点错「永久允许」是以后再也不问了 ——
     // 这两个原来并排、样式一样宽，手快很容易点到后面那个。
@@ -2545,7 +2557,7 @@ function inbound(raw) {
     toolBlocks.clear();
     toolSeen.clear();
     pendingPreview = null;
-    block("出错").innerHTML =
+    block("出错", "block--note").innerHTML =
       `<p class="note" data-level="error">界面没接住一条 ${esc(String(ev && ev.kind))} 事件：` +
       `${esc(String((err && err.message) || err))}<br>对话本身没事，接着说就行。</p>`;
   }

@@ -6,15 +6,13 @@
 """
 
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
 
 from feiyu import agent as agent_mod
 from feiyu import subagent
 from feiyu.agent import Feiyu
-from feiyu.providers import ToolCall, TurnResult
+from feiyu.providers import ToolCall
 from feiyu.tools import TOOL_SCHEMAS, ToolResult
 from tests.fakes import FakeBackend, call, unpaired
 from tests.test_agent import quiet

@@ -487,14 +487,34 @@ class TestThemes(unittest.TestCase):
         self.assertFalse(ui.set_theme("没这套"))
         self.assertEqual(ui._RGB, before)
 
-    def test_复古的加减号要分得开(self):
+    def test_暖色那两套的加减号要分得开(self):
         """整套暖色里，diff 的新增（blue）和删除（red）不能糊成一片 ——
         桌面端那边同一条不变量由 shoot.mjs 量 RGB 距离盯着 """
-        got = ui.THEMES["retro"]["rgb"]
-        plus = [int(x) for x in got["blue"].split(";")]
-        minus = [int(x) for x in got["red"].split(";")]
-        far = sum((a - b) ** 2 for a, b in zip(plus, minus)) ** 0.5
-        self.assertGreater(far, 90, "%s vs %s" % (plus, minus))
+        for name in ("retro", "anthropic"):
+            got = ui.THEMES[name]["rgb"]
+            plus = [int(x) for x in got["blue"].split(";")]
+            minus = [int(x) for x in got["red"].split(";")]
+            far = sum((a - b) ** 2 for a, b in zip(plus, minus)) ** 0.5
+            self.assertGreater(far, 90, "%s: %s vs %s" % (name, plus, minus))
+
+    def test_Anthropic_在浅底深底上都读得清(self):
+        """终端的底色不归我们管：用户的 kitty 是浅的，别人的多半是深的
+        每个色在两种底上都得够 3:1（大字 / 非文本的 AA），不然换个终端就糊了 """
+        def lum(rgb):
+            def lin(c):
+                c /= 255
+                return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+            r, g, b = (lin(v) for v in rgb)
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        def contrast(a, b):
+            hi, lo = sorted((lum(a), lum(b)), reverse=True)
+            return (hi + 0.05) / (lo + 0.05)
+
+        for key, raw in ui.THEMES["anthropic"]["rgb"].items():
+            rgb = [int(x) for x in raw.split(";")]
+            for bg in ((250, 249, 245), (20, 20, 20)):
+                self.assertGreaterEqual(contrast(rgb, bg), 3.0, "%s on %s" % (key, bg))
 
 
 class TestFixtureKeepsUp(unittest.TestCase):

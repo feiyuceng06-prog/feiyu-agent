@@ -92,6 +92,9 @@ def _get(url: str, key: str, base: str) -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as reply:
             raw = json.loads(reply.read(200_000).decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        exc.close()          # HTTPError 也是个响应体（401 / 404 在这儿是常态），不关就漏着
+        return None
     except (urllib.error.URLError, OSError, ValueError):
         return None
     return raw if isinstance(raw, dict) else None

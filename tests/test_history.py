@@ -291,7 +291,6 @@ class TestAgeInAgent(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_script(self, n):
-        from feiyu import agent as agent_mod
         script = [("", [call("c%d" % i, "bash", command="ls -la %d" % i)]) for i in range(n)]
         script.append(("完了", []))
         self.agent.backend = FakeBackend(script)
@@ -319,7 +318,6 @@ class TestAgeInAgent(unittest.TestCase):
         self.assertTrue(all(b == "短" for b in bodies))
 
     def test_清空历史后登记也清(self):
-        from feiyu.agent import AGE_ROUNDS
         self.run_script(2)
         self.assertTrue(self.agent._aging)
         self.agent.reset()

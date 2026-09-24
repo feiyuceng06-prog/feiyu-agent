@@ -50,11 +50,56 @@ def _field(block, name: str, default: str = ""):
     return getattr(block, name, default)
 
 
-# anthropic 的缓存断点 openai 兼容那边是服务端自动缓存，不用也不能声明
+# anthropic 的缓存断点
 CACHE_MARK = {"type": "ephemeral"}
 # 历史上留几个滚动断点 接口一共只认 4 个，system 和 tools 各占一个，
 # 剩下两个留给历史：新的那个负责这一轮写入，旧的那个保证上一轮写的那份一定命中
 CACHE_KEEP = 2
+
+
+def _wants_marks(model: str) -> bool:
+    """走 openai 兼容格式的 Claude（OpenRouter 的 `anthropic/claude-*`、中转站的 `claude-*`）
+    **照样得自己打断点**，服务端不会替它缓存 OpenAI / DeepSeek / Qwen 是自动缓存，不用打
+
+    实测（2026-09-23，haiku-4.5 经 OpenRouter，1.5 万 token 的前缀连发两次）：
+    不打断点两次都命中 0、都按全价；system 上打一个，第二次整段按缓存价，
+    $0.0156 → $0.0016 在这之前经 OpenRouter 跑的 Claude 每一轮都在付全价
+    """
+    return "claude" in (model or "").lower()
+
+
+def _with_mark(msg: dict) -> dict:
+    """返回挂了断点的**副本**，原消息不动 断点只能挂在文本块上，
+    content 是字符串的先摊成一个文本块；最后一块是图的话挂在它前面那个文本块上"""
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        return {**msg, "content": [{"type": "text", "text": content, "cache_control": CACHE_MARK}]}
+    if not isinstance(content, list):
+        return msg
+    parts = [dict(p) if isinstance(p, dict) else p for p in content]
+    for part in reversed(parts):
+        if isinstance(part, dict) and part.get("type") == "text":
+            part["cache_control"] = CACHE_MARK
+            return {**msg, "content": parts}
+    return msg
+
+
+def _split_usage(usage) -> tuple[int, int, int, int]:
+    """(命中, 没命中, 输出, 新写进缓存) 命中数两家放的地方不一样：DeepSeek 是
+    `prompt_cache_hit_tokens`，openai / OpenRouter 是 `prompt_tokens_details.cached_tokens`
+
+    **写进缓存的那部分要单独拿出来**（OpenRouter 的 `cache_write_tokens`）：
+    它包含在 prompt_tokens 里，但 Claude 按输入价的 1.25 倍收 当成普通输入算的话，
+    打了断点的每一轮都少算一截
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    if hit is None:
+        hit = getattr(details, "cached_tokens", 0) if details else 0
+    hit = hit or 0
+    write = (getattr(details, "cache_write_tokens", 0) if details else 0) or 0
+    prompt = usage.prompt_tokens or 0
+    return hit, max(0, prompt - hit - write), usage.completion_tokens or 0, write
 
 
 def _cache_rejected(exc: Exception) -> bool:
@@ -434,6 +479,7 @@ class OpenAICompatBackend(Billing):
     # 同样放类属性：假后端绕过 __init__（理由见 AnthropicBackend 那条）
     effort = ""
     thinking_on = True
+    cache = False
     # 没在 /key 里填 max_tokens 时的保底 往高了写不安全：有些兼容接口
     # 收到超过自己上限的值直接报错 要写长文件的模型（Claude、Kimi K2）
     # 得在 /key 里按它自己的上限填一个，否则每次都撞上长度上限半途而废
@@ -458,6 +504,8 @@ class OpenAICompatBackend(Billing):
         self.tools = _to_openai_tools(tools)
         self.messages: list[dict] = [{"role": "system", "content": system}]
         self.thinking = False       # 这段对话里出现过思考内容没有
+        # 要不要自己打缓存断点 接口不认的话 `_open` 会关掉它
+        self.cache = _wants_marks(model)
         self._reset_usage()
 
     def reset(self) -> None:
@@ -497,8 +545,8 @@ class OpenAICompatBackend(Billing):
         )
         usage = getattr(reply, "usage", None)
         if usage is not None:
-            self._charge(0, usage.prompt_tokens or 0, usage.completion_tokens or 0,
-                         context=False)
+            hit, miss, out, write = _split_usage(usage)
+            self._charge(hit, miss, out, write=write, context=False)
         return reply.choices[0].message.content or ""
 
     def summarize(self) -> str:
@@ -552,21 +600,58 @@ class OpenAICompatBackend(Billing):
         for m in seen:
             m.setdefault("reasoning_content", "")
 
+    def _marked(self) -> list[dict]:
+        """发出去的那份历史，挂好缓存断点 **不改 self.messages** —— 存盘的是它，
+        而会话中途换成不认 cache_control 的模型（DeepSeek 直连）时，留在里面的标记
+        会跟着发过去
+
+        system 上一个：anthropic 的前缀顺序是 tools → system → messages，
+        一个断点连工具表一起盖住 历史上两个滚动的，挂在最近两批「人这一侧」
+        （user / tool 连着的一段）的末尾 —— 跟 AnthropicBackend 的 CACHE_KEEP 同一个道理：
+        新的那个负责这一轮写入，旧的那个正好是上一轮写到的位置，一定命中
+        """
+        out = list(self.messages)
+        side = ("user", "tool")
+        ends = [i for i, m in enumerate(out)
+                if m.get("role") in side
+                and (i + 1 == len(out) or out[i + 1].get("role") not in side)]
+        spots = ends[-CACHE_KEEP:]
+        if out and out[0].get("role") == "system":
+            spots.insert(0, 0)
+        for i in spots:
+            out[i] = _with_mark(out[i])
+        return out
+
+    def _open(self, extra: dict):
+        """发出这一轮的请求 打了断点而接口不认（中转站未必透传）就去掉重发一次
+
+        判「是不是断点惹的」不看报错文字（`_cache_rejected` 那种）：openai 兼容那边
+        不认的是 content 写成数组这个形状，报错里未必提到 cache 所以换个判法 ——
+        去掉断点重发，成了就是它，这个会话以后都不打；**照样挂就不是它**，
+        断点留着、原样报错，别为一个无关的 400 把缓存永久关掉（那样每轮贵十倍，而且没人看得见）
+        """
+        args = dict(model=self.model, max_tokens=self.max_tokens, tools=self.tools,
+                    stream=True, stream_options={"include_usage": True}, **extra)
+        if not self.cache:
+            return self.client.chat.completions.create(messages=self.messages, **args)
+        try:
+            return self.client.chat.completions.create(messages=self._marked(), **args)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) not in (400, 404, 422):
+                raise
+        reply = self.client.chat.completions.create(messages=self.messages, **args)
+        self.cache = False
+        return reply
+
     def run_turn(self, on_text, on_tool=None, on_think=None) -> TurnResult:
         self._mind_thinking()
         extra = {"reasoning_effort": self.effort} if self.effort else {}
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            tools=self.tools,
-            messages=self.messages,
-            stream=True,
-            stream_options={"include_usage": True},
-            **extra,
-        )
+        stream = self._open(extra)
 
         text = ""
         reasoning = ""
+        # OpenRouter 的思考文本（`delta.reasoning`）只给人看、不进历史，所以单独攒
+        shown = 0
         finish = ""
         pending: dict[int, dict] = {}
         usage = None
@@ -586,13 +671,23 @@ class OpenAICompatBackend(Billing):
             # 思考过程要原样带回去 DeepSeek v4 的思考模式下不回传就是 400：
             # "The `reasoning_content` in the thinking mode must be passed back"
             # 只有它自己吐过才会带上，所以不会往不认这个字段的接口上乱塞
-            if getattr(delta, "reasoning_content", None):
-                reasoning += delta.reasoning_content
-                # **想的过程也要让人看见。** 不报的话思考型模型在那儿想十分钟，
-                # 屏幕上一个字都没有 —— 跟死了长得一模一样（实测过一轮 622 秒，
-                # 全在这儿；数据一直在流，所以连超时都不会响）
-                if on_think:
-                    on_think(len(reasoning), delta.reasoning_content)
+            piece = getattr(delta, "reasoning_content", None)
+            if piece:
+                reasoning += piece
+            else:
+                # **OpenRouter 把思考放在 `reasoning`**（Claude / GPT / Qwen 全是这个字段），
+                # 只认 `reasoning_content` 的话，经它跑的模型想十分钟屏幕上一个字都没有 ——
+                # 0.58.0 的字数和 0.77.0 的轨迹对它们从来没亮过（2026-09-23 实测三家都是 0 次）
+                # 不进历史：它那边不要求带回去，实测带不带下一轮都一样
+                piece = getattr(delta, "reasoning", None)
+                if not isinstance(piece, str):
+                    piece = ""
+                shown += len(piece)
+            # **想的过程也要让人看见。** 不报的话思考型模型在那儿想十分钟，
+            # 屏幕上一个字都没有 —— 跟死了长得一模一样（实测过一轮 622 秒，
+            # 全在这儿；数据一直在流，所以连超时都不会响）
+            if piece and on_think:
+                on_think(len(reasoning) + shown, piece)
             for tc in getattr(delta, "tool_calls", None) or []:
                 slot = pending.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                 if tc.id:
@@ -605,14 +700,8 @@ class OpenAICompatBackend(Billing):
                     on_tool(slot["name"], slot["args"])
 
         if usage is not None:
-            hit = getattr(usage, "prompt_cache_hit_tokens", None)
-            if hit is None:
-                # 有些兼容接口把命中数放在 prompt_tokens_details.cached_tokens
-                details = getattr(usage, "prompt_tokens_details", None)
-                hit = getattr(details, "cached_tokens", 0) if details else 0
-            hit = hit or 0
-            prompt = usage.prompt_tokens or 0
-            self._charge(hit, max(0, prompt - hit), usage.completion_tokens or 0)
+            hit, miss, out, write = _split_usage(usage)
+            self._charge(hit, miss, out, write=write)
 
         ordered = [pending[i] for i in sorted(pending)]
 

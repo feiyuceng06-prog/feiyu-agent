@@ -66,6 +66,10 @@ DEFAULT_MAX_ROUNDS = 60
 DEFAULT_BUDGET = 0.5
 # 最低 Python 跟 pyproject 一致 比这个老的镜像直接说不行，别让它跑一半炸
 MIN_PY = (3, 10)
+# 从宿主机转发进容器的 A/B 开关（为什么要转发见 `run()` 里那段）
+# **feiyu 那边每加一个开关，这里就得跟着加一个** —— 漏了不报错，两档跑出来一模一样
+AB_SWITCHES = ("FEIYU_ASSIST", "FEIYU_SYNTAX_CHECK", "FEIYU_REPRODUCE", "FEIYU_OUTLINE",
+               "FEIYU_REWRITE_HINT", "FEIYU_DEADLINE_HINT")
 # 容器里可能是哪家的包管理器，以及同一样东西在各家叫什么名字
 PKG_MANAGERS = (
     ("apt-get", "apt-get update -qq && apt-get install -y -qq %s"),
@@ -303,6 +307,9 @@ class FeiyuAgent(BaseAgent):
             "XDG_CONFIG_HOME": REMOTE_CFG,
             "XDG_STATE_HOME": REMOTE_STATE,
             "FEIYU_SANDBOX": "off",      # 容器里没有 bwrap，容器本身就是沙箱
+            # 沙箱关着时「读过外部内容之后能联网的命令要人点头」，而这儿没人能点头 ——
+            # 不关的话搜过一次网页之后 bash 全被拒，量的就不是它本来的本事了
+            "FEIYU_TRUST_OUTSIDE": "1",
             "NO_COLOR": "1",
         }
         # **A/B 开关要从宿主机转发进容器。** 这个 env 字典原来是写死的，于是
@@ -310,7 +317,7 @@ class FeiyuAgent(BaseAgent):
         # （那条路 feiyu 跑在宿主机，环境变量天然就在），挪到 Harbor 这边就断了，
         # 而断得很安静：开关照样能设，只是不起作用，两档跑出来一模一样。
         # Harbor 的 `--agent-env` 也不行，它进不到我们这次 `exec` 的 env 里。
-        for name in ("FEIYU_ASSIST", "FEIYU_REWRITE_HINT", "FEIYU_DEADLINE_HINT"):
+        for name in AB_SWITCHES:
             if os.environ.get(name):
                 env[name] = os.environ[name]
         # 题面是**位置参数**，没有 -p 这个开关（`feiyu [选项] [prompt ...]`）
