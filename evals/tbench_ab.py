@@ -97,7 +97,15 @@ def load() -> list[tuple[str, int]]:
         if not line or line.startswith("#"):
             continue
         name, _, secs = line.partition(" ")
-        out.append((name, int(secs.strip())))
+        secs = secs.strip()
+        # **单位必须写着。** 这个数会一路传到 `--time-budget`，而那儿的裸数按
+        # **分钟**算 —— 0.78.0 那轮 A/B 就是这么白跑的：文件里 445，闸变成
+        # 445 分钟，60 倍，两档一次都没咬住，看着像"这个改动没影响"。
+        # 所以宁可在这儿读不出来报错，也不要让一个没单位的数飘出去。
+        if not secs.endswith("s"):
+            raise ValueError("%s 里 %r 没写单位：该是 `%s 445s` 这种形状"
+                             % (SUBSET.name, line, name))
+        out.append((name, int(secs[:-1])))
     return out
 
 
@@ -172,10 +180,11 @@ def main() -> int:
     if args.write:
         body = [
             "# 墙钟 / 收敛类改动的配对 A/B 子集（evals/tbench_ab.py 从基线存档里算的）",
-            "# 一行一道：题名 + 给它的软闸秒数（= 基线中位墙钟 × %g）" % SQUEEZE,
+            "# 一行一道：题名 + 给它的软闸（= 基线中位墙钟 × %g，**秒，单位必须写**）" % SQUEEZE,
             "# 挑的规矩：两遍都判过、两遍都解出来、两遍都没撞墙钟、中位 ≥ %g 秒 " % FLOOR,
             "# **改这个文件等于换了尺子**，之前跑出来的数就不能跟之后的比了 ",
-            *["%s %d" % (name, secs) for name, secs in picks],
+            # **带着单位写**，理由见 `load()`：这个数要一路传到 `--time-budget`
+            *["%s %ds" % (name, secs) for name, secs in picks],
         ]
         SUBSET.write_text("\n".join(body) + "\n", encoding="utf-8")
         print("写好了 %s" % SUBSET)

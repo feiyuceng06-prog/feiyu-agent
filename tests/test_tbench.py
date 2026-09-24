@@ -98,6 +98,15 @@ class TestPick(unittest.TestCase):
         self.assertEqual(tbench_pick.load(), tbench_pick.chosen(rows))
 
 
+class _fake_subset:
+    """当一个 `SUBSET` 用：只要 `.read_text()` 和 `.name` """
+    def __init__(self, text):
+        self.text, self.name = text, "tbench_ab.txt"
+
+    def read_text(self, encoding=None):
+        return self.text
+
+
 def _ab_row(name, ok=True, s=600.0, graded=True, exc=None, turn=1):
     return {"suite": name, "turn": turn, "ok": ok, "s": s,
             "detail": {"graded": graded, "exception": exc}}
@@ -145,6 +154,25 @@ class TestAbPick(unittest.TestCase):
                 _ab_row("alpha", turn=1), _ab_row("alpha", turn=2)]
         self.assertEqual(tbench_ab.picked(rows), tbench_ab.picked(list(reversed(rows))))
         self.assertEqual([n for n, _ in tbench_ab.picked(rows)], ["alpha", "beta"])
+
+    def test_写出去的软闸必须带单位(self):
+        """**0.78.0 那轮 A/B 白跑就死在这儿**：文件里存的是秒，而
+        `--time-budget` 的裸数按分钟算，60 倍，两档一次都没咬住 ——
+        跟 0.73.0「开关到不了容器」一个形状：设了、命令也对，就是不起作用
+        """
+        for line in tbench_ab.SUBSET.read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.startswith("#"):
+                self.assertRegex(line, r"^\S+ \d+s$", "软闸没带单位：%r" % line)
+
+    def test_读到没单位的数要当场抛(self):
+        """静默当成分钟是最糟的：它照样跑得下去，只是闸永远轮不到响 """
+        with unittest.mock.patch.object(
+                tbench_ab, "SUBSET", _fake_subset("甲 445\n")):
+            with self.assertRaises(ValueError):
+                tbench_ab.load()
+        with unittest.mock.patch.object(
+                tbench_ab, "SUBSET", _fake_subset("甲 445s\n")):
+            self.assertEqual(tbench_ab.load(), [("甲", 445)])
 
     def test_子集文件跟基线算出来的一致(self):
         """本机有基线存档时才跑 改了 FLOOR / SQUEEZE 却忘了 `--write`，这条会红 """
