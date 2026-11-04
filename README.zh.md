@@ -10,11 +10,21 @@
 
 ## 安装
 
+### Ubuntu 一键安装命令行版
+
+```bash
+wget -qO- https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/bootstrap-ubuntu.sh | bash
+```
+
+需要网络和 `wget`。脚本会检查 Python 3.10+ 和 venv；缺少时通过 `sudo apt-get` 安装，可能要求输入密码。程序和依赖安装在用户目录，交互式终端中安装后自动启动，在程序里输入 `/key add` 配置模型。之后运行 `~/.local/bin/feiyu`；若 `~/.local/bin` 已在 PATH，也可以直接运行 `feiyu`。重新执行该命令可安装当前主分支版本，旧版本目录不会自动删除，模型和密钥配置会保留。
+
+### 从源码安装
+
 ```
 git clone https://github.com/feiyuceng06-prog/feiyu-agent.git && cd feiyu-agent && ./install.sh
 ```
 
-脚本会建虚拟环境、装依赖，并往 `~/.local/bin` 放一个 `feiyu` 命令。需要 Python 3.10 以上。升级代码后再跑一次即可。
+默认安装命令行版，建立虚拟环境并在 `~/.local/bin` 放置 `feiyu`。需要 Python 3.10 以上；保留源码目录，更新后重新运行脚本。桌面版请运行 `./install.sh --desktop`。
 
 装完先加一个模型：运行 `feiyu`，输入 `/key add`，填接口地址、模型 id 和密钥。细节见[模型](#模型)一节。
 
@@ -407,7 +417,7 @@ style: concise
 
 界面的信息架构参考了 [Hermes Desktop](https://github.com/NousResearch/hermes-agent)（MIT）的 `DESIGN.md`；配色、字体、间距是 [feiyuz123.com](https://feiyuz123.com) 那一套。没有框架，没有 npm 依赖。
 
-桌面端要 `cargo` 和 `webkit2gtk`。`install.sh` 里是可选的：没有就跳过，终端版照常。
+桌面端需要 Rust/Cargo、GTK 3、WebKitGTK 4.1 和 libsoup 3 开发包。运行 `./install.sh --desktop` 安装。
 
 ## 技能和自定义命令
 

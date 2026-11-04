@@ -10,11 +10,21 @@ About 4,800 lines of Python, no framework, three dependencies: `anthropic`, `pil
 
 ## Install
 
+### Ubuntu one-command CLI install
+
+```bash
+wget -qO- https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/bootstrap-ubuntu.sh | bash
+```
+
+Requires network access and `wget`. The installer checks for Python 3.10+ and venv, installing missing system packages with `sudo apt-get` when necessary. It installs the program and dependencies in your user directory and starts Feiyu in an interactive terminal. Enter `/key add` to configure a model. Later, run `~/.local/bin/feiyu`, or `feiyu` if `~/.local/bin` is on your PATH. Run the command again to install the current main branch; previous version directories and model configurations are retained.
+
+### Install from source
+
 ```
 git clone https://github.com/feiyuceng06-prog/feiyu-agent.git && cd feiyu-agent && ./install.sh
 ```
 
-The script creates a virtualenv, installs the dependencies and puts a `feiyu` command in `~/.local/bin`. Needs Python 3.10 or newer. Run it again after pulling new code.
+By default the script installs the CLI in a virtualenv and puts `feiyu` in `~/.local/bin`. It needs Python 3.10 or newer. Keep the checkout and rerun the script after updating it. Run `./install.sh --desktop` to install the desktop app.
 
 Then add a model: run `feiyu`, type `/key add`, and fill in the API base URL, model id and key. See [Models](#models).
 
@@ -436,7 +446,7 @@ Under the hood it is a Tauri window supervising a `feiyu --serve` child process,
 
 The information architecture follows [Hermes Desktop](https://github.com/NousResearch/hermes-agent)'s `DESIGN.md` (MIT); the palette, type and spacing are [feiyuz123.com](https://feiyuz123.com)'s. No framework, no npm dependencies.
 
-The desktop app needs `cargo` and `webkit2gtk`. It is optional in `install.sh`: without them the step is skipped and the terminal version is unaffected.
+The desktop app needs Rust/Cargo and the GTK 3, WebKitGTK 4.1 and libsoup 3 development packages. Install it with `./install.sh --desktop`.
 
 ## Skills and custom commands
 
