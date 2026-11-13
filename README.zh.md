@@ -291,7 +291,7 @@ docker / podman 的 socket 也挡在外面——碰得到它就能 `docker run -
 
 三个常见的沙箱内失败它会认出来并说明原因：ssh 远端因为 `~/.ssh` 被挖空而失败（https 远端配 `gh` 的凭据助手不受影响），docker 连不上，断网时联不了网。
 
-`/sandbox` 切换，`FEIYU_SANDBOX=off` 临时关掉。没装 bubblewrap 就没有沙箱，欢迎框里会写明。
+`/sandbox` 切换，`FEIYU_SANDBOX=off` 临时关掉。没装 bubblewrap 就没有沙箱，启动时会提示一句，输入框上沿的状态里也会标出「无沙箱」。
 
 ## 自动化
 
@@ -372,7 +372,7 @@ feiyu-desktop -r                  # 接着上次在这个目录里的对话
 
 装完在应用列表里也能搜到 **Feiyu**。
 
-**不想从源码装**：到 [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases) 下载 Linux 的 AppImage（`chmod +x` 之后双击）或 deb（`sudo apt install ./文件名.deb`）。包里带着 Python 后端，不用装 Python、Node，也不用开终端。第一次打开会请你「连接模型」：选个接口（OpenRouter、DeepSeek、Kimi、通义千问、硅基流动、OpenAI、Anthropic，或者自己填地址），贴上那一家的 key，从现场拉回来的模型清单里点一个就能用。从应用菜单打开时，会接着用上一次选的工作台。Windows 和 macOS 的包还没有。
+**不想从源码装**：到 [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases) 下载 Linux 的 deb（`sudo apt install ./文件名.deb`，Ubuntu 上选这个）或 AppImage（`chmod +x` 之后双击）。AppImage 要系统里有 libfuse2，Ubuntu 从 22.04 起默认不装，先 `sudo apt install libfuse2`（24.04 上包名是 `libfuse2t64`），不然双击没反应。包里带着 Python 后端，不用装 Python、Node，也不用开终端。第一次打开会请你「连接模型」：选个接口（OpenRouter、DeepSeek、Kimi、通义千问、硅基流动、OpenAI、Anthropic，或者自己填地址），贴上那一家的 key，从现场拉回来的模型清单里点一个就能用。从应用菜单打开时，会接着用上一次选的工作台。Windows 和 macOS 的包还没有。
 
 **窗口里的东西不会跑到终端上。** agent 那半边人看的输出（还有桥接自己那几行 `→ op`）写进 `~/.local/state/feiyu/desktop.log`，跟对话存盘一样按 0600 存，攒到 4 MB 从头写。要它回到终端上看：`FEIYU_DESKTOP_STDERR=1 feiyu-desktop`。
 

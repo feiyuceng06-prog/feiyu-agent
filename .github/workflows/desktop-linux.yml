@@ -64,4 +64,4 @@ jobs:
         run: |
           gh release create "$TAG" built/release/*.deb built/release/*.AppImage \
             --repo "$GITHUB_REPOSITORY" --title "Feiyu ${TAG#desktop-v}（Linux）" \
-            --notes "AppImage：chmod +x 之后双击就能开；deb：sudo apt install ./文件名.deb。第一次打开时按「连接模型」，选个接口、贴上 key 就能用。"
+            --notes "Ubuntu 上用 deb：sudo apt install ./文件名.deb。AppImage：chmod +x 之后双击；它要 libfuse2，Ubuntu 22.04 起默认不装，先 sudo apt install libfuse2（24.04 是 libfuse2t64）。第一次打开时按「连接模型」，选个接口、贴上 key 就能用。"

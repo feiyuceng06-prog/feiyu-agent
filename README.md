@@ -300,7 +300,7 @@ The docker and podman sockets are blocked too — reaching one means `docker run
 
 Three common in-sandbox failures are recognised and explained: ssh remotes fail because `~/.ssh` is emptied (https remotes with `gh`'s credential helper are unaffected), docker cannot connect, and there is no network while it is cut.
 
-`/sandbox` switches; `FEIYU_SANDBOX=off` turns it off for one run. Without bubblewrap there is no sandbox and the welcome box says so.
+`/sandbox` switches; `FEIYU_SANDBOX=off` turns it off for one run. Without bubblewrap there is no sandbox; startup says so, and the status on the input box's top edge marks it.
 
 ## Automation
 
@@ -386,9 +386,11 @@ feiyu-desktop -r                  # continue the last conversation here
 
 After install it also shows up in your app launcher as **Feiyu**.
 
-**Without building from source:** download the Linux AppImage (`chmod +x`, then open it) or
-the deb (`sudo apt install ./file.deb`) from
-[Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases). The package carries its
+**Without building from source:** download the Linux deb (`sudo apt install ./file.deb`, the
+one to pick on Ubuntu) or the AppImage (`chmod +x`, then open it) from
+[Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases). The AppImage needs
+libfuse2, which Ubuntu stopped installing by default in 22.04: run `sudo apt install libfuse2`
+first (`libfuse2t64` on 24.04), or it won't open. The package carries its
 own Python backend — no Python, Node or terminal needed. On first launch it asks you to
 "connect a model": pick a provider (OpenRouter, DeepSeek, Kimi, Qwen, SiliconFlow, OpenAI,
 Anthropic, or type your own address), paste that provider's key, and choose from the model list

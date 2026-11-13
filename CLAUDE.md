@@ -4902,3 +4902,64 @@ nano-banana-pro $0.134、gpt-5.4-image-2 $0.006，有的吃参考图有的不吃
 - 真 Electron 窗口里跑过一次真请求：选 OpenRouter、不填 key（它的 `/models` 是公开的）点「列出模型」，
   拉到 472 个，打字能筛。**测的时候要用开发版后端**（`FEIYU_BIN=.venv/bin/feiyu`）——
   `build/backend` 里那份冻结的是上一次打包时的代码，新加的 op 它不认，表现是「列出模型」一直没回音。
+
+
+## 0.82.2：终端版缩放不再留残影，界面顺手收拾一轮
+
+用户说「TUI 美化优化，窗口放大缩小会有影响」。在 **kitty 自己的屏幕引擎**里复现了：
+从 100 列缩到 72 列，输入框旧的顶边（满宽那条线）被终端折成两行留在新框上面，缩一次叠一层；
+历史里每一个交出去的输入框、欢迎框也都按当时的宽度画，窗口一缩全碎。
+
+### 根因和修法
+
+- **会重排的终端（kitty、gnome-terminal、Windows Terminal、tmux）缩窄时把超宽的行折到下一行**，
+  而 prompt_toolkit 的 `_on_resize` 是按「没折过」的行数从光标往回走、再往下清的 —— 走不到框顶。
+- **光标落在哪儿是靠不住的**：屏幕没满时它还在输入行上；满了的话 kitty 把它放到框的**最后一行**
+  （被折开的底边那儿）。头一版「从光标往上多走几行」在不满的屏幕上对、满屏时照样留顶边 ——
+  是把整个会话的原始输出录下来、在 kitty 引擎里逐步重放才看出光标跑到了哪。
+  现在 `_reflow_moves()` 先往下走「输入行下面那几行重排后占的行数」（光标本来就在最后一行的话，
+  往下走会停在屏幕底边，还是最后一行），再从框底往上走「整个框重排后的总行数 - 1」，两种情况都落在框顶。
+  不缩窄、或者终端不重排（xterm、rxvt、Linux 控制台 —— 它们截断不折，多走会擦掉上面的正文）照旧走
+  prompt_toolkit 自己那套。`_on_resize` 一次缩放会被叫两次（SIGWINCH 一次、它自己轮询尺寸又一次），
+  第二次尺寸已经是新的，自然落回原来那套。
+- **历史里不留框**：输入框 `erase_when_done=True`，交出去的话留一行 `› 原话`（`said()`，主色记号 + 加粗原话、
+  续行缩进两格）；欢迎区不画外框（logo + 信息）；markdown 的分隔线最长 40 格。
+  原则：**打进 scrollback 的东西不画按窗口宽度撑满的线**，它们在窗口变窄时只会碎。
+- **流式输出跟着当前宽度走**：每起一行重新量宽度（原来是这一轮开头量一次）；转圈那条状态行记住画了多宽，
+  擦的时候按它现在被折成几行往上擦（`_wipe_status`），不然缩窄后留下上半截。
+
+### 夹具：`dev/ui_resize.py`
+
+```bash
+kitty +runpy "import runpy; runpy.run_path('dev/ui_resize.py', run_name='__main__')" [输出目录]
+```
+
+主程序挂 `ui_runner.py` 的假后端，跑在 **kitty 的 `Screen`（C 扩展）**里 —— `kitty +runpy` 能直接拿来用，
+跟用户终端是同一份重排代码，不开窗口。**pyte 量不出这个**：它改尺寸只截断 / 补空格，不重排。
+流式输出途中缩一次，跑完再缩到 60、放到 120、缩到 50、回到 100，每一步拍一张图（回滚区 + 当前屏），
+检查屏幕底部只有一个输入提示行、没有半截框线。kitty 回给程序的 CPR 走 Screen 的 `callbacks.write`，
+不用自己算。
+
+### 验证
+
+`tests/test_ui.py` 加了六条（框顶底都满宽 / 光标那行也折了 / 不重排的终端不多走 / 状态行擦几行 /
+回执格式 / 欢迎区不画框），分隔线那条改成「不撑满一行」；**拿 0.81.0 的 `ui.py` 跑七条全挂**。
+`ui_resize.py` 六步全干净，`ui_drive.py` 正常流程（确认、工具、收尾）照旧。
+
+**回退验证别用 `git stash push feiyu/ui.py`**：0.82.1 那次提交已经带上了这一轮做了一半的终端改动，
+stash 回去的 HEAD 里一半函数已经在了，验出来只挂四条、看着像用例没用 —— 要对着 0.81.0 那份比。
+
+### 顺带：Ubuntu 上 AppImage 要 libfuse2
+
+0.82.1 打了 `desktop-v0.82.1`（0.82.0 那节写的「还没推、还没打标签」已经过时），CI 在 Ubuntu 22.04 上全绿、
+Release 也发了。把两个包下载下来验的时候发现：electron-builder 26 打出来的 AppImage 用的还是老的 AppImageKit
+运行时，启动时 `dlopen("libfuse.so.2")`，而 **Ubuntu 从 22.04 起默认不装 libfuse2**（24.04 上包名是 `libfuse2t64`）——
+双击没反应，在终端里跑才看得到「AppImages require FUSE to run」。CI 测的是 `release/linux-unpacked`，碰不到这一层。
+所以 README 两份和发版说明都改成 Ubuntu 上优先用 deb。deb 没这个问题：依赖写了 t64 的备选，postinst 管了沙箱
+（用户命名空间用不了就给 chrome-sandbox 加 SUID）和 24.04 的 AppArmor profile；AppImage 的 AppRun 会先试
+`unshare -Ur`，不行就自己加 `--no-sandbox`，24.04 的沙箱限制也不用管。要真的双击就能开，得换成不依赖 libfuse2
+的静态运行时，没做。
+
+**在这台机器上别直接执行 AppImage 来验**（连 `--appimage-version` 都不行）：AppImageLauncher 通过 binfmt 接管了执行，
+会把文件挪进 `~/Applications/`、往菜单里加一项。看运行时用 `readelf` / `strings`（squashfs 的起点 = ELF 节头表的末尾，
+别按 `hsqs` 搜，运行时代码里就有这个串），看内容用 `--appimage-extract`（这个它放行），或者直接用 CI 的 `linux-unpacked`。

@@ -144,7 +144,10 @@ def plain(line):
 def damage(lines):
     """屏幕底部（输入框那一片）有没有残影：输入提示行只能有一个，框线不能只剩半截
     （有头没尾、有尾没头 —— 那是终端把旧框线折成两截之后没擦干净的那一半）"""
-    tail = [plain(x).strip() for x in lines[-12:]]
+    body = [plain(x).strip() for x in lines]
+    while body and not body[-1]:          # 屏幕没满的时候底下全是空行
+        body.pop()
+    tail = body[-12:]
     bad = []
     prompts = [t for t in tail if t.startswith("│ >")]
     if len(prompts) != 1:

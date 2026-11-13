@@ -6,8 +6,10 @@
 
 import contextlib
 import io
+import os
 import pathlib
 import unittest
+from unittest import mock
 
 from feiyu import ui
 
@@ -414,11 +416,72 @@ class TestGutter(unittest.TestCase):
         got = self.render("参考这里这里这里这里这里这里这里这里这里这里这里这里 " + url + "\n")
         self.assertIn(url, got)
 
-    def test_分隔线占满一行(self):
+    def test_分隔线不撑满一行(self):
+        """撑满一行的分隔线在窗口缩窄时会被终端折成两截，留在历史里就是碎线"""
         got = self.render("上\n---\n下\n")
         rows = got.split("\n")
-        self.assertEqual(rows[1], "  " + "─" * (ui.width() - 4))
+        self.assertEqual(rows[1], "  " + "─" * min(ui.width() - 4, 40))
         self.assertEqual(rows[2], "  下")
+
+
+class TestResize(unittest.TestCase):
+    """窗口缩放（0.82.1）：会重排的终端把超宽的行折下去之后，擦掉重画得走对地方"""
+
+    def setUp(self):
+        from types import SimpleNamespace as NS
+        from prompt_toolkit.layout.screen import Char
+        self.NS, self.Char = NS, Char
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("XTERM_VERSION", None)
+        os.environ["TERM"] = "xterm-kitty"
+
+    def renderer(self, rows, cursor, cols):
+        buf = {y: {x: self.Char(ch) for x, ch in enumerate(text)} for y, text in enumerate(rows)}
+        return self.NS(_last_screen=self.NS(data_buffer=buf, height=len(rows)),
+                       _last_size=self.NS(columns=cols), _cursor_pos=self.NS(x=cursor[0], y=cursor[1]))
+
+    def test_框顶底都满宽_缩窄后从最后一行往回走(self):
+        box = ["╭" + "─" * 82 + "╮", "│ > ", "╰" + "─" * 82 + "╯"]
+        # 顶边、底边各折成两行：先往下两行到框底（光标已经在那儿的话停在屏幕底边），再往上四行到框顶
+        self.assertEqual(ui._reflow_moves(self.renderer(box, (4, 1), 84), 60), (2, 4))
+        # 放宽、不变都不管，照 prompt_toolkit 自己那套擦
+        self.assertIsNone(ui._reflow_moves(self.renderer(box, (4, 1), 84), 84))
+        self.assertIsNone(ui._reflow_moves(self.renderer(box, (4, 1), 60), 100))
+
+    def test_光标所在那行也折了(self):
+        rows = ["╭" + "─" * 82 + "╮", "│ > " + "x" * 90, "╰" + "─" * 82 + "╯"]
+        # 输入行 94 宽折成两行，光标在第 90 列 —— 在折下去的那一截上，它下面只剩底边那两行
+        self.assertEqual(ui._reflow_moves(self.renderer(rows, (90, 1), 100), 60), (2, 5))
+
+    def test_不重排的终端不多走(self):
+        os.environ["XTERM_VERSION"] = "XTerm(390)"
+        box = ["╭" + "─" * 82 + "╮", "│ > ", "╰" + "─" * 82 + "╯"]
+        self.assertIsNone(ui._reflow_moves(self.renderer(box, (4, 1), 84), 60))
+
+    def test_状态行按它现在占的行数擦(self):
+        stream = ui.Stream()
+        self.assertEqual(stream._wipe_status(), "\r\033[K")
+        stream._status_drawn, stream._status_w = True, 130
+        with mock.patch.object(ui.shutil, "get_terminal_size", return_value=os.terminal_size((60, 24))):
+            self.assertEqual(stream._wipe_status(), "\r\033[2A\033[J")
+        with mock.patch.object(ui.shutil, "get_terminal_size", return_value=os.terminal_size((200, 24))):
+            self.assertEqual(stream._wipe_status(), "\r\033[J")
+
+    def test_交出去的话留一行回执(self):
+        with mock.patch.object(ui, "width", return_value=20):
+            got = ui.said("给 calc.py 加个 mul 函数，改完跑一遍测试\n第二行").split("\n")
+        self.assertTrue(got[0].startswith("› "))
+        self.assertTrue(all(row.startswith("  ") for row in got[1:]))
+        self.assertTrue(all(ui.visible(row) <= 20 for row in got))
+        self.assertEqual(got[-1], "  第二行")
+
+    def test_欢迎那块不画外框(self):
+        got = ui.welcome("/tmp/项目", "9.9.9", "CLAUDE.md")
+        self.assertFalse(any(ch in got for ch in "╭╮╰╯┌┐└┘"))
+        self.assertIn("v9.9.9", got)
+        self.assertTrue(all(ui.visible(row) <= ui.width() for row in got.split("\n")))
 
 
 class TestTheme(unittest.TestCase):

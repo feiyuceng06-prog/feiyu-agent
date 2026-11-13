@@ -248,7 +248,10 @@ def tool_label(name: str) -> str:
 
 
 def welcome(workspace, version: str, project: str) -> str:
-    """开工框里只放整个会话不会变的东西
+    """开工那一块只放整个会话不会变的东西
+
+    **不画外框**：它是打进 scrollback 的，框线按开工时的窗口宽度画，窗口一缩就被终端
+    折成两截、碎在历史里；不带框的话缩窄时只是长句子换个行
 
     模型 / 风格 / 模式 / 沙箱都在这儿放过，但这个框是打进 scrollback 的，
     切完之后重画不了，它会一直挂着开工时那份值骗人 —— 会变的一律交给状态栏，
@@ -269,7 +272,7 @@ def welcome(workspace, version: str, project: str) -> str:
     ]
     art = logo_rows() if LOGO and width() >= LOGO_MIN_WIDTH else []
     if not art:
-        return box(info, fit=True)
+        return "\n".join("  " + line if line else "" for line in info)
 
     # 文字在 logo 右边、上下居中 先按剩余宽度裁好，拼出来就不会再被 box 裁到
     room = width() - 4 - LOGO_COLS - LOGO_GAP
@@ -283,7 +286,7 @@ def welcome(workspace, version: str, project: str) -> str:
         art_row = art[i] if i < len(art) else blank
         text = info[j] if 0 <= j < len(info) else ""
         lines.append(art_row + " " * LOGO_GAP + text)
-    return box(lines, fit=True)
+    return "\n".join("  " + line.rstrip() for line in lines)
 
 
 def enter_screen() -> None:
@@ -481,18 +484,29 @@ def _reflows() -> bool:
     return not (os.environ.get("XTERM_VERSION") or term.startswith("rxvt") or term == "linux")
 
 
-def _reflow_rows(renderer, cols: int) -> int:
-    """输入框上一帧里光标上方那几行，按新的宽度被终端重排之后多占了几行"""
+def _reflow_moves(renderer, cols: int) -> tuple[int, int] | None:
+    """窗口缩窄之后，怎么走才能从光标回到输入框的第一行：(先往下走几行, 再往上走几行)
+
+    终端重排之后光标落在哪儿是靠不住的 —— 屏幕没满时它还在输入行上，满了的话
+    kitty 会把它放到框的最后一行（被折开的底边那儿）。所以不从光标直接往上数：
+    先往下走「输入行下面那几行重排之后占的行数」—— 光标本来就在最后一行的话，往下走
+    会停在屏幕底边，还是最后一行 —— 再从最后一行往上走「整个框重排之后的总行数 - 1」。
+    不缩窄、或者这个终端不重排，返回 None，照 prompt_toolkit 自己那套擦
+    """
     screen, size, pos = renderer._last_screen, renderer._last_size, renderer._cursor_pos
     if screen is None or size is None or cols >= size.columns or cols < 1 or not _reflows():
-        return 0
-    extra = 0
-    for y in range(pos.y):
+        return None
+
+    def rows(y):
         row = screen.data_buffer.get(y) or {}
         # 只数真有字的格子：带样式的空格不算，多算了会把输入框上面的正文也擦掉
         used = max((x + max(1, cell.width) for x, cell in row.items() if cell.char != " "), default=0)
-        extra += max(0, (used - 1) // cols)
-    return extra + pos.x // cols
+        return max(1, -(-used // cols))
+
+    height = max(screen.height, pos.y + 1)
+    total = sum(rows(y) for y in range(height))
+    below = sum(rows(y) for y in range(pos.y + 1, height)) + rows(pos.y) - 1 - pos.x // cols
+    return max(0, below), total - 1
 
 
 def _lines(text: str, color: str) -> str:
@@ -1584,10 +1598,24 @@ class InputBox:
             """
 
             def _on_resize(self):
-                extra = _reflow_rows(self.renderer, self.output.get_size().columns)
-                if extra:
-                    self.output.cursor_up(extra)
-                super()._on_resize()
+                moves = _reflow_moves(self.renderer, self.output.get_size().columns)
+                if moves is None:
+                    return super()._on_resize()
+                down, up = moves
+                out = self.output
+                # 跟 renderer.erase() 同一套收尾，只是回到框顶的走法换成上面算出来的
+                if down:
+                    out.cursor_down(down)
+                out.write_raw("\r")
+                if up:
+                    out.cursor_up(up)
+                out.erase_down()
+                out.reset_attributes()
+                out.enable_autowrap()
+                out.flush()
+                self.renderer.reset(leave_alternate_screen=False)
+                self._request_absolute_cursor_position()
+                self._redraw()
 
         self.app = _App(
             layout=layout,
