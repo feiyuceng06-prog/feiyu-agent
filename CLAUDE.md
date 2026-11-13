@@ -4963,3 +4963,34 @@ Release 也发了。把两个包下载下来验的时候发现：electron-builde
 **在这台机器上别直接执行 AppImage 来验**（连 `--appimage-version` 都不行）：AppImageLauncher 通过 binfmt 接管了执行，
 会把文件挪进 `~/Applications/`、往菜单里加一项。看运行时用 `readelf` / `strings`（squashfs 的起点 = ELF 节头表的末尾，
 别按 `hsqs` 搜，运行时代码里就有这个串），看内容用 `--appimage-extract`（这个它放行），或者直接用 CI 的 `linux-unpacked`。
+
+
+## 0.82.3：一行装好（`get.sh`）
+
+用户嫌「先问接口再下载」那两段命令太长：「别人需要用这么长的命令吗」。现在 README 开头是一行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/get.sh | bash
+```
+
+地址是用户挑的（另一个选项是在博客域名上放一份，命令更短，但要动博客再部署）。
+
+- **不挂载，解开。** `--appimage-extract` 不走 FUSE，所以 Ubuntu 上缺 libfuse2 也照样装得上 —— 0.82.2 写进说明的那个坑
+  在这条路上不存在。AppImageLauncher 放行 `--appimage-extract`（`--appimage-version` 它会接管，见 0.82.2 末尾）。
+  解在 `~/.local/share/feiyu-desktop/` 底下的临时目录里，不在 /tmp：/tmp 可能挂成 noexec，而且同一个文件系统才能直接 mv。
+- **包里自带的后端就是完整的终端版**（PyInstaller 打的就是 `feiyu.__main__`，prompt_toolkit 也在里面），所以 `feiyu`
+  直接指过去，不用 Python。代价：**终端版跟着发布版走**，main 上的改动要等下一次打 `desktop-v*` 标签才到用户手里。
+- **整个脚本都在函数里，最后一行才 `main "$@"`。** curl | bash 是边下边执行的，下到一半断了 bash 读不到最后一行，
+  什么都不做。`test_下到一半断了什么都不做` 盯着；往顶层加任何会动文件的语句都会让它红。
+- **trap 要当场展开临时目录**（`printf %q`）：EXIT 触发时 main 早返回了，`local` 的变量已经没了，加上 `set -u` 直接报错。
+- **留这一版和上一版**（按 mtime，新装的那份 `touch` 一下）：正开着的窗口可能还在用上一版的文件。同一版本重装先把旧的挪进
+  临时目录，trap 一起带走。
+- **`~/.local/bin/feiyu` 是别的方式装的（比如源码版）就不覆盖**，认的是 shim 里那行标记；`feiyu-desktop` 和菜单项照覆盖
+  不误 —— 跟 install.sh 是同一个位置，后装的赢。
+- **最新版的地址**：先问 `api.github.com`；它按出口 IP 限流（一小时 60 次，CGNAT 后面很容易撞上），被限了就看
+  `/releases/latest` 跳到了哪个标签，按 `Feiyu-<版本>.AppImage` 拼 —— **改了 electron-builder 的 artifactName 要记得这儿**。
+- **装之前先跑一次自带程序的 `--version`**：包是在 Ubuntu 22.04 上打的，glibc 比 2.35 老的系统在这一步就起不来，
+  这时候原来装的一个字都不动。桌面版缺系统库（ldd 报 not found）只提醒，终端版照样能用。
+
+`tests/test_get.py` 十条，假的 AppImage / curl / uname，不出网。九处承重行逐条改坏过，每处都有用例红。
+另外拿 0.82.1 的真包在隔离的 HOME 里装了一遍（387 MB），`feiyu --version` 和伪终端里的 TUI 都起得来。

@@ -10,7 +10,24 @@ About 4,800 lines of Python, no framework, three dependencies: `anthropic`, `pil
 
 ## Install
 
-### Ubuntu one-command CLI install
+### One line (desktop + terminal)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/get.sh | bash
+```
+
+Installs the latest version from [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases)
+into your user directory: no sudo, no Python, no libfuse2. Afterwards **Feiyu** is in your app menu
+(or run `feiyu-desktop`) and `feiyu` runs in the terminal; on first launch it asks you to connect a
+model. Run it again to upgrade. Without curl, start the line with `wget -qO-` instead. Only Linux
+x86_64 packages exist so far, and the system needs to be Ubuntu 22.04-era or newer (glibc 2.35+).
+
+Already have the AppImage (say, downloaded on another machine): `bash get.sh Feiyu-x.y.z.AppImage`.
+To remove it, delete `~/.local/share/feiyu-desktop`, `~/.local/bin/feiyu`, `~/.local/bin/feiyu-desktop`
+and `~/.local/share/applications/feiyu.desktop`; models, keys and conversations live in
+`~/.config/feiyu` and `~/.local/state/feiyu`.
+
+### CLI from the main branch on Ubuntu
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/bootstrap-ubuntu.sh | bash
@@ -386,7 +403,8 @@ feiyu-desktop -r                  # continue the last conversation here
 
 After install it also shows up in your app launcher as **Feiyu**.
 
-**Without building from source:** download the Linux deb (`sudo apt install ./file.deb`, the
+**Without building from source:** the one-line command at the top of Install is the easiest; or
+download the Linux deb (`sudo apt install ./file.deb`, the
 one to pick on Ubuntu) or the AppImage (`chmod +x`, then open it) from
 [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases). The AppImage needs
 libfuse2, which Ubuntu stopped installing by default in 22.04: run `sudo apt install libfuse2`
