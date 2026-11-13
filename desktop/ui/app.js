@@ -264,6 +264,11 @@ function syncHello() {
     + `<h1 class="hello__greet"><span class="hello__mark" aria-hidden="true"></span>`
     + `${greeting()}</h1>`
     + `<p class="hello__lead">问它点什么，或者直接把要做的事说出来。</p>`
+    + `<div class="hello__step" data-need="model"><p>先连一个模型：选个接口、贴上 key 就能用。</p>`
+    + `<button type="button" class="act act--go" data-do="model">连接模型</button></div>`
+    + `<div class="hello__step" data-need="desk"><p>现在的工作台是家目录。选一个项目文件夹，`
+    + `它读写文件、跑命令就只在那里面。</p>`
+    + `<button type="button" class="act" data-do="desk">选文件夹</button></div>`
     + `<div class="hello__frame"><p class="frame-title">[ 试试 ]</p>`
     + ["tl", "tr", "bl", "br"].map((at) =>
       `<span class="frame-corner" data-at="${at}" aria-hidden="true">+</span>`).join("")
@@ -273,6 +278,8 @@ function syncHello() {
     + `<p class="hello__keys"><span><kbd>@</kbd>提一个文件</span><span><kbd>/</kbd>斜杠命令</span>`
     + `<span><kbd>Ctrl N</kbd>新建会话</span></p>`
     + `</div>`;
+  el.querySelector('[data-do="model"]').onclick = openModelSetup;
+  el.querySelector('[data-do="desk"]').onclick = pickDesk;
   el.querySelectorAll(".hello__pick").forEach((b) => {
     b.onclick = () => {
       const box = $("input");
@@ -755,6 +762,9 @@ function setStatus(s) {
     $("s-cwd").title = s.workspace;
   }
   $("model").textContent = s.ready ? (s.name || s.model || "—") : "未设置模型";
+  // 空对话那块据此决定要不要先请人连一个模型（见 syncHello 的 hello__step）
+  if (s.ready) delete document.body.dataset.needModel;
+  else document.body.dataset.needModel = "1";
   const modes = { default: "默认", auto: "自动", plan: "计划", readonly: "只读" };
   $("s-mode").textContent = modes[s.mode] || s.mode || "—";
   $("s-mode").style.color = s.mode === "auto" ? "var(--alert)" : "";
@@ -1095,6 +1105,10 @@ function handle(ev) {
       drawModelsList();
       break;
 
+    case "model_list":
+      gotModelList(ev);
+      break;
+
     case "settings":
       conf = ev;
       shelf.got = true;
@@ -1142,10 +1156,19 @@ function handle(ev) {
       scheduleSaying();
       break;
 
-    case "note":
-      block(ev.level === "error" ? "出错" : ev.level === "warn" ? "注意" : "提示", "block--note")
-        .innerHTML = `<p class="note" data-level="${esc(ev.level)}">${esc(ev.text)}</p>`;
+    case "note": {
+      const body = block(ev.level === "error" ? "出错" : ev.level === "warn" ? "注意" : "提示", "block--note");
+      body.innerHTML = `<p class="note" data-level="${esc(ev.level)}">${esc(ev.text)}</p>`;
+      if (ev.act === "models") {
+        const go = document.createElement("button");
+        go.type = "button";
+        go.className = "act act--go";
+        go.textContent = "连接模型";
+        go.onclick = openModelSetup;
+        body.append(go);
+      }
       break;
+    }
 
     case "plan":
       block("方案", "block--say block--plan").innerHTML = `<div class="prose">${md(ev.text)}</div>`;
@@ -1540,7 +1563,7 @@ if (DESKTOP) {
    **正文是点开才要的**：五十份技能各上万字，一次全推过来几百 KB，
    而这一屏一次只看得见一份。所以 catalog 里没有 body，选中时另发一条 detail。 */
 
-const shelf = { tab: "general", find: "", pick: {},
+const shelf = { tab: "general", find: "", pick: {}, want: "",
                 data: { general: [], skills: [], tools: [], mcp: [], profiles: [] },
                 bodies: {}, got: false, draft: {} };
 
@@ -1606,6 +1629,10 @@ function drawShelf() {
     list.append(li);
     $("shelf-pane").textContent = "";
     return;
+  }
+  if (shelf.want && rows.some((r) => r.name === shelf.want)) {
+    shelf.pick[shelf.tab] = shelf.want;
+    shelf.want = "";
   }
   const picked = shelf.pick[shelf.tab];
   if (!rows.some((r) => r.name === picked)) shelf.pick[shelf.tab] = rows[0].name;
@@ -2101,19 +2128,57 @@ function drawModels(pane) {
   acts.append(add);
   pane.append(acts);
 
+  if (editing === null && models.trusted && !models.rows.length && !formDismissed) editing = "";
+  // 表单已经摊开了，上面那个「加一条」就是多余的
+  add.hidden = editing !== null && models.trusted;
   if (editing !== null && models.trusted) pane.append(modelForm());
 }
 
 const KEY_FIELDS = [
-  ["name", "名称", "在 /model 里显示成这个", "text"],
+  ["name", "名称", "在 /model 里显示成这个，不填就用模型 id", "text"],
   ["base_url", "接口地址", "多数接口填到 /v1 就行，留空走官方地址", "text"],
-  ["model", "模型 id", "厂商那边叫什么就填什么", "text"],
+  ["model", "模型 id", "贴上 key 之后点「列出模型」挑一个，也可以直接填", "text"],
   ["key", "API key", "留空 = 不动原来那条", "password"],
   ["max_tokens", "单轮输出上限", "不填按 8192；写长文件容易撞", "number"],
   ["limit", "上下文上限", "不填按 128k，撞过一次它会自己学", "number"],
 ];
 
+/* 加模型时摆在最上面的几家接口。**只有地址，没有模型 id 和价格**：地址多年不变，
+   模型 id 退役很勤（CLAUDE.md「模型全部来自用户配置」），所以清单是贴上 key 之后从
+   那家的 /models 现场拉的（serve.py 的 model_list）。 */
+const PRESETS = [
+  { name: "OpenRouter", kind: "openai", base: "https://openrouter.ai/api/v1" },
+  { name: "DeepSeek", kind: "openai", base: "https://api.deepseek.com" },
+  { name: "Kimi", kind: "openai", base: "https://api.moonshot.cn/v1" },
+  { name: "通义千问", kind: "openai", base: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  { name: "硅基流动", kind: "openai", base: "https://api.siliconflow.cn/v1" },
+  { name: "OpenAI", kind: "openai", base: "https://api.openai.com/v1" },
+  { name: "Anthropic", kind: "anthropic", base: "" },
+];
+
+/* 表单里那张模型清单：这一次问的编号（旧的回话晚到了就不认）、拉回来的那份 */
+let modelAsk = 0;
+let modelRows = [];
+/* 「取消」过一次就不再自己摊开表单 —— 清单是空的时候，不记这一下的话点了取消又立刻弹回来 */
+let formDismissed = false;
+
+/* 「连接模型」：打开设置、停在「模型」那一项、直接摊开「加一条」。
+   设置清单要等服务端的 settings 回来才有「模型」这一行，先记下想去哪（shelf.want） */
+function openModelSetup() {
+  shelf.tab = "general";
+  shelf.want = "模型";
+  shelf.pick.general = "模型";
+  editing = "";
+  [...$("shelf-tabs").children].forEach((b) =>
+    b.setAttribute("aria-selected", String(b.dataset.tab === "general")));
+  showShelf(true);
+  send({ op: "models" });
+  drawShelf();
+}
+
 function modelForm() {
+  ++modelAsk;
+  modelRows = [];
   const row = models.rows.find((r) => r.name === editing) || {};
   const box = document.createElement("div");
   box.className = "form";
@@ -2123,27 +2188,16 @@ function modelForm() {
   box.append(head);
 
   const got = {};
-  KEY_FIELDS.forEach(([key, label, hint, type]) => {
-    const line = document.createElement("label");
-    line.className = "form__row";
-    line.innerHTML = `<span class="form__name"></span>`;
-    line.querySelector(".form__name").textContent = label;
-    const input = document.createElement("input");
-    input.className = "line";
-    input.type = type === "password" ? "password" : "text";
-    input.value = key === "key" ? "" : (row[key] ?? "");
-    input.placeholder = key === "key" && row.has_key ? "已设置，留空就不动" : hint;
-    input.spellcheck = false;
-    if (key === "name" && editing) input.readOnly = true;
-    input.onkeydown = (e) => { if (e.key === "Escape") e.stopPropagation(); };
-    got[key] = input;
-    line.append(input);
-    box.append(line);
-  });
+  const hint = document.createElement("span");
+  hint.className = "form__hint";
+  const picks = document.createElement("ul");
+  picks.className = "picks";
+  picks.hidden = true;
+  const list = document.createElement("button");
+  list.type = "button";
+  list.className = "act";
+  list.textContent = "列出模型";
 
-  const kind = document.createElement("label");
-  kind.className = "form__row";
-  kind.innerHTML = `<span class="form__name">接口类型</span>`;
   const pickKind = document.createElement("select");
   pickKind.className = "line";
   [["openai", "OpenAI 兼容（多数中转站）"], ["anthropic", "Anthropic 官方"]]
@@ -2153,8 +2207,112 @@ function modelForm() {
       if ((row.kind || "openai") === v) o.selected = true;
       pickKind.append(o);
     });
+
+  // 新加的时候按「从哪接 → key → 挑模型 → 起个名」的顺序摆；改的时候名字在最前（它是只读的身份）
+  const order = editing ? ["name", "base_url", "key", "model", "max_tokens", "limit"]
+                        : ["base_url", "key", "model", "name", "max_tokens", "limit"];
+
+  if (!editing) {
+    const line = document.createElement("div");
+    line.className = "form__row";
+    line.innerHTML = `<span class="form__name">从哪接</span>`;
+    const chips = document.createElement("div");
+    chips.className = "presets";
+    const mark = () => chips.querySelectorAll(".preset").forEach((b) => {
+      const one = PRESETS.find((x) => x.name === b.dataset.name);
+      b.setAttribute("aria-pressed", String(!!one && one.base === got.base_url.value.trim()
+                                               && one.kind === pickKind.value));
+    });
+    PRESETS.forEach((one) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "act preset";
+      b.dataset.name = one.name;
+      b.textContent = one.name;
+      b.onclick = () => {
+        const changed = got.base_url.value.trim() !== one.base || pickKind.value !== one.kind;
+        got.base_url.value = one.base;
+        pickKind.value = one.kind;
+        if (changed) endpointChanged();
+        mark();
+        got.key.focus();
+      };
+      chips.append(b);
+    });
+    line.append(chips);
+    box.append(line);
+    box.markPresets = mark;
+  }
+
+  order.forEach((key) => {
+    const [, label, hintText, type] = KEY_FIELDS.find(([k]) => k === key);
+    const line = document.createElement("label");
+    line.className = "form__row";
+    line.innerHTML = `<span class="form__name"></span>`;
+    line.querySelector(".form__name").textContent = label;
+    const input = document.createElement("input");
+    input.className = "line";
+    input.type = type === "password" ? "password" : "text";
+    input.value = key === "key" ? "" : (row[key] ?? "");
+    input.placeholder = key !== "key" ? hintText
+      : row.has_key ? "已设置，留空就不动" : editing ? hintText : "贴上那一家给你的 key";
+    input.spellcheck = false;
+    if (key === "name" && editing) input.readOnly = true;
+    input.onkeydown = (e) => { if (e.key === "Escape") e.stopPropagation(); };
+    got[key] = input;
+    if (key === "model") {
+      // 输入框和「列出模型」一行，拉回来的清单挂在下面，跟着打的字筛
+      const field = document.createElement("div");
+      field.className = "field-with";
+      field.append(input, list);
+      line.append(field, picks, hint);
+      input.oninput = () => drawPicks(picks, got);
+    } else {
+      line.append(input);
+    }
+    box.append(line);
+  });
+
+  let request = null;
+  const context = () => JSON.stringify([got.base_url.value.trim(), pickKind.value, got.key.value.trim()]);
+  const invalidate = () => {
+    ++modelAsk;
+    request = null;
+    modelRows = [];
+    picks.replaceChildren();
+    picks.hidden = true;
+    hint.textContent = "";
+    hint.removeAttribute("data-level");
+  };
+  const endpointChanged = () => {
+    got.key.value = "";
+    got.key.placeholder = "接口已更改，请重新填写这一家的 key";
+    invalidate();
+    if (box.markPresets) box.markPresets();
+  };
+  const askModels = () => {
+    invalidate();
+    request = { ticket: modelAsk, context: context() };
+    const base = got.base_url.value.trim();
+    hint.textContent = "正在问 " + (base ? base.replace(/^https?:\/\//, "").split("/")[0]
+      : pickKind.value === "anthropic" ? "api.anthropic.com" : "api.openai.com") + " 要模型清单…";
+    send({ op: "model_list", ticket: modelAsk, kind: pickKind.value, base_url: base,
+           key: got.key.value.trim(), name: editing || "" });
+  };
+  list.onclick = askModels;
+  // 只在明确点击「列出模型」时发请求，避免失焦先于厂商按钮 click 导致 key 发往旧地址。
+  got.key.addEventListener("input", invalidate);
+  got.base_url.addEventListener("input", endpointChanged);
+  box.modelForm = { got, picks, hint, accepts: ticket =>
+    !!request && request.ticket === ticket && request.context === context() };
+
+  const kind = document.createElement("label");
+  kind.className = "form__row";
+  kind.innerHTML = `<span class="form__name">接口类型</span>`;
   kind.append(pickKind);
+  pickKind.onchange = endpointChanged;
   box.append(kind);
+  if (box.markPresets) box.markPresets();
 
   const sees = document.createElement("label");
   sees.className = "form__row";
@@ -2171,10 +2329,10 @@ function modelForm() {
   const price = document.createElement("label");
   price.className = "form__row";
   price.innerHTML = `<span class="form__name">价格</span>`;
-  const cells = ["缓存命中", "输入", "输出"].map((hint, n) => {
+  const cells = ["缓存命中", "输入", "输出"].map((hintText, n) => {
     const one = document.createElement("input");
     one.className = "line line--num";
-    one.placeholder = hint;
+    one.placeholder = hintText;
     one.value = (row.price || [])[n] ?? "";
     one.spellcheck = false;
     return one;
@@ -2192,10 +2350,13 @@ function modelForm() {
   save.className = "act act--go";
   save.textContent = "保存";
   save.onclick = () => {
+    invalidate();
     const out = { kind: pickKind.value, vision: seesBox.checked,
                   price: cells.map((c) => c.value.trim()) };
     KEY_FIELDS.forEach(([k]) => { out[k] = got[k].value.trim(); });
     if (editing) out.name = editing;
+    // 名字没填就用模型 id 的最后一截 —— 第一次用的人不知道这一格是干什么的
+    else if (!out.name) out.name = out.model.split("/").pop();
     editing = null;
     send({ op: "key", row: out });
   };
@@ -2203,7 +2364,7 @@ function modelForm() {
   cancel.type = "button";
   cancel.className = "act";
   cancel.textContent = "取消";
-  cancel.onclick = () => { editing = null; drawShelf(); };
+  cancel.onclick = () => { invalidate(); editing = null; formDismissed = true; drawShelf(); };
   acts.append(save, cancel);
   if (editing) {
     const gone = document.createElement("button");
@@ -2217,6 +2378,7 @@ function modelForm() {
         return;
       }
       const name = editing;
+      invalidate();
       editing = null;
       send({ op: "key_drop", name });
     };
@@ -2224,6 +2386,57 @@ function modelForm() {
   }
   box.append(acts);
   return box;
+}
+
+/* 拉回来的模型清单，按模型 id 那一格里打的字筛。几百个（OpenRouter）的时候只摆前一百个 */
+const PICKS_SHOWN = 100;
+
+function drawPicks(picks, got) {
+  const want = got.model.value.trim().toLowerCase();
+  const keep = modelRows.filter((r) => !want || r.id.toLowerCase().includes(want));
+  picks.textContent = "";
+  picks.hidden = !modelRows.length;
+  keep.slice(0, PICKS_SHOWN).forEach((r) => {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("aria-current", String(r.id === got.model.value.trim()));
+    b.innerHTML = `<span></span>` + (r.context ? `<small>${Math.round(r.context / 1000)}k</small>` : "");
+    b.firstChild.textContent = r.id;
+    b.onclick = () => {
+      got.model.value = r.id;
+      if (!got.name.readOnly && !got.name.value.trim()) got.name.value = r.id.split("/").pop();
+      if (r.context && !got.limit.value.trim()) got.limit.value = r.context;
+      drawPicks(picks, got);
+    };
+    li.append(b);
+    picks.append(li);
+  });
+  if (!keep.length || keep.length > PICKS_SHOWN) {
+    const li = document.createElement("li");
+    li.className = "picks__more";
+    li.textContent = !keep.length ? "没有对得上的 —— 照你填的存也行"
+      : `一共 ${keep.length} 个，打几个字筛一下`;
+    picks.append(li);
+  }
+}
+
+function gotModelList(ev) {
+  if (ev.ticket !== modelAsk) return;           // 早先那次问的，字段已经改过了
+  const form = $("shelf-pane").querySelector(".form");
+  if (!form || !form.modelForm || !form.modelForm.accepts(ev.ticket)) return;
+  const { got, picks, hint } = form.modelForm;
+  if (!ev.ok) {
+    modelRows = [];
+    picks.hidden = true;
+    hint.dataset.level = "error";
+    hint.textContent = String(ev.error || "拉不到模型清单");
+    return;
+  }
+  modelRows = rowsOf(ev.rows).filter((r) => typeof r.id === "string");
+  hint.removeAttribute("data-level");
+  hint.textContent = `拉到 ${ev.total || modelRows.length} 个模型，点一个填进去`;
+  drawPicks(picks, got);
 }
 
 function oneLine(value, hint, onSave) {
@@ -2487,8 +2700,14 @@ function setDesk(path) {
   $("desk-path").title = path || "";
   $("s-cwd").textContent = shortPath(path);
   $("s-cwd").title = path || "";
+  if (DESKTOP && HOME_DIR.test(path || "")) document.body.dataset.needDesk = "1";
+  else delete document.body.dataset.needDesk;
   rememberDesk(path);
 }
+
+/* 从应用菜单第一次打开时工作台是家目录：读写文件、跑命令都会落在整个家目录里。
+   Electron 那边下次起来会接着用上一次选的（electron/workspace.mjs），这儿只管第一次 */
+const HOME_DIR = /^(\/home\/[^/]+|\/Users\/[^/]+|\/root|[A-Za-z]:\\Users\\[^\\]+)[\\/]?$/;
 
 function drawDesks() {
   const list = $("desks");
@@ -3266,6 +3485,7 @@ function pickModel(row) {
 }
 
 modelPill.onclick = () => {
+  if (document.body.dataset.needModel && (!models || !models.rows.length)) return openModelSetup();
   openModels(!modelsOpen());
   if (!modelsOpen()) return;
   // 条数多的时候直接能打字筛；少的时候焦点给清单，上下键照样能走
@@ -3572,7 +3792,7 @@ liftWatch.observe(sheetEl);
 liftWatch.observe(rowEl);
 
 fluidHover($("side"), ".desk, .nav, .side__tab, .desks li, .talk:not(.talk--asking)");
-fluidHover($("shelf"), ".tab, .shelf__row, .opt");
+fluidHover($("shelf"), ".tab, .shelf__row, .opt, .picks button");
 fluidHover($("botshop"), ".tab, .shelf__row, .opt");
 fluidHover($("composer"), ".palette__item, .models__row:not([aria-disabled='true'])");
 fluidHover(pickBar, "button");

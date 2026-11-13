@@ -730,8 +730,17 @@ const FAKE_MODELS = { kind: "models", trusted: true, rows: [
   { name: "没配key的", model: "openai/gpt-x", vision: false, has_key: false, using: false },
 ] };
 const ops = async () => (await state()).sent.map((x) => { try { return JSON.parse(x); } catch { return {}; } });
+// 没配模型的时候点模型名是直接去「连接模型」（0.82.0）—— 夹具的 agent 就没配，先量这一条
+await ev(`document.body.dataset.needModel = "1"; models = null; document.getElementById("model").click(); true`);
+await sleep(300);
+check("没模型时点模型名 = 直接摊开「加一条」", await ev(`!document.getElementById("shelf").hidden
+  && editing === "" && (document.querySelector("#shelf .shelf__row[aria-current='true'] .shelf__name") || {}).textContent === "模型"`));
+await ev(`showShelf(false); editing = null; formDismissed = false; true`);
+await sleep(200);
+
 async function openMenu() {
-  await ev(`document.getElementById("model").click(); true`);
+  // 下面量的是有模型时那张清单
+  await ev(`delete document.body.dataset.needModel; document.getElementById("model").click(); true`);
   await sleep(700);
   await ev(`handle(${JSON.stringify(FAKE_MODELS)}); true`);
   await sleep(200);

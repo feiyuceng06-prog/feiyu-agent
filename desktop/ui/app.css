@@ -1184,6 +1184,8 @@ body[data-side="off"] .side { translate: -100% 0; visibility: hidden; }
 }
 
 .note[data-level="warn"] { color: var(--text); }
+
+.block--note .block__body:has(> .act) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 .note[data-level="error"] { color: var(--alert); }
 
 /* ── 方案：交给你过目的那份 ── */
@@ -1529,6 +1531,29 @@ body[data-side="off"] .side { translate: -100% 0; visibility: hidden; }
 }
 
 .hello__lead { margin: var(--space-2) 0 0; font-size: var(--fs-subtitle); line-height: var(--lh-subtitle); color: var(--muted); }
+
+/* 第一次用时先要办的两件事：连一个模型、离开家目录。一张卡一件事，办完就不见了。
+   没连模型的时候底下那几个例子先收起来 —— 点了也发不出去 */
+.hello__step {
+  display: none;
+  align-items: center;
+  gap: var(--space-3);
+  width: min(100%, 30rem);
+  margin-top: var(--space-4);
+  padding: 10px 10px 10px var(--space-4);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-card);
+  text-align: left;
+  animation: fade-in var(--moderate) ease-out both;
+}
+
+.hello__step p { flex: 1; margin: 0; font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text); }
+
+body[data-need-model] .hello__step[data-need="model"],
+body[data-need-desk] .hello__step[data-need="desk"] { display: flex; }
+
+body[data-need-model] .hello__frame { display: none; }
 
 /* mdxcn 的框：虚线（2px 实 5px 空）、四角各压一个「+」、标题骑在上边线正中。
    角标和标题用面板底色盖住一截虚线。偏差：mdxcn 的标题是强调色，这儿守「主色不做字」 */
@@ -2163,6 +2188,7 @@ body[data-side="off"] .scrim { display: none; }
 
 .shelf__pane {
   position: relative;
+  container-type: inline-size;
   min-width: 0;
   padding: var(--space-5) var(--space-6) var(--space-8);
   overflow-y: auto;
@@ -2268,6 +2294,70 @@ body[data-side="off"] .scrim { display: none; }
 .opt__edit:hover { color: var(--text); background: var(--hover); }
 
 .line { flex: 1; font: var(--fs-caption) var(--font-mono); }
+
+/* 加模型时的那几家接口：选中的那个铺一层很淡的主色 */
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.preset { font-weight: var(--w-regular); font-variation-settings: normal; }
+.preset[aria-pressed="true"] {
+  font-weight: var(--w-semibold);
+  font-variation-settings: "opsz" 18;
+  --face: color-mix(in oklab, var(--accent) 14%, var(--raised));
+}
+
+.field-with { display: flex; gap: var(--space-2); min-width: 0; }
+.field-with .line { flex: 1; }
+
+/* 现场拉回来的模型清单，挂在模型 id 那一格下面 */
+.picks {
+  position: relative;
+  grid-column: 2;
+  max-height: 14rem;
+  margin: 0;
+  padding: var(--space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-card);
+}
+
+.picks button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  height: var(--control-c);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  text-align: left;
+  font: var(--fs-caption) / var(--lh-caption) var(--font-mono);
+  color: var(--text);
+}
+
+.picks button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picks button[aria-current="true"] { background: var(--selected); }
+.picks small { flex: none; font: var(--fs-micro) / var(--lh-micro) var(--font-sans); color: var(--muted); }
+.picks .fh { border-radius: var(--r-sm); }
+.picks__more { padding: 6px var(--space-2); font-size: var(--fs-caption); line-height: var(--lh-caption); color: var(--muted); }
+.form__hint[data-level="error"] { color: var(--alert); }
+
+/* 详情栏窄了（右边开着文件面板、或者窗口本身就窄）：「标签 | 控件」两列改成上下摆，
+   不然 7rem 的标签列把控件挤成一条缝，模型 id 那格只剩几个像素宽 */
+@container (max-width: 34rem) {
+  .form__row, .form__row:has(.line--num) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .form__row > :not(.line--num) { grid-column: 1 / -1; }
+  .form__hint, .picks { grid-column: 1 / -1; }
+  .opt, .opt:has(.opt__edit) { grid-template-columns: 16px minmax(0, 1fr) auto; row-gap: 0; }
+  .opt__about { grid-column: 2; grid-row: 2; }
+  .opt__edit { grid-column: 3; grid-row: 1 / span 2; }
+  .facts { grid-template-columns: minmax(0, 1fr); }
+  .facts dt { padding-bottom: 0; border-bottom: 0; }
+}
 
 /* 模型配置的表：标签 13、说明 12 灰，控件在右，行间一条发丝线 */
 .form { margin-top: var(--space-5); border-top: 1px solid var(--line); }

@@ -43,3 +43,25 @@ jobs:
             desktop/release/*.deb
             desktop/release/*.AppImage
             desktop/test-results/workbench.png
+
+  # 打 desktop-v* 标签时把上面那两个包挂到 Releases 上，没有 GitHub 账号也下得到。
+  # 单独一个 job：只有它要写权限，装依赖、跑测试那些步骤拿到的 token 照旧是只读的
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: linux
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: feiyu-linux-x64
+          path: built
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" built/release/*.deb built/release/*.AppImage \
+            --repo "$GITHUB_REPOSITORY" --title "Feiyu ${TAG#desktop-v}（Linux）" \
+            --notes "AppImage：chmod +x 之后双击就能开；deb：sudo apt install ./文件名.deb。第一次打开时按「连接模型」，选个接口、贴上 key 就能用。"

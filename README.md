@@ -376,6 +376,8 @@ the terminal, because there is no diff to show.
 
 ## The desktop app
 
+Model discovery runs only when you click “List models”. Changing the endpoint or provider type clears the entered key. Saved keys are reused only for the same scheme, host, port, and provider type. Responses from an outdated form are discarded.
+
 ```
 feiyu-desktop                     # a window on the current directory
 feiyu-desktop -w ~/code/project   # pick the workspace
@@ -383,6 +385,15 @@ feiyu-desktop -r                  # continue the last conversation here
 ```
 
 After install it also shows up in your app launcher as **Feiyu**.
+
+**Without building from source:** download the Linux AppImage (`chmod +x`, then open it) or
+the deb (`sudo apt install ./file.deb`) from
+[Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases). The package carries its
+own Python backend — no Python, Node or terminal needed. On first launch it asks you to
+"connect a model": pick a provider (OpenRouter, DeepSeek, Kimi, Qwen, SiliconFlow, OpenAI,
+Anthropic, or type your own address), paste that provider's key, and choose from the model list
+it fetches live. Opened from the app menu, it reuses the last workspace you picked. There are
+no Windows or macOS packages yet.
 
 **Nothing from the window leaks into your terminal.** The agent's human-readable output — and the bridge's own `→ op` trace — goes to `~/.local/state/feiyu/desktop.log`, kept at 0600 like the session saves and rewritten from the top past 4 MB. To watch it in the terminal instead: `FEIYU_DESKTOP_STDERR=1 feiyu-desktop`.
 

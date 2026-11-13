@@ -1,5 +1,8 @@
 import json
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 
 from . import pricing
@@ -768,3 +771,84 @@ def _parse_args(raw: str) -> tuple[dict, str]:
             "工具没有执行 重来一次：写文件的话先写前半段，再用 write_file 的 append "
             "接着写后半段；或者改用 edit_file 只替换要改的那一段 "
         )
+
+
+# ---- 一个接口上有哪些模型 ----
+# 桌面端加模型时给人挑的：接口地址 + key → 那家 /models 现场回的清单。
+# **清单不进代码**（模型 id 退役很勤，见 CLAUDE.md「模型全部来自用户配置」），每次现问。
+
+LIST_TIMEOUT = 15
+LIST_MAX_BYTES = 4_000_000
+OPENAI_BASE = "https://api.openai.com/v1"
+ANTHROPIC_BASE = "https://api.anthropic.com"
+
+_LIST_HINTS = {
+    401: "key 不对，或者不是这一家的 key",
+    403: "这个 key 没有列模型的权限 —— 直接填模型 id 也行",
+    404: "这个地址下面没有 /models —— 接口地址多半多写或少写了一段；也可以直接填模型 id",
+    429: "被限流了，过一会儿再试",
+}
+
+
+class _Stay(urllib.request.HTTPRedirectHandler):
+    """**不跟重定向。** urllib 跟过去的时候会把 Authorization / x-api-key 原样带到
+    新的 host 上 —— 问一句模型清单把 key 送给了第三方，比列不出来糟得多 """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def models_url(kind: str, base_url: str) -> str:
+    if kind == "anthropic":
+        base = (base_url or ANTHROPIC_BASE).rstrip("/")
+        return base + ("/models" if base.endswith("/v1") else "/v1/models") + "?limit=1000"
+    return (base_url or OPENAI_BASE).rstrip("/") + "/models"
+
+
+def list_models(kind: str, base_url: str, key: str) -> list[dict]:
+    """[{"id": …, "context": …?}, …]。出错抛 ValueError，措辞是给人看的，**不带 key** """
+    url = models_url(kind, base_url)
+    parts = urllib.parse.urlparse(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("接口地址要以 http:// 或 https:// 开头")
+    # HTTP 头只能是 latin-1；复制 key 时多带了一个全角空格或中文标点，
+    # 不先拦的话报出来的是一句 codec 错误，没人看得懂
+    if not key.isascii() or any(c.isspace() for c in key):
+        raise ValueError("key 里混进了空格、全角或中文字符 —— 多半是复制时多带了东西")
+    headers = {"Accept": "application/json", "User-Agent": "feiyu"}
+    if kind == "anthropic":
+        headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+    elif key:
+        headers["Authorization"] = "Bearer " + key
+    opener = urllib.request.build_opener(_Stay)
+    try:
+        with opener.open(urllib.request.Request(url, headers=headers), timeout=LIST_TIMEOUT) as reply:
+            raw = reply.read(LIST_MAX_BYTES)
+    except urllib.error.HTTPError as exc:
+        code, where = exc.code, exc.headers.get("Location") if exc.headers else None
+        exc.close()          # HTTPError 也是个响应体，不关就漏着
+        if 300 <= code < 400:
+            raise ValueError("接口要跳到 %s —— 把接口地址改成跳过去的那个再试"
+                             "（为了不把 key 带过去，这里不自动跟）" % (where or "别的地址")) from None
+        raise ValueError(_LIST_HINTS.get(code) or "接口回了 HTTP %d" % code) from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise ValueError("连不上 %s：%s" % (parts.netloc, getattr(exc, "reason", exc))) from None
+    try:
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        raise ValueError("回来的不是 JSON —— 接口地址多半填错了一段") from None
+    rows = data.get("data") if isinstance(data, dict) else data
+    out, seen = [], set()
+    for item in rows if isinstance(rows, list) else []:
+        mid = item.get("id") if isinstance(item, dict) else item
+        if not isinstance(mid, str) or not mid.strip() or mid in seen:
+            continue
+        seen.add(mid)
+        one = {"id": mid}
+        ctx = item.get("context_length") if isinstance(item, dict) else None
+        if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+            one["context"] = ctx
+        out.append(one)
+    if not out:
+        raise ValueError("接口没回模型清单 —— 直接填模型 id 也行")
+    return out

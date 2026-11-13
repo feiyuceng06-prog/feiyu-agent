@@ -362,6 +362,8 @@ lock 文件报到；feiyu 按**工作区完全相同**找到它，在上面说�
 
 ## 桌面端
 
+模型清单只在点击「列出模型」后请求。切换接口地址或类型会清空输入的 key；复用已保存的 key 要求协议、主机、端口和接口类型一致。修改表单后，旧的清单响应会被丢弃。
+
 ```
 feiyu-desktop                     # 在当前目录开一个窗口
 feiyu-desktop -w ~/code/project   # 指定工作目录
@@ -369,6 +371,8 @@ feiyu-desktop -r                  # 接着上次在这个目录里的对话
 ```
 
 装完在应用列表里也能搜到 **Feiyu**。
+
+**不想从源码装**：到 [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases) 下载 Linux 的 AppImage（`chmod +x` 之后双击）或 deb（`sudo apt install ./文件名.deb`）。包里带着 Python 后端，不用装 Python、Node，也不用开终端。第一次打开会请你「连接模型」：选个接口（OpenRouter、DeepSeek、Kimi、通义千问、硅基流动、OpenAI、Anthropic，或者自己填地址），贴上那一家的 key，从现场拉回来的模型清单里点一个就能用。从应用菜单打开时，会接着用上一次选的工作台。Windows 和 macOS 的包还没有。
 
 **窗口里的东西不会跑到终端上。** agent 那半边人看的输出（还有桥接自己那几行 `→ op`）写进 `~/.local/state/feiyu/desktop.log`，跟对话存盘一样按 0600 存，攒到 4 MB 从头写。要它回到终端上看：`FEIYU_DESKTOP_STDERR=1 feiyu-desktop`。
 

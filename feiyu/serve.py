@@ -33,12 +33,14 @@ import json
 import queue
 import sys
 import threading
+import urllib.parse
 import _thread
 
 from . import agent as agent_mod
 from . import bots as bots_mod
 from . import enabled, events, keys, memory, permissions, profiles as profiles_mod
 from . import mentions as mentions_mod
+from . import providers
 from . import providers as providers_mod
 from . import session as session_mod
 from . import skills as skills_mod, tools as tools_mod, ui
@@ -48,6 +50,25 @@ from . import __version__
 REPLY_TIMEOUT = 600.0
 # 一条消息最多这么长 正常的一句话几百字，几十万字的只可能是坏掉的客户端
 MAX_TEXT = 200_000
+
+
+def _origin(url: str):
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username is not None:
+            return None
+        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
+        return parts.scheme, parts.hostname.lower(), port
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _can_reuse_key(old: dict, kind: str, base: str) -> bool:
+    old_kind = old.get("kind") or "openai"
+    default = providers.ANTHROPIC_BASE if kind == "anthropic" else providers.OPENAI_BASE
+    origin = _origin(old.get("base_url") or default)
+    return old_kind == kind and origin is not None and origin == _origin(base or default)
+
 
 # 本来就不带正文的那几个 op 主循环有一道"空的就跳过"的闸（拦空 prompt 用的），
 # 不列在这儿的话它们会被静默丢掉，前端那边看着像没接上
@@ -496,9 +517,13 @@ class Server:
             self.proto.send("note", level="error", text="名称和模型 id 都得填 ")
             return
         old = keys.load().get(name) or {}
+        kind = "anthropic" if row.get("kind", old.get("kind")) == "anthropic" else "openai"
         # **key 留空 = 不动原来那条**：服务端从来不把密钥发给前端，
         # 所以表单根本没法把它原样送回来 —— 改个价格不该要求重打一遍密钥
         if not key:
+            if old.get("key") and not _can_reuse_key(old, kind, row.get("base_url", old.get("base_url"))):
+                self.proto.send("note", level="error", text="接口地址或类型改了，API key 要重新填一次")
+                return
             key = old.get("key") or ""
         if not key:
             self.proto.send("note", level="error", text="这是条新配置，API key 不能空 ")
@@ -521,7 +546,7 @@ class Server:
             keys.add(name,
                      base_url=merged("base_url"),
                      model=model, key=key,
-                     kind="anthropic" if row.get("kind") == "anthropic" else "openai",
+                     kind=kind,
                      price=(self.price_dict(row.get("price"), old.get("price"))
                             if "price" in row else old.get("price")),
                      vision=bool(row.get("vision", old.get("vision"))),
@@ -539,6 +564,41 @@ class Server:
         self.push_settings()
         self.push_help()
         self.push_status()
+
+    MODEL_LIST_MAX = 2000
+
+    def model_list(self, msg: dict) -> None:
+        """加模型时给人挑的那张清单 **key 只进不出**照旧：结果里只有模型 id
+
+        key 留空就用存着的那条（按名字找）—— 但只允许同协议、主机、端口及接口类型：
+        表单里接口地址改成了别处，存着的 key 就不带过去，跟查余额那条闸是一个道理
+        """
+        ticket = msg.get("ticket") if isinstance(msg.get("ticket"), int) else 0
+        if not self.trusted:
+            self.proto.send("model_list", ticket=ticket, ok=False,
+                            error="这是开发用的浏览器入口，不替你拿 key 出去问；桌面端窗口里可以")
+            return
+        kind = "anthropic" if msg.get("kind") == "anthropic" else "openai"
+        base = str(msg.get("base_url") or "").strip()
+        key = str(msg.get("key") or "").strip()
+        if not key and msg.get("name"):
+            old = keys.load().get(str(msg.get("name"))) or {}
+            if _can_reuse_key(old, kind, base):
+                key = old.get("key") or ""
+            elif old.get("key"):
+                self.proto.send("model_list", ticket=ticket, ok=False,
+                                error="接口地址改了，key 要重新填一次（存着的那条只发给原来的地址）")
+                return
+        if not key and kind == "anthropic":
+            self.proto.send("model_list", ticket=ticket, ok=False, error="先填 API key")
+            return
+        try:
+            rows = providers.list_models(kind, base, key)
+        except ValueError as exc:
+            self.proto.send("model_list", ticket=ticket, ok=False, error=str(exc))
+            return
+        self.proto.send("model_list", ticket=ticket, ok=True,
+                        rows=rows[:self.MODEL_LIST_MAX], total=len(rows))
 
     def key_drop(self, name: str) -> None:
         if not self.trusted:
@@ -745,8 +805,13 @@ class Server:
 
     def handle_prompt(self, text: str) -> None:
         if not self.agent.ready:
-            self.proto.send("note", level="error",
-                            text="还没有模型，先在终端里 feiyu 起来用 /key add 添加一条")
+            if self.trusted:
+                # 桌面端不用终端也加得上 —— 指着终端说话会把第一次用的人带偏
+                self.proto.send("note", level="error", act="models",
+                                text="还没有模型。到「设置 → 模型」里加一条：选个接口、贴上 key 就能用")
+            else:
+                self.proto.send("note", level="error",
+                                text="还没有模型，先在终端里 feiyu 起来用 /key add 添加一条")
             return
         self.busy = True
         self.proto.send("turn_start", text=text)
@@ -851,6 +916,9 @@ class Server:
             self.agent.refresh_credits(fresh=True, then=self.push_status)
         elif op == "models":
             self.push_models()
+        elif op == "model_list":
+            # 要出网、可能十几秒 —— 不能堵着读线程（esc、停止都从这儿进来），另起一个
+            threading.Thread(target=self.model_list, args=(msg,), daemon=True).start()
         elif op == "bots":
             self.push_bots()
         elif op == "bot":

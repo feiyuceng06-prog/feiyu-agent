@@ -356,6 +356,9 @@ for (let i = 0; i < 60; i++) {
 }
 await sleep(800);
 await feed([{ kind: "cleared" }]);       // 清流 + 把「开始」摆回去，走真实那条路
+// 夹具的 agent 没配模型，空对话会先请人「连接模型」、把例子收起来（那一屏在文末 27 号拍）；
+// 这张拍的是连好模型之后的样子
+await feed([{ kind: "status", ready: true, busy: false, mode: "default", name: "deepseek-v4-pro" }]);
 await sleep(300);
 console.log("拍了", await cdp.shot("0_hello", { height: 900, beyond: false }));
 const 例子数 = await cdp.eval(`document.querySelectorAll(".hello__pick").length`);
@@ -1263,6 +1266,8 @@ for (const [t, width, name] of [["light", 1280, "20_model_menu"], ["anthropic", 
   await sleep(1200);
   await cdp.eval(`setTheme("${t}"); true`);
   await feed(TALK.slice(0, 4));
+  // 夹具的 agent 没配模型，没模型时点模型名是直接去「连接模型」（0.82.0）—— 这一节量的是有模型时那张清单
+  await feed([{ kind: "status", ready: true, busy: false, mode: "default", name: "opus-5.5" }]);
   await cdp.eval(`document.getElementById("model").click(); true`);
   await sleep(700);                     // 真 agent 回的那份 models 先落地，再灌编好的
   await feed([MENU_MODELS]);
@@ -1507,6 +1512,86 @@ if (v80.length) {
 } else {
   console.log("0.80.0：空对话居中、敲字往下长、滑回底、长对话滚得到头、没看见的有线有数、"
     + "人不在才叫、浮层淡出、侧栏滑出、键帽到点浮出、关了动效一个都不演");
+}
+
+/* ── 第一次打开（0.82.0）────────────────────────────────────
+   没配模型时：空对话先请人连一个模型（例子先收起来 —— 点了也发不出去）；「连接模型」
+   直接落到设置的「模型」那一项、摊开「加一条」；选个接口填上地址，清单拉回来点一个，
+   模型 id、名字、上下文上限都填好；晚到的旧回话不认。没模型时发消息那条报错带同一个按钮。
+   devserver 不是 trusted（改不了 key），所以表单那一截灌一份 trusted 的 models。 */
+const firstBad = [];
+await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await cdp.call("Page.navigate", { url });
+await sleep(300);
+// 换过页，报错收集要重新挂 —— 不然文末那条「页面无 JS 报错」量的是一张空表
+await cdp.eval(`window.__errs = []; addEventListener("error", (e) => __errs.push(String(e.message))); true`);
+for (let i = 0; i < 60; i++) {
+  if (await cdp.eval(`(document.getElementById("dot") || { dataset: {} }).dataset.state === "ready"
+    && document.body.dataset.needModel === "1"`)) break;
+  await sleep(250);
+}
+// 重连之后 agent 会把这一轮里点出来的那些提示推回来、把空对话那块冲掉 —— 等它回完话再清一次
+for (let i = 0; i < 60; i++) {
+  if (await cdp.eval(`commands.length > 0`)) break;
+  await sleep(250);
+}
+await sleep(800);
+await feed([{ kind: "cleared" }]);
+await sleep(300);
+const first = JSON.parse(await cdp.eval(`JSON.stringify({
+  card: getComputedStyle(document.querySelector('.hello__step[data-need="model"]')).display,
+  frame: getComputedStyle(document.querySelector(".hello__frame")).display,
+})`));
+if (first.card !== "flex" || first.frame !== "none") firstBad.push(`没模型时空对话该先请人连模型：${JSON.stringify(first)}`);
+console.log("拍了", await cdp.shot("27_first_run", { width: 1280, height: 900, beyond: false }));
+await cdp.eval(`document.querySelector('[data-do="model"]').click(); true`);
+await sleep(400);
+await feed([{ kind: "models", rows: [], trusted: true }]);
+await sleep(300);
+const form = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const pane = document.getElementById("shelf-pane");
+  const f = pane.querySelector(".form");
+  const or = pane.querySelector('.preset[data-name="OpenRouter"]');
+  if (or) or.click();
+  return { open: !document.getElementById("shelf").hidden, title: (pane.querySelector("h2") || {}).textContent,
+           form: !!f, presets: pane.querySelectorAll(".preset").length,
+           base: f ? f.modelForm.got.base_url.value : "", ticket: modelAsk };
+})())`));
+if (!form.open || form.title !== "模型" || !form.form) firstBad.push(`「连接模型」没落到设置的模型那一项：${JSON.stringify(form)}`);
+if (form.base !== "https://openrouter.ai/api/v1") firstBad.push(`选了 OpenRouter，地址没填上：${form.base}`);
+await feed([{ kind: "model_list", ticket: form.ticket - 1, ok: true, total: 1, rows: [{ id: "旧的/不该出现" }] }]);
+if (await cdp.eval(`document.querySelectorAll("#shelf-pane .picks button").length`)) firstBad.push("早先那次的回话也画出来了");
+await feed([{ kind: "model_list", ticket: form.ticket, ok: true, total: 3, rows: [
+  { id: "anthropic/claude-sonnet-5", context: 200000 }, { id: "deepseek/deepseek-v4-pro", context: 128000 },
+  { id: "qwen/qwen3.8-flash" }] }]);
+await sleep(200);
+console.log("拍了", await cdp.shot("28_model_setup", { width: 1280, height: 900, beyond: false }));
+const picked = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const pane = document.getElementById("shelf-pane");
+  const rows = [...pane.querySelectorAll(".picks button > span")].map((s) => s.textContent);
+  const two = pane.querySelectorAll(".picks button")[1];
+  if (two) two.click();
+  const g = pane.querySelector(".form").modelForm.got;
+  return { rows, model: g.model.value, name: g.name.value, limit: g.limit.value };
+})())`));
+if (picked.rows.length !== 3) firstBad.push(`清单没画全：${JSON.stringify(picked.rows)}`);
+if (picked.model !== "deepseek/deepseek-v4-pro" || picked.name !== "deepseek-v4-pro" || picked.limit !== "128000") {
+  firstBad.push(`点了清单里那一条没填好：${JSON.stringify(picked)}`);
+}
+await cdp.eval(`showShelf(false); true`);
+await feed([{ kind: "note", level: "error", act: "models", text: "还没有模型。到「设置 → 模型」里加一条" }]);
+const noteGo = await cdp.eval(`(() => { const b = [...document.querySelectorAll(".block--note .act")].pop();
+  if (!b) return "没有按钮"; b.click(); return document.getElementById("shelf").hidden ? "点了没开" : "开了"; })()`);
+if (noteGo !== "开了") firstBad.push(`没模型时那条报错上的按钮：${noteGo}`);
+await cdp.eval(`showShelf(false); true`);
+const homes = await cdp.eval(`JSON.stringify(["/home/you", "/home/you/", "/Users/you", "C:\\\\Users\\\\you",
+  "/home/you/proj", "/srv", "/home/you/~"].map((p) => HOME_DIR.test(p)))`);
+if (homes !== "[true,true,true,true,false,false,false]") firstBad.push(`认家目录认错了：${homes}`);
+if (firstBad.length) {
+  console.error("第一次打开：", firstBad.join("；"));
+  process.exitCode = 1;
+} else {
+  console.log("第一次打开：先请人连模型、点了落到加一条、选接口填地址、清单点一个就填好、旧回话不认、报错带按钮");
 }
 
 const pageErrors = await cdp.eval("JSON.stringify(window.__errs || [])");

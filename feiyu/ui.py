@@ -171,9 +171,15 @@ def _pad(text: str, inner: int) -> str:
     return text + " " * max(0, inner - visible(text))
 
 
-def box(lines: list[str]) -> str:
-    """圆角框 传进来的行可以带颜色码 """
+def box(lines: list[str], *, fit: bool = False) -> str:
+    """圆角框 传进来的行可以带颜色码
+
+    `fit`：按内容宽度画，不撑满一行。打进 scrollback 的框（欢迎框）用它 ——
+    撑满的框在窗口缩窄时会被终端折成两截，框线碎在历史里
+    """
     inner = width() - 4
+    if fit:
+        inner = min(inner, max((visible(line) for line in lines), default=0))
     top = paint("grey", CORNERS[0] + "─" * (inner + 2) + CORNERS[1])
     bottom = paint("grey", CORNERS[2] + "─" * (inner + 2) + CORNERS[3])
     bar = paint("grey", "│")
@@ -263,7 +269,7 @@ def welcome(workspace, version: str, project: str) -> str:
     ]
     art = logo_rows() if LOGO and width() >= LOGO_MIN_WIDTH else []
     if not art:
-        return box(info)
+        return box(info, fit=True)
 
     # 文字在 logo 右边、上下居中 先按剩余宽度裁好，拼出来就不会再被 box 裁到
     room = width() - 4 - LOGO_COLS - LOGO_GAP
@@ -277,7 +283,7 @@ def welcome(workspace, version: str, project: str) -> str:
         art_row = art[i] if i < len(art) else blank
         text = info[j] if 0 <= j < len(info) else ""
         lines.append(art_row + " " * LOGO_GAP + text)
-    return box(lines)
+    return box(lines, fit=True)
 
 
 def enter_screen() -> None:
@@ -452,6 +458,41 @@ def wrap(line: str, limit: int) -> list[str]:
     if row:
         out.append(row)
     return out
+
+
+def said(text: str) -> str:
+    """交出去的那句话在 scrollback 里的样子：主色一个 › 打头，原话加粗，折行的续行缩进两格
+
+    输入框本身在交出去时擦掉（`erase_when_done`），不留在历史里 —— 框是按当时的窗口
+    宽度画的，窗口一缩，终端把框线折成两截，历史里就全是碎框
+    """
+    out = []
+    for n, line in enumerate(text.strip("\n").split("\n")):
+        for k, piece in enumerate(wrap(line, width() - 2) or [""]):
+            lead = paint("brown", "›") + " " if n == 0 and k == 0 else "  "
+            out.append(lead + bold(piece))
+    return "\n".join(out)
+
+
+def _reflows() -> bool:
+    """这个终端缩窄时会不会把超宽的行折到下一行（kitty、gnome-terminal、Windows Terminal、
+    tmux 都会）。xterm、rxvt 和 Linux 控制台是截断，不折"""
+    term = os.environ.get("TERM", "")
+    return not (os.environ.get("XTERM_VERSION") or term.startswith("rxvt") or term == "linux")
+
+
+def _reflow_rows(renderer, cols: int) -> int:
+    """输入框上一帧里光标上方那几行，按新的宽度被终端重排之后多占了几行"""
+    screen, size, pos = renderer._last_screen, renderer._last_size, renderer._cursor_pos
+    if screen is None or size is None or cols >= size.columns or cols < 1 or not _reflows():
+        return 0
+    extra = 0
+    for y in range(pos.y):
+        row = screen.data_buffer.get(y) or {}
+        # 只数真有字的格子：带样式的空格不算，多算了会把输入框上面的正文也擦掉
+        used = max((x + max(1, cell.width) for x, cell in row.items() if cell.char != " "), default=0)
+        extra += max(0, (used - 1) // cols)
+    return extra + pos.x // cols
 
 
 def _lines(text: str, color: str) -> str:
@@ -799,6 +840,7 @@ class Stream:
         self._line_start = 0    # 这一行正文从哪一列开始，用来判断「行上已经有东西」
         self._status = None     # (工具名, 还没收完的参数)，有它就替掉「思考中…」
         self._status_drawn = False
+        self._status_w = 0      # 上次画的状态行有多宽，缩放之后擦它要用
         self._reported = -1     # 参数进度报到第几档了，见 progress()
         self._thought = 0       # 已经想了多少字，见 thinking()
         self._thought_step = -1
@@ -930,7 +972,7 @@ class Stream:
         if not self._fresh_line:
             sys.stdout.write("\n")
             self._fresh_line = True
-        sys.stdout.write(self._gutter() + paint("grey", "─" * (self._limit - 4)) + "\n")
+        sys.stdout.write(self._gutter() + paint("grey", "─" * min(self._limit - 4, 40)) + "\n")
         self._fresh_line, self._col, self._newline, self._hang = True, 0, True, 0
 
     def _chars(self, chunk: str) -> None:
@@ -970,6 +1012,10 @@ class Stream:
         self._newline = False
         while text:
             if self._fresh_line:
+                # 每起一行重新量一次宽度：一轮跑几分钟，中途缩放窗口是常事，
+                # 按开头那个宽度折的话后面每一行都会被终端再折一次
+                self._limit = width()
+                self._md.limit = self._limit
                 indent = self._hang if wrapped else 0
                 sys.stdout.write(self._gutter() + " " * indent)
                 self._col = self._gutter_width + indent
@@ -1062,9 +1108,11 @@ class Stream:
             text = "在想… 已经想了 %d 字" % self._thought
         else:
             text = "思考中…"
-        body = clip(text, max(8, self._limit - visible(tail) - 4))
-        sys.stdout.write("\r\033[K" + paint("brown", FRAMES[frame]) + paint("grey", " " + body + tail))
+        body = clip(text, max(8, width() - visible(tail) - 4))
+        line = paint("brown", FRAMES[frame]) + paint("grey", " " + body + tail)
+        sys.stdout.write(self._wipe_status() + line)
         sys.stdout.flush()
+        self._status_w = visible(line)
         self._status_drawn = True
         self._status_at = time.monotonic()
         return (frame + 1) % len(FRAMES)
@@ -1072,9 +1120,18 @@ class Stream:
     def _hide_status(self) -> None:
         if not self._status_drawn:
             return      # 没画过就别擦：光标这会儿多半停在正文中间
-        sys.stdout.write("\r\033[K")
+        sys.stdout.write(self._wipe_status())
         sys.stdout.flush()
         self._status_drawn = False
+
+    def _wipe_status(self) -> str:
+        """擦掉上一次画的状态行 窗口在这期间缩窄过的话，它已经被终端折成了几行，
+        只擦光标这一行会留下上半截"""
+        if not self._status_drawn:
+            return "\r\033[K"
+        cols = shutil.get_terminal_size((80, 24)).columns
+        up = (self._status_w - 1) // cols if self._status_w > cols and _reflows() else 0
+        return "\r" + ("\033[%dA" % up if up else "") + "\033[J"
 
 
 # ---- turn 期间按 esc 中断 ----
@@ -1518,17 +1575,31 @@ class InputBox:
             if not event.current_buffer.text:
                 event.app.exit(exception=EOFError, style="class:exiting")
 
-        self.app = Application(
+        class _App(Application):
+            """窗口缩窄时，先把终端折出来的那几行算进去，再交给 prompt_toolkit 擦掉重画
+
+            终端会把超宽的行（输入框的顶边、底边都是满宽的）折成两行，而 prompt_toolkit
+            的「擦掉重画」是按没折过的行数从光标往回走的 —— 走不到框顶，旧框头就留在新框
+            上面，缩一次叠一层（`dev/ui_resize.py` 在 kitty 的屏幕引擎里复现过）
+            """
+
+            def _on_resize(self):
+                extra = _reflow_rows(self.renderer, self.output.get_size().columns)
+                if extra:
+                    self.output.cursor_up(extra)
+                super()._on_resize()
+
+        self.app = _App(
             layout=layout,
             key_bindings=keys,
             full_screen=False,
-            erase_when_done=False,
+            erase_when_done=True,
         )
 
     def _accept(self) -> bool:
         self.app.exit(result=self.buffer.text)
-        # 返回 True 让 buffer 不被清空，否则最后一次渲染时文字已经没了，
-        # 留在 scrollback 里的会是个空框
+        # 返回 True 让 buffer 不被清空 —— 框随后整个擦掉（erase_when_done），
+        # 清空了的话擦之前那一帧会闪一下空框
         return True
 
     def top_border(self) -> str:
@@ -1546,4 +1617,7 @@ class InputBox:
 
     def ask(self) -> str:
         self.buffer.reset()
-        return self.app.run()
+        text = self.app.run()
+        if text.strip():
+            print(said(text))
+        return text

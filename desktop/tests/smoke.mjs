@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkModelForm } from './model-form.mjs';
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'feiyu-desktop-test-'));
 const workspace = path.join(temporary, 'workspace');
@@ -57,6 +58,7 @@ try {
   await expect(page.locator('.file-tabs')).not.toContainText('README.md');
   await page.locator('#nav-shelf').click();
   await expect(page.locator('#shelf')).toBeVisible();
+  await checkModelForm(page);
   expect(errors).toEqual([]);
   console.log('PASS: real backend, file preview, isolated renderer, path boundary, PTY, workspace switching, settings');
 } catch (error) {

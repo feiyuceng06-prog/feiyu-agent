@@ -7,18 +7,21 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { AgentProcess, resolveBackend } from './agent.mjs';
 import { underRoot, readBounded, listFiles, previewFile, uploadFile, MAX_IMAGE } from './files.mjs';
+import { pickWorkspace, readLast, writeLast } from './workspace.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
 const rendererURL = pathToFileURL(path.resolve(here, '../dist/index.html')).href;
 const require = createRequire(import.meta.url);
-const options = { workspace: process.cwd(), resume: false, model: null };
+const options = { workspace: null, resume: false, model: null };
 const argv = process.argv.slice(app.isPackaged ? 1 : 2);
 for (let i = 0; i < argv.length; i++) {
   if (['-w', '--workspace'].includes(argv[i])) options.workspace = argv[++i] || options.workspace;
   else if (['-m', '--model'].includes(argv[i])) options.model = argv[++i];
   else if (['-r', '--resume'].includes(argv[i])) options.resume = true;
 }
+const lastFile = path.join(app.getPath('userData'), 'workspace.json');
+options.workspace = pickWorkspace({ given: options.workspace, cwd: process.cwd(), home: os.homedir(), last: readLast(lastFile) });
 let win, agent, terminal, workspace, transition;
 let state = { state: 'starting' };
 let quitting = false;
@@ -56,6 +59,7 @@ async function startAgent(next, resume = false) {
     });
     await agent.start(target, { model: options.model, resume });
     workspace = target;
+    writeLast(lastFile, target);
     return workspace;
   })();
   try { return await transition; }
