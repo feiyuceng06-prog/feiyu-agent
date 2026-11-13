@@ -92,12 +92,17 @@ class Cdp {
       width, height, deviceScaleFactor: 2, mobile: false,
     });
     await sleep(700);                       // 等浮现那 500ms 走完
+    // captureBeyondViewport 量页面大小时会先把视口缩成 1×1：窄屏那条媒体查询翻一下，
+    // 侧栏收起又展开，带着过渡的话拍到的是滑到一半（设置面板压在侧栏上）。拍的那一下关掉
+    const motion = await this.eval(`(() => { const on = !!document.body.dataset.motion;
+      delete document.body.dataset.motion; return on; })()`);
     // **滚到某处再拍要用 beyond: false。** 页面本身不滚（头尾是钉住的，
     // 滚的是 .sheet 那个容器），captureBeyondViewport 会重新从文档顶部铺开，
     // 把刚滚到的位置丢掉——第一版就是这样拍不到确认卡的。
     const { data } = await this.call("Page.captureScreenshot", {
       format: "png", captureBeyondViewport: beyond,
     });
+    if (motion) await this.eval(`document.body.dataset.motion = "1"; true`);
     writeFileSync(`${outDir}/${name}.png`, Buffer.from(data, "base64"));
     return `${outDir}/${name}.png`;
   }
@@ -260,42 +265,39 @@ await cdp.eval(`stream.replaceChildren(); true`);
 await feed(FLOW);
 console.log("拍了", await cdp.shot("1_flow"));
 
-/* **行长按内容类型分两档，这一条要量不要看。**
-   散文（段落 / 列表 / 「你」那句）吃 --measure，代码块 / diff / 表格照旧吃满
-   --content。不分档的话正文一行 51 个汉字 —— 眼睛看"有点宽"说不清，量得清。
-   判据：正文 ≤ 40 字（中文可读上限），而代码块必须**明显更宽**，
-   否则就是有人把 --content 一起缩了，diff 会折得很碎。 */
+/* **一栏到底**：气泡、正文、代码块、输入卡片同宽（Fluid 的 ChatMessage / InputMessage 那样）。
+   量三样：正文一行不超过 48 个汉字（长回复读到行尾回得去）；代码块跟这一栏同宽；
+   「你」那句的气泡贴着这一栏的右边。 */
 const wide = JSON.parse(await cdp.eval(`JSON.stringify((() => {
   const cjk = (el) => { const b = el.getBoundingClientRect();
     return Math.round(b.width / parseFloat(getComputedStyle(el).fontSize)); };
-  const w = (el) => Math.round(el.getBoundingClientRect().width);
+  const box = (el) => el.getBoundingClientRect();
   const pro = document.querySelector(".block:not(.block--you) .prose > p");
   const you = document.querySelector(".block--you .block__body");
-  const pre = document.querySelector(".prose pre");
-  return { prose: cjk(pro), you: cjk(you), proseW: w(pro), preW: pre ? w(pre) : 0 };
+  const code = document.querySelector(".prose .code");
+  const col = box(document.getElementById("stream"));
+  return { prose: cjk(pro), col: Math.round(col.width), codeW: code ? Math.round(box(code).width) : 0,
+           youGap: Math.round(col.right - box(you).right) };
 })())`));
-if (wide.prose > 40 || wide.you > 40 || wide.preW <= wide.proseW) {
-  console.error("行长那两档不对（正文该 ≤40 字、代码块该更宽）：", JSON.stringify(wide));
+if (wide.prose > 48 || Math.abs(wide.codeW - wide.col) > 1 || Math.abs(wide.youGap) > 1) {
+  console.error("对话那一栏不对（正文 ≤48 字，代码块、气泡都贴着这一栏）：", JSON.stringify(wide));
   process.exitCode = 1;
 } else {
-  console.log(`正文 ${wide.prose} 字 / 「你」${wide.you} 字，代码块 ${wide.preW} 宽`);
+  console.log(`正文 ${wide.prose} 字，代码块 ${wide.codeW} = 一栏 ${wide.col}，气泡贴右边`);
 }
 
-/* **敲进去的字和发出来的字要在同一条竖线上。**
-   输入区第一列吃 --rail，＋ 靠右贴着 rail 那条线，textarea 的文字起点
-   就落回 .block__body 上。差过 1px 就是有人动了那一列。 */
+/* **输入卡片和对话那一栏左右两条边对齐**，差过 1px 就是有人只改了其中一边的宽。 */
 const lineUp = JSON.parse(await cdp.eval(`JSON.stringify((() => {
-  const ta = document.getElementById("input");
-  const body = document.querySelector(".block__body");
-  return { input: Math.round(ta.getBoundingClientRect().x
-                             + parseFloat(getComputedStyle(ta).paddingLeft)),
-           body: Math.round(body.getBoundingClientRect().x) };
+  const row = document.querySelector(".composer__row").getBoundingClientRect();
+  const col = document.getElementById("stream").getBoundingClientRect();
+  return { rowL: Math.round(row.left), colL: Math.round(col.left),
+           rowR: Math.round(row.right), colR: Math.round(col.right) };
 })())`));
-if (Math.abs(lineUp.input - lineUp.body) > 1) {
-  console.error("输入框里的字跟正文没对齐：", JSON.stringify(lineUp));
+if (Math.abs(lineUp.rowL - lineUp.colL) > 1 || Math.abs(lineUp.rowR - lineUp.colR) > 1) {
+  console.error("输入卡片跟对话那一栏没对齐：", JSON.stringify(lineUp));
   process.exitCode = 1;
 } else {
-  console.log(`敲的字和正文都起于 ${lineUp.body}`);
+  console.log(`输入卡片和对话一栏同在 ${lineUp.colL}–${lineUp.colR}`);
 }
 
 /* 一页只该有一条纵线：代码块不许再画自己的左竖线（meta-rail 就在左边 16px）。
@@ -1093,31 +1095,48 @@ if (JSON.parse(backed).shelf !== true || JSON.parse(backed).sheet !== false) {
   console.log("esc 退回对话");
 }
 
-/* 量一遍网格：每块的大写标签必须跟正文第一行顶对齐。
-   靠眼睛看差 2px 是看不出来的，但十几块堆起来整条 rail 就是歪的。
-
-   **视口要先还原成宽的。** 上面拍 3_narrow 时改成了 390px，那个宽度下
-   meta-rail 是**故意**塌成上下两行的，不还原就会量到 17px 的"偏移"然后
-   去修一个根本不存在的问题（第一版就是这么被自己骗了一轮）。 */
+/* Fluid 那几条硬规矩，一条一条量 —— 眼睛分不出 500 和 550、看不出 0.06em 的字距：
+   一、不大写、不加字距；二、字重只有 400 / 550 / 700；三、控件只有 36 / 28 两档高；
+   四、「你」「它说」这些名字不画（留在 DOM 里给读屏和夹具），只有系统的话带个小标签。
+   **视口要先还原成宽的**：上面拍 3_narrow 时改成了 390px。 */
 await cdp.call("Emulation.setDeviceMetricsOverride", {
   width: 1280, height: 1600, deviceScaleFactor: 1, mobile: false,
 });
 await cdp.call("Page.navigate", { url });
 await sleep(1200);
 await feed(FLOW);
-await sleep(900);          // 浮现那 500ms 走完再量，动画中途量的是中间态
-const drift = await cdp.eval(`JSON.stringify([...document.querySelectorAll(".block")].map((b) => {
-  const label = b.querySelector(".block__label").getBoundingClientRect();
-  const first = b.querySelector(".block__body").firstElementChild;
-  const body = (first || b.querySelector(".block__body")).getBoundingClientRect();
-  return { label: b.querySelector(".block__label").textContent,
-           drift: Math.round(body.top - label.top) };
-}).filter((r) => Math.abs(r.drift) > 2))`);
-if (drift !== "[]") {
-  console.error("标签和正文没对齐：", drift);
+await feed(ASK);
+await sleep(900);
+const rules = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+  const seen = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+  const texty = [...document.querySelectorAll("body *")].filter((el) => seen(el)
+    && [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()));
+  const name = (el) => el.id ? "#" + el.id : (el.className && el.className.baseVal === undefined
+    ? "." + String(el.className).split(" ")[0] : el.tagName.toLowerCase());
+  const caps = texty.filter((el) => getComputedStyle(el).textTransform !== "none").map(name);
+  const track = texty.filter((el) => !["normal", "0px"].includes(getComputedStyle(el).letterSpacing)).map(name);
+  const weights = [...new Set(texty.map((el) => getComputedStyle(el).fontWeight))].sort();
+  const h = (sel) => [...document.querySelectorAll(sel)].filter(seen)
+    .map((el) => Math.round(el.getBoundingClientRect().height));
+  return {
+    caps: [...new Set(caps)], track: [...new Set(track)], weights,
+    heights: { btn: h(".ask .btn"), chip: h(".bar .chip, .chip--attach, .pick"), go: h(".go"),
+               nav: h(".nav, .desk"), tab: h(".side__tab"), talk: h("#talks .talk") },
+    labels: [...document.querySelectorAll(".block:not(.block--note) > .block__label")].filter(seen).length,
+  };
+})())`));
+const ruleBad = [];
+if (rules.caps.length) ruleBad.push("有字被大写了：" + rules.caps.join(" "));
+if (rules.track.length) ruleBad.push("有字加了字距：" + rules.track.join(" "));
+if (rules.weights.some((w) => !["400", "550", "700"].includes(w))) ruleBad.push("字重不在 400/550/700 里：" + rules.weights);
+const offLadder = Object.entries(rules.heights).filter(([, hs]) => hs.some((v) => v !== 36 && v !== 28));
+if (offLadder.length) ruleBad.push("控件高度不在 36 / 28 两档：" + JSON.stringify(Object.fromEntries(offLadder)));
+if (rules.labels) ruleBad.push(`还画着 ${rules.labels} 个「你 / 它说」那样的名字`);
+if (ruleBad.length) {
+  console.error("Fluid 规矩：", ruleBad.join("；"));
   process.exitCode = 1;
 } else {
-  console.log("meta-rail 每一块都对齐");
+  console.log(`Fluid 规矩：不大写不加字距，字重 ${rules.weights.join("/")}，控件 36/28，名字不画`);
 }
 
 /* 宽窄两档下那只狗都得真的看得见。
@@ -1142,12 +1161,10 @@ for (const width of [1280, 390]) {
   }
 }
 
-/* ── Anthropic 这套皮（0.79.0）────────────────────────────────
-   它推翻了「直角」和「主题只换调色板」，所以上面那些网格断言管不到它。
-   这儿量它自己承诺的几件事 —— **颜色和圆角光看图会放过去，得量**：
-     气泡是圆的且有底色、它说的话是衬线、输入区是一张浮起来的卡片、
-     meta-rail 真的没了、带字的实心按钮过得了 AA、窄屏不横滚、代码行号对得上，
-   最后切回默认，确认这套皮**一点都没漏到别的主题上**。 */
+/* ── 三套主题只换颜色（0.81.0）──────────────────────────────
+   默认、复古、Anthropic 共用一套布局和字。同一份事件流在三套主题下各灌一遍：
+   一串元素的盒子一个像素都不许差，而底色、主色必须真的换了；每一套里实心按钮上的字
+   都要够 AA、代码的行号跟代码对齐。16–19 那几张拍的是 Anthropic（用户平时用的那套）。 */
 const contrast = (fg, bg) => {
   const lum = (c) => { const [r, g, b] = (c.match(/[\d.]+/g) || [0, 0, 0]).slice(0, 3).map(Number)
     .map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
@@ -1155,47 +1172,45 @@ const contrast = (fg, bg) => {
   const [a, b] = [lum(fg), lum(bg)];
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 };
-await cdp.call("Emulation.setDeviceMetricsOverride",
-  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-await cdp.call("Page.navigate", { url });
-await sleep(1200);
-await cdp.eval(`setTheme("anthropic"); true`);
-await feed(FLOW);
-await feed(ASK);
-await sleep(900);
-const skin = JSON.parse(await cdp.eval(`JSON.stringify((() => {
-  const cs = (sel, pseudo) => { const el = document.querySelector(sel);
-    return el ? getComputedStyle(el, pseudo) : null; };
-  const you = cs(".block--you .block__body");
-  const say = cs(".block--say .prose");
-  const row = cs(".composer__row");
-  const go = cs(".btn--primary");
-  const lastTop = (el) => { const r = document.createRange(); r.selectNodeContents(el);
-    const all = [...r.getClientRects()].filter((b) => b.width > 0);
-    return all.length ? all[all.length - 1].top : NaN; };
-  const fig = document.querySelector("figure.code");
-  return {
-    bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
-    youRadius: you ? parseFloat(you.borderTopLeftRadius) : 0,
-    youBg: you ? you.backgroundColor : "",
-    sayFont: say ? say.fontFamily : "",
-    rowRadius: row ? parseFloat(row.borderTopLeftRadius) : 0,
-    rowShadow: row ? row.boxShadow : "none",
-    rail: getComputedStyle(document.getElementById("stream"), "::before").content,
-    label: cs(".block--say .block__label").display,
-    goBg: go ? go.backgroundColor : "", goFg: go ? go.color : "",
-    codeDrift: fig ? Math.round(lastTop(fig.querySelector("code")) - lastTop(fig.querySelector(".code__nums"))) : NaN,
-  };
-})())`));
-console.log("拍了", await cdp.shot("16_anthropic_flow", { width: 1280, height: 900, beyond: false }));
+const GEO = [".composer__row", ".block--you .block__body", ".block--say .prose", "figure.code",
+  ".ask", ".btn--primary", ".side__tabs", "#find", ".status", "#desk"];
 const skinBad = [];
-if (skin.youRadius < 12 || /rgba\(0, 0, 0, 0\)|transparent/.test(skin.youBg)) skinBad.push("「你」那句不是圆角气泡");
-if (!/serif/i.test(skin.sayFont) || /^\s*"?(Adwaita Sans|Inter)/.test(skin.sayFont)) skinBad.push("它说的话不是衬线");
-if (skin.rowRadius < 16 || skin.rowShadow === "none") skinBad.push("输入区不是一张浮起来的卡片");
-if (skin.rail !== "none") skinBad.push("meta-rail 那条竖线还在");
-if (skin.label !== "none") skinBad.push("「它说」那个大写标签还在");
-if (!skin.goBg || contrast(skin.goFg, skin.goBg) < 4.5) skinBad.push(`实心按钮上的字不够 AA（${skin.goFg} on ${skin.goBg}）`);
-if (!(Math.abs(skin.codeDrift) <= 2)) skinBad.push(`代码行号跟代码错开了 ${skin.codeDrift}px`);
+const looks = {};
+for (const t of ["light", "retro", "anthropic"]) {
+  await cdp.call("Emulation.setDeviceMetricsOverride",
+    { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await cdp.call("Page.navigate", { url });
+  await sleep(1200);
+  await cdp.eval(`setTheme("${t}"); true`);
+  await feed(FLOW);
+  await feed(ASK);
+  await sleep(900);
+  looks[t] = JSON.parse(await cdp.eval(`JSON.stringify((() => {
+    const root = getComputedStyle(document.documentElement);
+    const box = (sel) => { const el = document.querySelector(sel); if (!el) return "没有";
+      const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round).join(","); };
+    const go = document.querySelector(".btn--primary");
+    const lastTop = (el) => { const r = document.createRange(); r.selectNodeContents(el);
+      const all = [...r.getClientRects()].filter((b) => b.width > 0);
+      return all.length ? all[all.length - 1].top : NaN; };
+    const fig = document.querySelector("figure.code");
+    return {
+      bg: root.getPropertyValue("--bg").trim(), accent: root.getPropertyValue("--accent").trim(),
+      boxes: Object.fromEntries(${JSON.stringify(GEO)}.map((s) => [s, box(s)])),
+      goFg: go ? getComputedStyle(go).color : "", goBg: go ? getComputedStyle(go, "::before").backgroundColor : "",
+      codeDrift: fig ? Math.round(lastTop(fig.querySelector("code")) - lastTop(fig.querySelector(".code__nums"))) : NaN,
+    };
+  })())`));
+  const l = looks[t];
+  if (!l.goBg || contrast(l.goFg, l.goBg) < 4.5) skinBad.push(`${t}：实心按钮上的字不够 AA（${l.goFg} on ${l.goBg}）`);
+  if (!(Math.abs(l.codeDrift) <= 2)) skinBad.push(`${t}：代码行号跟代码错开了 ${l.codeDrift}px`);
+  if (t === "anthropic") console.log("拍了", await cdp.shot("16_anthropic_flow", { width: 1280, height: 900, beyond: false }));
+}
+for (const t of ["retro", "anthropic"]) {
+  if (looks[t].bg === looks.light.bg || looks[t].accent === looks.light.accent) skinBad.push(`${t}：颜色没换`);
+  const moved = GEO.filter((sel) => looks[t].boxes[sel] !== looks.light.boxes[sel]);
+  if (moved.length) skinBad.push(`${t}：版面动了 ` + moved.map((sel) => `${sel} ${looks.light.boxes[sel]} → ${looks[t].boxes[sel]}`).join("、"));
+}
 
 await cdp.call("Page.navigate", { url });
 await sleep(1200);
@@ -1221,26 +1236,12 @@ const wideOut = JSON.parse(await cdp.eval(`JSON.stringify({
 if (wideOut.page > 390 || wideOut.sheet > 1 || wideOut.row > 390) skinBad.push(`390px 下横滚了：${JSON.stringify(wideOut)}`);
 console.log("拍了", await cdp.shot("19_anthropic_narrow", { width: 390, height: 900, beyond: false }));
 
-// 切回默认：meta-rail 和大写标签得原样回来 —— 皮漏到别的主题上就是这条红
-await cdp.call("Emulation.setDeviceMetricsOverride",
-  { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-await cdp.eval(`setTheme("light"); true`);
-await feed(FLOW.slice(0, 6));
-await sleep(600);
-const back = JSON.parse(await cdp.eval(`JSON.stringify({
-  rail: getComputedStyle(document.getElementById("stream"), "::before").content,
-  label: getComputedStyle(document.querySelector(".block__label")).display,
-  radius: parseFloat(getComputedStyle(document.querySelector(".composer__row")).borderTopLeftRadius),
-})`));
-if (back.rail === "none" || back.label === "none" || back.radius !== 0) {
-  skinBad.push(`切回默认之后没复原：${JSON.stringify(back)}`);
-}
 if (skinBad.length) {
-  console.error("Anthropic 那套皮：", skinBad.join("；"), JSON.stringify(skin));
+  console.error("三套主题：", skinBad.join("；"));
   process.exitCode = 1;
 } else {
-  console.log(`Anthropic 皮：气泡 ${skin.youRadius}px、衬线正文、输入卡片 ${skin.rowRadius}px、`
-    + `按钮对比 ${contrast(skin.goFg, skin.goBg).toFixed(2)}:1、390px 不横滚、切回默认复原`);
+  console.log(`三套主题版面一格不差、颜色各换各的，实心按钮 ${["light", "retro", "anthropic"]
+    .map((t) => contrast(looks[t].goFg, looks[t].goBg).toFixed(2)).join(" / ")}:1，390px 不横滚`);
 }
 
 /* ── 右下角换模型那张清单（0.79.1）────────────────────────────
@@ -1334,7 +1335,7 @@ want80(Math.abs(g3.rowTop - g80.rowTop) <= 1, "空对话里敲字换行，输入
 await cdp.eval(`inputEl.value = ""; inputEl.dispatchEvent(new Event("input")); setTheme("light"); true`);
 await sleep(300);
 const trLight = await cdp.eval(`getComputedStyle(document.querySelector(".composer")).translate`);
-want80(trLight === "none", "默认主题的空对话也被抬起来了（只该对 Anthropic 那套皮生效）", trLight);
+want80(trLight !== "none", "默认主题的空对话没被抬起来（三套主题共用一套版面）", trLight);
 await cdp.eval(`setTheme("anthropic"); true`);
 await sleep(300);
 

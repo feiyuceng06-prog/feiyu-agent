@@ -499,11 +499,14 @@ Find out how $ARGUMENTS is implemented in this repo. Read only, change nothing.
 
 `/skills` lists what is available and where each came from. A project entry wins over a global one of the same name.
 
-**Three looks.** The default is white paper with IBM Blue; "retro" is aged paper, warm ink and
-ochre, a palette swap only; **"Anthropic" is a whole claude.ai-style skin**: warm ivory paper,
-terracotta, serif prose, your messages as bubbles, the input as a floating card, and a large
-serif greeting on an empty conversation. The terminal has its own `/theme` (ANSI colours and
-glyphs: `default` / `swiss` / `retro` / `anthropic`); the two are deliberately separate settings.
+**Three looks, one layout.** The desktop app is a minimal layout built on the rules of
+[Fluid Functionalism](https://fluidfunctionalism.com): two control heights (36 / 28 px), a
+six-step type scale, a sliding hover highlight shared by each list, your messages as bubbles,
+the input as a floating card, and the empty conversation framed in an
+[mdxcn](https://mdxcn.dev)-style dashed box. The three themes only swap colours: white paper
+with IBM Blue (default), aged paper with ochre ("retro"), and warm ivory with terracotta
+("Anthropic"). The terminal has its own `/theme` (ANSI colours and glyphs: `default` / `swiss` /
+`retro` / `anthropic`); the two are deliberately separate settings.
 
 **A skill can be a package.** One `.md` is one skill, and so is a directory containing a
 `SKILL.md`, which may sit next to companion files:

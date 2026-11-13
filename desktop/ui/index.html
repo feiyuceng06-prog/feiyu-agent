@@ -22,8 +22,8 @@
 <!-- 自绘标题栏。整条可拖动，按钮那几块单独排除掉。 -->
 <header class="bar" data-tauri-drag-region>
   <div class="bar__left">
-    <button id="side-toggle" class="chip" type="button" title="收起 / 展开侧边栏"
-            aria-expanded="true" aria-controls="side">◧</button>
+    <button id="side-toggle" class="chip" type="button" title="收起 / 展开侧边栏" aria-label="收起 / 展开侧边栏"
+            aria-expanded="true" aria-controls="side"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6 2.5v11"/></svg></button>
     <img class="bar__mark" src="logo.svg" alt="" width="18" height="18">
     <span class="bar__title">Feiyu</span>
   </div>
@@ -31,30 +31,32 @@
        光在 <header> 上写 data-tauri-drag-region 是不够的 -->
   <div class="bar__drag" data-tauri-drag-region></div>
   <div class="bar__right">
-    <button id="act-term" class="chip" type="button" title="终端面板　Ctrl `">▮</button>
+    <button id="act-term" class="chip" type="button" title="终端面板　Ctrl `" aria-label="终端面板"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5 6 7.5 3 10.5"/><path d="M7.5 11h5.5"/></svg></button>
     <span class="bar__sep"></span>
-    <button id="win-min" class="win win--min" type="button" aria-label="最小化"></button>
-    <button id="win-max" class="win win--max" type="button" aria-label="最大化"></button>
-    <button id="win-close" class="win win--close" type="button" aria-label="关闭"></button>
+    <button id="win-min" class="win win--min" type="button" aria-label="最小化"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9"/></svg></button>
+    <button id="win-max" class="win win--max" type="button" aria-label="最大化"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg></button>
+    <button id="win-close" class="win win--close" type="button" aria-label="关闭"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
   </div>
 </header>
 
 <div class="scrim" id="scrim" hidden></div>
 
 <aside class="side" id="side">
-  <button class="desk" id="desk" type="button" title="切换工作台">
+  <button class="desk" id="desk" type="button" title="切换工作台" aria-expanded="false" aria-controls="desks">
+    <svg class="icon desk__icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>
     <span class="desk__label">工作台</span>
-    <span class="desk__path mono" id="desk-path">—</span>
+    <span class="desk__path" id="desk-path">—</span>
+    <svg class="icon desk__chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.5 8 10l3.5-3.5"/></svg>
   </button>
   <ul class="desks" id="desks" hidden></ul>
 
   <nav class="side__nav">
     <button class="nav" id="new-talk" type="button">
-      <span class="nav__icon">＋</span><span class="nav__text">新建会话</span>
+      <span class="nav__icon"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></span><span class="nav__text">新建会话</span>
       <span class="nav__key">Ctrl N</span>
     </button>
     <button class="nav" id="nav-shelf" type="button" aria-pressed="false">
-      <span class="nav__icon">◇</span><span class="nav__text">设置</span>
+      <span class="nav__icon"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5h6.5M12.5 5h1M2.5 11h1M7 11h6.5"/><circle cx="10.75" cy="5" r="1.75"/><circle cx="5.25" cy="11" r="1.75"/></svg></span><span class="nav__text">设置</span>
       <span class="nav__key">Ctrl K</span>
     </button>
   </nav>
@@ -66,6 +68,7 @@
   </div>
 
   <div class="side__find" id="side-find-wrap">
+    <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
     <input id="find" type="search" placeholder="搜索会话…" spellcheck="false" autocomplete="off">
   </div>
 
@@ -119,7 +122,7 @@
   <div class="shelf__head">
     <div class="tabs"><button class="tab" aria-selected="true" type="button">机器人</button></div>
     <input id="bot-find" type="search" placeholder="筛一下…" spellcheck="false" autocomplete="off">
-    <button id="bot-close" class="chip" type="button" title="回到对话">×</button>
+    <button id="bot-close" class="chip" type="button" title="回到对话" aria-label="回到对话"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
   </div>
   <div class="shelf__body">
     <ul class="shelf__list" id="bot-list"></ul>
@@ -135,7 +138,7 @@
   <div class="term__bar">
     <span class="term__label">终端</span>
     <span class="term__hint">这是你自己的 shell，跟 agent 各跑各的</span>
-    <button id="term-close" class="chip" type="button" title="收起">×</button>
+    <button id="term-close" class="chip" type="button" title="收起" aria-label="收起终端"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
   </div>
   <div class="term__body" id="term-body"></div>
 </section>
@@ -145,15 +148,15 @@
   <div class="palette" id="palette" hidden></div>
   <div class="models" id="models" hidden></div>
   <div class="composer__row">
-    <label class="chip chip--attach" title="上传文件到工作区">
-      ＋<input id="file" type="file" multiple hidden>
+    <label class="chip chip--attach" title="上传文件到工作区" aria-label="上传文件">
+      <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 7.5 8.2 12.8a3.2 3.2 0 0 1-4.5-4.5l5.6-5.6a2.1 2.1 0 0 1 3 3L6.7 11.3a1.1 1.1 0 0 1-1.5-1.5l5-5"/></svg><input id="file" type="file" multiple hidden>
     </label>
     <textarea id="input" rows="1" spellcheck="false" autocomplete="off"
               placeholder="我们要做什么？"></textarea>
     <button id="model" class="pick" type="button" title="切换模型"
             aria-haspopup="listbox" aria-expanded="false" aria-controls="models">—</button>
-    <button id="send" class="go" type="button" title="发送">→</button>
-    <button id="stop" class="go go--stop" type="button" title="中断" hidden>■</button>
+    <button id="send" class="go" type="button" title="发送" aria-label="发送"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.5M3.5 7.5 8 3l4.5 4.5"/></svg></button>
+    <button id="stop" class="go go--stop" type="button" title="中断" aria-label="中断" hidden><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2.5"/></svg></button>
   </div>
 </footer>
 

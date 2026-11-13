@@ -97,6 +97,47 @@ function settle(el, change) {
              { duration: cssMs("--slide-dur"), easing: cssVar("--ease-move") || "ease" });
 }
 
+/* 同一组列表共用一块会滑的高亮（Fluid Functionalism 的 use-fluid-hover）。
+   在 root 上听指针，指到哪一行就把高亮挪到那一行的 offsetLeft / offsetTop ——
+   高亮插在那一行的 offsetParent 里，所以那个容器要 position: relative，行也要
+   （行得画在高亮上面）。指针落进行与行之间的空当就熄掉；再进来的时候在落点淡入，
+   不从上一次离开的地方滑过来。清单重画把高亮冲掉了也没关系，下一次指到时再插回去。 */
+function fluidHover(root, items) {
+  const light = document.createElement("i");
+  light.className = "fh";
+  light.setAttribute("aria-hidden", "true");
+  let lit = null;
+  const out = () => {
+    lit = null;
+    delete light.dataset.on;
+  };
+  root.addEventListener("pointerover", (e) => {
+    const row = e.target.closest(items);
+    if (!row || !root.contains(row)) return out();
+    if (row === lit) return;
+    const host = row.offsetParent;
+    if (!host) return out();
+    const fresh = !lit || light.parentNode !== host || !light.dataset.on;
+    if (light.parentNode !== host) host.prepend(light);
+    if (fresh) light.dataset.fresh = "1";
+    light.style.setProperty("--fh-x", row.offsetLeft + "px");
+    light.style.setProperty("--fh-y", row.offsetTop + "px");
+    light.style.setProperty("--fh-w", row.offsetWidth + "px");
+    light.style.setProperty("--fh-h", row.offsetHeight + "px");
+    if (fresh) {
+      void light.offsetWidth;        // 先在落点站稳，再淡入
+      delete light.dataset.fresh;
+    }
+    light.dataset.on = "1";
+    lit = row;
+  });
+  root.addEventListener("pointerleave", out);
+  // 点下去之后那一行常常被换掉（开会话、换页签），旧的高亮不能留在原地
+  root.addEventListener("click", () => requestAnimationFrame(() => {
+    if (lit && !lit.isConnected) out();
+  }));
+}
+
 /* 一段 markdown 的第一句话，去掉行首记号 —— 给系统通知用，那儿只认纯文本 */
 function plainLine(text) {
   const line = String(text || "").split("\n").map((l) => l.trim())
@@ -194,8 +235,6 @@ const HELLO = [
   "最近这次改动有什么风险？",
 ];
 
-/* 问候那一行只有 Anthropic 那套皮画出来（claude.ai 那句衬线大字），
-   别的主题里它是 `display: none` —— 那两套的「开始」本来就是安静的一行字 */
 function greeting() {
   const h = new Date().getHours();
   return h < 5 ? "夜深了" : h < 11 ? "早上好" : h < 13 ? "中午好" : h < 18 ? "下午好" : "晚上好";
@@ -225,11 +264,14 @@ function syncHello() {
     + `<h1 class="hello__greet"><span class="hello__mark" aria-hidden="true"></span>`
     + `${greeting()}</h1>`
     + `<p class="hello__lead">问它点什么，或者直接把要做的事说出来。</p>`
+    + `<div class="hello__frame"><p class="frame-title">[ 试试 ]</p>`
+    + ["tl", "tr", "bl", "br"].map((at) =>
+      `<span class="frame-corner" data-at="${at}" aria-hidden="true">+</span>`).join("")
     + `<ul class="hello__list">`
     + HELLO.map((t) => `<li><button type="button" class="hello__pick">${esc(t)}</button></li>`).join("")
-    + `</ul>`
-    + `<p class="hello__keys"><code>@</code> 提一个文件　<code>/</code> 斜杠命令　`
-    + `<code>Ctrl N</code> 新建会话</p>`
+    + `</ul></div>`
+    + `<p class="hello__keys"><span><kbd>@</kbd>提一个文件</span><span><kbd>/</kbd>斜杠命令</span>`
+    + `<span><kbd>Ctrl N</kbd>新建会话</span></p>`
     + `</div>`;
   el.querySelectorAll(".hello__pick").forEach((b) => {
     b.onclick = () => {
@@ -246,14 +288,13 @@ function syncHello() {
   if (liftWatch) liftWatch.observe(el);
 }
 
-/* 「开始」让位。空对话里刚点过发送的话（`glideArm`，Anthropic 那套皮），
-   它淡出去、输入框和你那句话一起落到底（见 app.css「问候、例子和输入框是一组」）；
-   别的时候 —— 开旧对话、机器人开场、别的主题 —— 直接撤，不演。 */
+/* 「开始」让位。空对话里刚点过发送的话（`glideArm`），它淡出去、输入框和你那句话
+   一起落到底（见 app.css「对话流和输入框一起往上抬」）；
+   别的时候 —— 开旧对话、机器人开场 —— 直接撤，不演。 */
 const GLIDE_ARM = 4000;
 
 function leaveHello(el) {
-  const glide = glideArm && Date.now() - glideArm < GLIDE_ARM && !REDUCED
-    && document.documentElement.dataset.theme === "anthropic";
+  const glide = glideArm && Date.now() - glideArm < GLIDE_ARM && !REDUCED;
   glideArm = 0;
   if (!glide) { el.remove(); return; }
   el.removeAttribute("id");
@@ -856,7 +897,7 @@ function toolLine(ev) {
   wrap.innerHTML =
     `<div class="tool__head"><span class="tool__name">${esc(ev.label || ev.name)}</span>` +
     (ev.target ? `<span class="tool__target">(${esc(ev.target)})</span>` : "") +
-    `</div><div class="tool__pending">…</div>`;
+    `</div><div class="tool__pending">运行中</div>`;
   body.append(wrap);
   return wrap;
 }
@@ -1651,8 +1692,8 @@ const KIND_OF = { skills: "skill", tools: "tool", mcp: "mcp" };
    同一个名字在两处指的不是同一套东西，共用只会互相踩。 */
 const THEME_KEY = "feiyu.theme";
 const THEMES = [
-  { key: "light", label: "默认", about: "纯白纸、IBM Blue，国际现代主义那套" },
-  { key: "retro", label: "复古", about: "泛黄的纸、暖墨、赭色。只换配色，排版一个字没动" },
+  { key: "light", label: "默认", about: "纯白纸、IBM Blue" },
+  { key: "retro", label: "复古", about: "泛黄的纸、暖墨、赭色" },
   { key: "anthropic", label: "Anthropic",
     about: "暖中性的纸、陶土橘。跟这台机器上 kitty / GTK / 壁纸同一套色" },
 ];
@@ -2440,8 +2481,9 @@ let deskNow = "";
 function setDesk(path) {
   deskNow = path || "";
   document.dispatchEvent(new CustomEvent("feiyu:workspace", { detail: deskNow }));
-  // 侧栏那一列比状态栏窄得多，budget 单给
-  $("desk-path").textContent = shortPath(path, 28);
+  // 侧栏那一行只放目录名（项目叫什么），全路径在 title 和状态栏里 ——
+  // 240px 宽放不下一整条路径，两头一裁就既看不出在哪、也看不出叫什么
+  $("desk-path").textContent = path ? (shortPath(path).split("/").filter(Boolean).pop() || "~") : "—";
   $("desk-path").title = path || "";
   $("s-cwd").textContent = shortPath(path);
   $("s-cwd").title = path || "";
@@ -2467,6 +2509,7 @@ function drawDesks() {
 
 async function goDesk(path) {
   $("desks").hidden = true;
+  $("desk").setAttribute("aria-expanded", "false");
   if (!DESKTOP || path === deskNow) return;
   sayOnce("off", "正在换工作台…");
   try {
@@ -2502,6 +2545,7 @@ $("desk").onclick = () => {
   const list = $("desks");
   if (list.hidden) drawDesks();
   list.hidden = !list.hidden;
+  $("desk").setAttribute("aria-expanded", String(!list.hidden));
 };
 
 /* ── 侧栏 ──────────────────────────────────────────────────── */
@@ -2557,6 +2601,14 @@ function renderTalks() {
   }
 }
 
+/* 行尾只放一个短时间：今天的给钟点，别的天给日期。全的（几号几点、几条）在 title 里 */
+function shortWhen(when) {
+  const [day, hour] = String(when || "").split(" ");
+  const now = new Date();
+  const today = String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
+  return day === today && hour ? hour : day || "";
+}
+
 function talkRow(row, current, nth) {
   const li = document.createElement("li");
   li.className = "talk";
@@ -2566,8 +2618,9 @@ function talkRow(row, current, nth) {
     li.style.setProperty("--n", Math.min(nth, 12));
   }
   li.setAttribute("aria-current", row.id === current ? "true" : "false");
+  li.title = `${row.when} · ${row.count} 条`;
   li.innerHTML = `<span class="talk__title">${esc(row.title)}</span>` +
-                 `<span class="talk__meta">${esc(row.when)} · ${row.count} 条</span>`;
+                 `<span class="talk__meta">${esc(shortWhen(row.when))}</span>`;
   li.onclick = (e) => {
     // shift+点 = 置顶 / 取消置顶，跟 Hermes 一样
     if (e.shiftKey) {
@@ -2751,10 +2804,25 @@ $("file").onchange = (e) => {
   e.target.value = "";          // 同一个文件想再传一次也得能触发 change
 };
 
-// 拖进来也算
-document.addEventListener("dragover", (e) => e.preventDefault());
+// 拖进来也算。只认带文件的拖拽（拖一段字不算），拖着的时候输入卡片描一圈主色
+const PLACEHOLDER = inputEl.placeholder;
+
+function dropping(on) {
+  const box = $("composer");
+  if (on === !!box.dataset.drop) return;
+  if (on) box.dataset.drop = "1";
+  else delete box.dataset.drop;
+  inputEl.placeholder = on ? "松手就传进工作区" : PLACEHOLDER;
+}
+
+document.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  if ([...(e.dataTransfer?.types || [])].includes("Files")) dropping(true);
+});
+document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) dropping(false); });
 document.addEventListener("drop", (e) => {
   e.preventDefault();
+  dropping(false);
   [...(e.dataTransfer?.files || [])].forEach(upload);
 });
 
@@ -3466,7 +3534,7 @@ function notifyUser(title, body) {
   DESKTOP.core.invoke("notify", { title, body }).catch(() => { /* 叫不出来不耽误别的 */ });
 }
 
-/* ── 空对话时输入框在正中（Anthropic 那套皮） ─────────────────
+/* ── 空对话时输入框在正中 ─────────────────────────────────────
    见 app.css「问候、例子和输入框是一组」。这儿只管量：「开始」的顶到输入卡片的底
    是一组，抬到上下留白 42 : 58 的位置，抬多少写进 --lift。
    **敲字换行时卡片往下长、顶边不动**：量的时候拿「空着时那一行的高度」（rowBase）
@@ -3481,8 +3549,7 @@ let rowBase = 0;
 
 function measureLift() {
   const hello = $("hello");
-  if (!hello || document.documentElement.dataset.theme !== "anthropic"
-      || sheetEl.hidden || !$("term").hidden) return setLift(0);
+  if (!hello || sheetEl.hidden || !$("term").hidden) return setLift(0);
   const row = rowEl.getBoundingClientRect();
   if (!row.height) return;       // 设置面板开着时输入区是藏着的，量出来全是 0
   if (!inputEl.value || !rowBase) rowBase = row.height;
@@ -3503,6 +3570,13 @@ function setLift(px) {
 liftWatch = new ResizeObserver(() => measureLift());
 liftWatch.observe(sheetEl);
 liftWatch.observe(rowEl);
+
+fluidHover($("side"), ".desk, .nav, .side__tab, .desks li, .talk:not(.talk--asking)");
+fluidHover($("shelf"), ".tab, .shelf__row, .opt");
+fluidHover($("botshop"), ".tab, .shelf__row, .opt");
+fluidHover($("composer"), ".palette__item, .models__row:not([aria-disabled='true'])");
+fluidHover(pickBar, "button");
+fluidHover(streamEl, ".hello__pick");
 
 syncHello();      // 一进来就是空的，这一下把「开始」那块摆上
 syncInds();

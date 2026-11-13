@@ -110,8 +110,10 @@ if (desktop) {
   host.id = 'workbench';
   document.body.append(host);
   const toggle = document.createElement('button');
-  toggle.id = 'act-files'; toggle.className = 'chip'; toggle.textContent = '文件';
+  toggle.id = 'act-files'; toggle.className = 'chip'; toggle.type = 'button';
+  toggle.innerHTML = '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5V6z"/><path d="M9 2v4h4"/></svg>';
   toggle.title = '文件与预览  Ctrl Shift E';
+  toggle.setAttribute('aria-label', '文件与预览');
   toggle.onclick = () => document.dispatchEvent(new Event('feiyu:files'));
   document.getElementById('act-term').before(toggle);
   createRoot(host).render(<Workbench />);

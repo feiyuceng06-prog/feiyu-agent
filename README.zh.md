@@ -470,7 +470,7 @@ description: 这个项目怎么发一个新版本
 
 `/skills` 看有哪些、各自是哪来的。同名时项目那份盖过全局那份。
 
-**三套外观。** 默认是纯白纸配 IBM Blue；「复古」是泛黄的纸、暖墨、赭色，只换配色；**Anthropic 是一整套 claude.ai 的观感**：暖象牙纸、陶土色、衬线正文，你说的话是气泡，输入区是一张浮起来的卡片，空对话时是一句衬线大字的问候。终端那边另有 `/theme`（换 ANSI 配色和记号，可选 `default` / `swiss` / `retro` / `anthropic`），两边互不相干。
+**一套版面，三套配色。** 桌面端是照 [Fluid Functionalism](https://fluidfunctionalism.com) 的规则做的极简版面：控件只有 36 / 28 两档高、界面字六档、每组列表共用一块会滑的高亮，你说的话是气泡，输入区是一张浮起来的卡片，空对话那几个例子框在 [mdxcn](https://mdxcn.dev) 式的虚线框里。三套主题只换颜色：纯白纸配 IBM Blue（默认）、泛黄的纸配赭色（复古）、暖象牙纸配陶土色（Anthropic）。终端那边另有 `/theme`（换 ANSI 配色和记号，可选 `default` / `swiss` / `retro` / `anthropic`），两边互不相干。
 
 **技能可以是一个包。** 一个 `.md` 是一份，一个带 `SKILL.md` 的目录也是一份，后者旁边可以放附属文件：
 

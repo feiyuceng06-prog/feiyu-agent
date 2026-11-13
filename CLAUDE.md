@@ -4790,3 +4790,69 @@ nano-banana-pro $0.134、gpt-5.4-image-2 $0.006，有的吃参考图有的不吃
 测打包产物）、`python3 tests/check_backend.py`（冻结后的两个 SDK 能初始化）。
 **还没验的**：Ubuntu 实机、GitHub Actions 那条 22.04 构建（`.github/workflows/desktop-linux.yml`）、Windows / macOS。
 `webkit.py` 对 Electron 版已经没有意义，只在还跑 Tauri 版时有用。
+
+
+## 0.81.0：桌面前端照 Fluid Functionalism 重做，三套主题回到「只换颜色」
+
+用户要「用我给你的组件库重新设计 feiyu-desktop 的前端，走极简」。组件库指
+**Fluid Functionalism**（fluidfunctionalism.com，规则全文在 GitHub mickadesign/fluid-functionalism 的
+`skills/fluid-functionalism/references/craft.md`）和 **mdxcn**（mdxcn.dev）。两个都是 React 注册表，
+这边是**零依赖原生实现它们的规则**，一个包都没加。
+
+### 定下来的几条
+
+- **一套版面，三套配色。** 0.79.0 那套 claude.ai 观感的皮（气泡、输入卡片、空对话居中）变成了三套主题
+  共用的版面；衬线正文没留（Fluid 只有一种界面字）。主题又只换颜色了 —— `app.css` 顶上三段 token，
+  布局一个像素不分主题，`shoot.mjs` 量着（见下）。Anthropic 的代码块照旧是深色窗，那是 `--code-*` 颜色。
+- **Fluid 的硬规矩**：控件只有 36 / 28 两档高（按钮、输入、列表行共用）；界面字六档、行高整像素；
+  字重只有 400 / 550 / 700，550 配 `font-variation-settings: "opsz" 18`（Adwaita Sans 带 opsz 轴，
+  换字重时字宽不变）—— 汉字落到思源黑体，没有 550，按 CSS 字重匹配规则会取 700；不大写、不加字距、
+  不放眉标（meta-rail 和那些大写小标签全没了）；字只有 `--text` / `--muted` 两种颜色，红只给报错和回不去的操作；
+  hover / 选中是叠色（墨色 4% / 7%）；动效 80 / 160 / 240ms，退场快一档。
+- **对话正文另起一档 15/24**：Fluid 的 14/20 是给拉丁界面字定的，排中文段落太挤。对话一栏 44rem，
+  气泡、正文、代码块、输入卡片同宽，正文一行 47 字（Anthropic 那套皮当年是 46）。
+- **mdxcn 的框只用在空对话**（问候下面那几个例子）：虚线、四角压「+」、`[ 试试 ]` 骑在上边线上。
+
+### 实现上要记住的
+
+- **主面板是 `body::before`。** 网格容器的伪元素也是网格项，放在第 2 列 2–4 行当 `.sheet` / `.term` /
+  `.composer` / `.shelf` 共同的底（圆角 + 阴影），DOM 一个没加。这几样都带 `margin: 0 var(--gut) 0 var(--gut-l)`
+  才落在面板里；侧栏收起时 `--gut-l` 才有值。文件面板（`workbench.css`）是右边第二块面板。
+- **滑动高亮 `fluidHover(root, 行选择器)`**（app.js 小工具那节）：在 root 上听指针，高亮插进那一行的
+  `offsetParent` 里、按 `offsetLeft/Top` 挪 —— 所以**那个容器要 `position: relative`，行也要**（行得画在高亮上面）。
+  高亮是 prepend 进去的，**列表里按 `:nth-child` 写的规则会数错**，「开始」那几行改成了 `:nth-child(1 of li)`。
+  清单重画把它冲掉没关系，下一次指到时再插回去。
+- **按下去的手感是 `::before` 那层表面**：内缩 1px、同色 1px spread 补回满尺寸，按下时 spread 收成 0。
+  按钮的底色写在 `--face` 上。**这几条通用规则必须用 `:where()`** —— 头一版用 `:is()`，而 `:is()` 取最高那个参数的
+  特指度，列表里一个 `.pick-bar button` 把整条抬到 (0,1,1)，各按钮自己的 `--face` 全被压掉，发送键和「同意一次」
+  白字压在白底上，看着就是按钮没了。
+- **图标是内联 SVG，`pointer-events: none`**：点中的永远是按钮本身。夹具拿 `elementFromPoint` 量「标题栏的钮有没有被
+  盖住」，不加这条量到的是里面的 `<path>`（没有 id），会误报。
+- **发出第一句那一下的过渡要排在侧栏那条后面。** `body[data-motion] .composer { transition: margin … }` 跟
+  `body[data-glide] .composer { transition: translate … }` 特指度一样，后写的赢 —— 写反了 translate 的过渡被换成只有
+  margin 的那份，「落到底」就是一下子跳过去。现在 glide 那条排在最后，而且两样都带上。
+- **确认卡的键帽是按钮右上角的角标**（绝对定位）。放在按钮里的话，没到点时它藏着照样占位，按钮上的字偏到左边。
+- 工作台那一行只放目录名（全路径在 title 和状态栏）：240px 宽放不下一整条路径，两头一裁就什么都看不出来。
+
+### 夹具
+
+- `shoot.mjs` 里量旧版面的几条换了：行长两档 → **一栏到底**（正文 ≤48 字，代码块、气泡都贴着这一栏）；
+  输入框文字对齐 `.block__body` → **输入卡片和对话一栏左右对齐**；meta-rail 对齐 → **Fluid 的几条硬规矩**
+  （没有大写和字距、字重只在 400/550/700、控件只有 36/28、「你 / 它说」不画）；Anthropic 皮那一节 →
+  **三套主题只换颜色**（同一份事件流三套主题各灌一遍，十个元素的盒子一个像素不许差，底色主色必须换了，
+  每套的实心按钮够 AA）；0.80.0 那节「默认主题不该抬」反过来了。
+- **`captureBeyondViewport` 量页面大小时会先把视口缩成 1×1。** 窄屏那条媒体查询翻一下，`watchNarrow()` 收起侧栏
+  又展开，带着过渡的话拍到的是滑到一半的样子（设置面板压在侧栏上，看着像布局坏了）。`shot()` 拍的那一下把
+  `data-motion` 摘掉。不是产品的毛病，产品里没人会把窗口缩成 1×1。
+- `sessions.mjs` 要真模型（会花钱），隔离配置里没模型时只有两条 UI 的过；这一轮没拿用户的 key 跑它。
+
+### 验证
+
+`shoot.mjs` 全绿、`input.mjs` 114/114、`fuzz_ui` 102 条、`md_check` 全过；Electron 那边 `npm run build`、
+`npm test`、`npm run test:desktop` 都过，另用 Playwright 起真 Electron 窗口拍了默认 / 复古 / Anthropic 三套。
+跑夹具用的是一份隔离的 `XDG_CONFIG_HOME`（三份技能其中一份关掉、两份档案、一个机器人、`enabled.json` 关掉
+`web_search`）和干净的 `XDG_STATE_HOME`，不碰用户真的配置。
+
+**拆提交时踩的：Bash 工具跑的是 zsh，`for f in $F` 不会按空格拆开 `$F`**（只循环一次、拿整串当文件名），
+备份那一步静默没做成，后面的还原照样跑了，把改好的文件盖回了旧版。是靠 `desktop/dist/`（装机时的打包产物）
+和当时的编辑脚本逐个找回来的，找回来的前端跟装好的那份逐字节比过。zsh 里要拆就写 `${=F}` 或者用数组。
