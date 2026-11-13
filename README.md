@@ -19,12 +19,16 @@ curl -fsSL https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/g
 Installs the latest version from [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases)
 into your user directory: no sudo, no Python, no libfuse2. Afterwards **Feiyu** is in your app menu
 (or run `feiyu-desktop`) and `feiyu` runs in the terminal; on first launch it asks you to connect a
-model. Run it again to upgrade. Without curl, start the line with `wget -qO-` instead. Only Linux
-x86_64 packages exist so far, and the system needs to be Ubuntu 22.04-era or newer (glibc 2.35+).
+model. Run it again to upgrade. Without curl (Ubuntu desktop doesn't ship it), start the line with
+`wget -qO-` instead. If `~/.local/bin` isn't on your PATH (the case on a fresh Ubuntu), it adds one line
+to `~/.bashrc` (`~/.zshrc` for zsh) so new terminal windows find `feiyu`; to skip that, run
+`… | FEIYU_NO_MODIFY_PATH=1 bash`. Only Linux x86_64 packages exist so far, and the system needs to be
+Ubuntu 22.04-era or newer (glibc 2.35+).
 
 Already have the AppImage (say, downloaded on another machine): `bash get.sh Feiyu-x.y.z.AppImage`.
 To remove it, delete `~/.local/share/feiyu-desktop`, `~/.local/bin/feiyu`, `~/.local/bin/feiyu-desktop`
-and `~/.local/share/applications/feiyu.desktop`; models, keys and conversations live in
+and `~/.local/share/applications/feiyu.desktop`, plus the two lines marked "由 feiyu 的 get.sh 加" in
+`~/.bashrc`; models, keys and conversations live in
 `~/.config/feiyu` and `~/.local/state/feiyu`.
 
 ### CLI from the main branch on Ubuntu

@@ -16,9 +16,9 @@
 curl -fsSL https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/get.sh | bash
 ```
 
-装的是 [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases) 里最新的那一版，放进用户目录：不用 sudo、不用装 Python，也不需要 libfuse2。装完应用菜单里有 **Feiyu**（或者运行 `feiyu-desktop`），终端里运行 `feiyu`；第一次打开会请你「连接模型」。再跑一遍就是升级。没有 curl 就把开头换成 `wget -qO-`。现在只有 Linux x86_64 的包，系统要 Ubuntu 22.04 那一代或更新（glibc 2.35 以上）。
+装的是 [Releases](https://github.com/feiyuceng06-prog/feiyu-agent/releases) 里最新的那一版，放进用户目录：不用 sudo、不用装 Python，也不需要 libfuse2。装完应用菜单里有 **Feiyu**（或者运行 `feiyu-desktop`），终端里运行 `feiyu`；第一次打开会请你「连接模型」。再跑一遍就是升级。没有 curl 就把开头换成 `wget -qO-`（Ubuntu 桌面版默认就没装 curl）。`~/.local/bin` 不在 PATH 里的话（新装的 Ubuntu 就是这样），它会往 `~/.bashrc` 加一行（zsh 是 `~/.zshrc`），新开的终端窗口就能直接敲 `feiyu`；不想改就写成 `… | FEIYU_NO_MODIFY_PATH=1 bash`。现在只有 Linux x86_64 的包，系统要 Ubuntu 22.04 那一代或更新（glibc 2.35 以上）。
 
-手上已经有 AppImage 文件的话（比如在别的机器上下好拷过来）：`bash get.sh Feiyu-x.y.z.AppImage`。不要了就删掉 `~/.local/share/feiyu-desktop`、`~/.local/bin/feiyu`、`~/.local/bin/feiyu-desktop` 和 `~/.local/share/applications/feiyu.desktop`；模型、key 和对话记录在 `~/.config/feiyu` 和 `~/.local/state/feiyu`。
+手上已经有 AppImage 文件的话（比如在别的机器上下好拷过来）：`bash get.sh Feiyu-x.y.z.AppImage`。不要了就删掉 `~/.local/share/feiyu-desktop`、`~/.local/bin/feiyu`、`~/.local/bin/feiyu-desktop` 和 `~/.local/share/applications/feiyu.desktop`，再删掉 `~/.bashrc` 里「由 feiyu 的 get.sh 加」那两行；模型、key 和对话记录在 `~/.config/feiyu` 和 `~/.local/state/feiyu`。
 
 ### Ubuntu 上从主分支装命令行版
 

@@ -68,7 +68,9 @@ class TestGet(unittest.TestCase):
         self.log = self.root / 'downloads.log'
         self.env = dict(os.environ, HOME=str(self.home), PATH='%s:/usr/bin:/bin' % self.fakebin,
                         FAKE_LOG=str(self.log), FAKE_IMAGE=str(self.image('9.5.0')))
-        self.env.pop('XDG_DATA_HOME', None)
+        self.env['SHELL'] = '/bin/bash'
+        for name in ('XDG_DATA_HOME', 'ZDOTDIR', 'FEIYU_NO_MODIFY_PATH'):
+            self.env.pop(name, None)
         self.bin = self.home / '.local/bin'
         self.base = self.home / '.local/share/feiyu-desktop'
 
@@ -169,6 +171,45 @@ class TestGet(unittest.TestCase):
             r = subprocess.run(['bash', '-s', '--', str(self.image('9.1.0'))], input=''.join(lines[:cut]),
                                env=self.env, cwd=self.root, text=True, capture_output=True)
             self.assertFalse((self.home / '.local').exists(), (cut, r.stdout, r.stderr))
+
+    def test_PATH_里没有就写进_bashrc_而且只写一次(self):
+        for _ in range(2):
+            r = self.get(self.image('9.1.0'))
+            self.assertEqual(r.returncode, 0, r.stderr)
+        rc = self.home / '.bashrc'
+        self.assertEqual(rc.read_text().count('由 feiyu 的 get.sh 加'), 1)
+        self.assertIn('source ~/.bashrc', r.stdout)
+        found = subprocess.run(['bash', '-c', 'PATH=/usr/bin:/bin; . "$HOME/.bashrc"; command -v feiyu'],
+                               env=self.env, text=True, capture_output=True).stdout.strip()
+        self.assertEqual(found, str(self.bin / 'feiyu'))
+
+    def test_那一行不会让_PATH_越来越长(self):
+        self.get(self.image('9.1.0'))
+        out = subprocess.run(['bash', '-c', '. "$HOME/.bashrc"; . "$HOME/.bashrc"; printf %s "$PATH"'],
+                             env=self.env, text=True, capture_output=True).stdout
+        self.assertEqual(out.split(':').count(str(self.bin)), 1)
+
+    def test_zsh_和_fish_写各自的配置(self):
+        r = self.get(self.image('9.1.0'), env=dict(self.env, SHELL='/usr/bin/zsh'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('由 feiyu 的 get.sh 加', (self.home / '.zshrc').read_text())
+        self.assertFalse((self.home / '.bashrc').exists())
+        self.get(self.image('9.1.0'), env=dict(self.env, SHELL='/usr/bin/fish'))
+        fish = (self.home / '.config/fish/conf.d/feiyu.fish').read_text()
+        self.assertIn('set -gx PATH $HOME/.local/bin $PATH', fish)
+
+    def test_PATH_里已经有就不改配置(self):
+        env = dict(self.env, PATH='%s:%s' % (self.bin, self.env['PATH']))
+        r = self.get(self.image('9.1.0'), env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.home / '.bashrc').exists())
+        self.assertIn('终端版：运行 feiyu', r.stdout)
+
+    def test_FEIYU_NO_MODIFY_PATH_就不改配置(self):
+        r = self.get(self.image('9.1.0'), env=dict(self.env, FEIYU_NO_MODIFY_PATH='1'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.home / '.bashrc').exists())
+        self.assertIn('不在 PATH 里', r.stderr)
 
     def test_管道进来也能装(self):
         r = subprocess.run(['bash', '-s', '--', str(self.image('9.1.0'))], input=SCRIPT.read_text(),

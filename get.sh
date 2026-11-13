@@ -13,6 +13,7 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 BASE="$DATA/feiyu-desktop"
 BIN="$HOME/.local/bin"
 MARK='# 由 feiyu 的 get.sh 安装'
+PATH_MARK='# 由 feiyu 的 get.sh 加：让终端找得到 ~/.local/bin 里的命令'
 
 say()  { printf '\033[38;2;150;103;74m▸\033[0m %s\n' "$1"; }
 warn() { printf '\033[38;2;168;132;60m!\033[0m %s\n' "$1" >&2; }
@@ -25,8 +26,9 @@ usage() {
 
 不给文件就从 GitHub Releases 下最新的一版。程序装进 ~/.local/share/feiyu-desktop，
 feiyu（终端版）和 feiyu-desktop（桌面版）两个命令放在 ~/.local/bin，应用菜单里叫 Feiyu。
-不用 sudo，不改 shell 配置；模型、key 和对话记录在 ~/.config/feiyu 和 ~/.local/state/feiyu，
-重装、升级都不动它们。
+不用 sudo。~/.local/bin 不在 PATH 里的话，往 ~/.bashrc（zsh 是 ~/.zshrc，fish 是
+~/.config/fish/conf.d/feiyu.fish）加一行，新开的终端就找得到 feiyu；不想改就设 FEIYU_NO_MODIFY_PATH=1。
+模型、key 和对话记录在 ~/.config/feiyu 和 ~/.local/state/feiyu，重装、升级都不动它们。
 HELP
 }
 
@@ -69,6 +71,31 @@ write_shim() {
   printf '#!/usr/bin/env bash\n%s\nexec %q "$@"\n' "$MARK" "$2" > "$1.tmp"
   chmod +x "$1.tmp"
   mv -f -- "$1.tmp" "$1"
+}
+
+# 脚本是个子进程，改不了跑它的那个终端的 PATH；而 Ubuntu 只在登录时、而且 ~/.local/bin 那时已经在的情况下
+# 才把它加进 PATH，新装的机器上要等下一次登录。所以写进登录 shell 的配置，新开的终端窗口就找得到了。
+add_to_path() {
+  if [ "${FEIYU_NO_MODIFY_PATH:-}" = 1 ]; then
+    return 1
+  fi
+  local shell=${SHELL##*/} rc line
+  case "$shell" in
+    zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    fish) rc="$HOME/.config/fish/conf.d/feiyu.fish" ;;
+    bash|'') rc="$HOME/.bashrc" ;;
+    *) rc="$HOME/.profile" ;;
+  esac
+  if [ "$shell" = fish ]; then
+    line='contains -- $HOME/.local/bin $PATH; or set -gx PATH $HOME/.local/bin $PATH'
+  else
+    line='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+  fi
+  if ! grep -qF -- "$PATH_MARK" "$rc" 2>/dev/null; then
+    mkdir -p -- "$(dirname -- "$rc")" || return 1
+    printf '\n%s\n%s\n' "$PATH_MARK" "$line" >> "$rc" || return 1
+  fi
+  printf '%s' "$rc"
 }
 
 main() {
@@ -167,14 +194,25 @@ DESKTOP_ENTRY
     | sort -rn | tail -n +3 | cut -f2- \
     | while IFS= read -r old; do rm -rf -- "$old"; done
 
+  local onpath='' rc=''
   case ":$PATH:" in
-    *":$BIN:"*) ;;
-    *) warn "$BIN 不在 PATH 里：可以直接运行 $BIN/feiyu，或者把 export PATH=\"\$HOME/.local/bin:\$PATH\" 加进 shell 配置" ;;
+    *":$BIN:"*) onpath=yes ;;
+    *) rc=$(add_to_path) || rc='' ;;
   esac
   say "装好了 Feiyu $version"
   say '桌面版：应用菜单里的 Feiyu，或者运行 feiyu-desktop'
   if [ -n "$cli" ]; then
-    say '终端版：运行 feiyu'
+    if [ -n "$onpath" ]; then
+      say '终端版：运行 feiyu'
+    elif [ -n "$rc" ]; then
+      say "终端版：新开一个终端窗口运行 feiyu（这个窗口里要先运行 source ${rc/#"$HOME"/\~}）"
+    else
+      say "终端版：运行 $BIN/feiyu"
+      warn "$BIN 不在 PATH 里；想直接敲 feiyu 的话，把 export PATH=\"\$HOME/.local/bin:\$PATH\" 加进 shell 配置"
+    fi
+  fi
+  if [ -n "$rc" ]; then
+    say "已经往 ${rc/#"$HOME"/\~} 加了一行，好让终端找得到 ~/.local/bin 里的命令"
   fi
   say '第一次打开会请你「连接模型」：选个接口、贴上 key 就能用'
   if [ -n "$missing" ]; then

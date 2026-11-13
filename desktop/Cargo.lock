@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "feiyu-desktop"
-version = "0.82.3"
+version = "0.82.4"
 dependencies = [
  "axum",
  "futures-util",

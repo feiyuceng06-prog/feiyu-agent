@@ -4994,3 +4994,21 @@ curl -fsSL https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/g
 
 `tests/test_get.py` 十条，假的 AppImage / curl / uname，不出网。九处承重行逐条改坏过，每处都有用例红。
 另外拿 0.82.1 的真包在隔离的 HOME 里装了一遍（387 MB），`feiyu --version` 和伪终端里的 TUI 都起得来。
+
+
+## 0.82.4：新装的 Ubuntu 上，装完找得到 `feiyu`
+
+用户问「Ubuntu 用户装完以后还找不到终端？」—— 是的：脚本是个子进程，改不了跑它的那个终端的 PATH；
+而 Ubuntu 的 `~/.profile` 只在**登录时**、而且 `~/.local/bin` 那时已经存在才把它加进 PATH。新机器上这个目录是
+get.sh 建的，于是不光当前窗口，**新开的终端窗口也找不到**，要等下一次登录。用户选了「写进 shell 配置」
+（rustup、uv 也是这么做的），install.sh 那句「不改 shell 配置」对 get.sh 不再成立。
+
+- 只在 `~/.local/bin` 不在 PATH 里时才写；写的是登录 shell 的配置（`$SHELL`）：bash → `~/.bashrc`、
+  zsh → `${ZDOTDIR:-$HOME}/.zshrc`、fish → `~/.config/fish/conf.d/feiyu.fish`、别的 → `~/.profile`。
+- 带一行标记，有了就不再写（重跑就是升级，不能每次追加一遍）；写进去的那行自己先判断 PATH 里有没有，
+  下次登录 `~/.profile` 也加上了的时候不会出现两份。
+- `FEIYU_NO_MODIFY_PATH=1` 不写，退回原来那句提示。
+- 当前窗口还是没办法，只能提示 `source ~/.bashrc`；桌面版一直不受影响（菜单项写的是绝对路径）。
+
+`tests/test_get.py` 加了五条（写进 bashrc 且只写一次、PATH 不会越来越长、zsh / fish 写各自的、已经在 PATH 里不写、
+FEIYU_NO_MODIFY_PATH），五处承重行改坏各自红一条。
