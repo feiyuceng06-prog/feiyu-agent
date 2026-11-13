@@ -68,7 +68,17 @@ DAEMON_SOCKETS = ("/run/docker.sock", "/var/run/docker.sock", "/run/podman/podma
 # POSIX 模式**，而模型写的是 bash：`source 相对路径` 在 POSIX 模式下不搜当前目录
 # （只搜 PATH），`export -p` 的输出格式也不一样 工具叫 bash、说明里写的是 shell 命令，
 # 那就该真给它 bash 没装 bash 的系统退回 /bin/sh
-SHELL = shutil.which("bash") or "/bin/sh"
+def _shell() -> str:
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            candidate = os.path.join(base or "", "Git", "bin", "bash.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return shutil.which("bash") or "bash.exe"
+    return shutil.which("bash") or "/bin/sh"
+
+
+SHELL = _shell()
 
 _probe: bool | None = None
 

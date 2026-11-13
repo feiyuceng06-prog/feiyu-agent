@@ -3,19 +3,17 @@
  * 一条传输通道，收 agent 的结构化事件画成页面；发回去的是
  * {op: prompt | command | reply | interrupt | status | sessions | new | open | delete}。
  *
- * **传输有两条路**，靠 window.__TAURI__ 在不在自己判断：
- *   · 桌面（Tauri）—— invoke("send") / listen("feiyu://event")，进程内通道，不开端口
- *   · 开发（浏览器）—— WebSocket 连 feiyu-devserver。Tauri 在 Linux 上是 webkit2gtk，
- *     没有 CDP，headless Chrome 那套夹具接不上去，所以留这条路专门给测试用
+ * 桌面默认走 Electron 的受限 preload 桥接；旧 Tauri 构建保留兼容入口。
+ * 开发浏览器夹具仍可走 feiyu-devserver 的 WebSocket。
+ * 聊天渲染沿用现有实现；React 工作台面板见 renderer/workbench.jsx。
  *
- * 没有框架，也没有外部依赖。markdown 渲染是自己写的一小份（见 md()）。
  * 信息架构照 Hermes Desktop（NousResearch/hermes-agent，MIT），样式是博客那一套。
  */
 "use strict";
 
-/* 在 Tauri 窗口里跑还是在浏览器里跑。**必须在最上面**：下面好几处在用它，
+/* 在桌面窗口里跑还是在浏览器里跑。**必须在最上面**：下面好几处在用它，
    而 const 不提升，放后面会撞 TDZ。 */
-const TAURI = window.__TAURI__;
+const DESKTOP = window.feiyuDesktop || window.__TAURI__;
 
 /* devserver 那条路要的令牌，从地址里取。桌面端没有这东西（也不需要 ——
    进程内通道，外面够不着）。 */
@@ -298,8 +296,8 @@ const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
                gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
 
 async function imgSrc(path) {
-  if (!TAURI) return "/file?t=" + encodeURIComponent(TOKEN) + "&p=" + encodeURIComponent(path);
-  const buf = await TAURI.core.invoke("read_image", { path });
+  if (!DESKTOP) return "/file?t=" + encodeURIComponent(TOKEN) + "&p=" + encodeURIComponent(path);
+  const buf = await DESKTOP.core.invoke("read_image", { path });
   const kind = MIME[String(path).split(".").pop().toLowerCase()] || "image/png";
   return URL.createObjectURL(new Blob([buf], { type: kind }));
 }
@@ -711,7 +709,7 @@ function setStatus(s) {
   if (!modelsEl.hidden) drawModelsList();
   // **工作台不由 status 说了算。** 换台时旧进程可能还会再推一条 status 过来，
   // 让它写的话状态栏会闪回旧目录。桌面端以 setDesk 为准，浏览器里才用它。
-  if (s.workspace && !TAURI) {
+  if (s.workspace && !DESKTOP) {
     $("s-cwd").textContent = shortPath(s.workspace);
     $("s-cwd").title = s.workspace;
   }
@@ -1460,12 +1458,12 @@ function openTerm() {
   term.loadAddon(fit);
   term.open($("term-body"));
   fit.fit();
-  term.onData((data) => TAURI.core.invoke("term_write", { data }).catch(() => {}));
+  term.onData((data) => DESKTOP.core.invoke("term_write", { data }).catch(() => {}));
   term.onResize(({ cols, rows }) =>
-    TAURI.core.invoke("term_resize", { cols, rows }).catch(() => {}));
-  TAURI.event.listen("feiyu://term", (e) => term.write(e.payload));
+    DESKTOP.core.invoke("term_resize", { cols, rows }).catch(() => {}));
+  DESKTOP.event.listen("feiyu://term", (e) => term.write(e.payload));
   // **起 shell 要带上当前工作台**，不然它落在这个进程的 cwd 上，跟 agent 不在一处
-  TAURI.core.invoke("term_start", {
+  DESKTOP.core.invoke("term_start", {
     cwd: deskNow, cols: term.cols, rows: term.rows,
   }).catch((err) => term.write("\r\n起不来：" + err + "\r\n"));
   // 面板尺寸跟着窗口走
@@ -1474,7 +1472,7 @@ function openTerm() {
 }
 
 function showTerm(on) {
-  if (!TAURI) return;                 // 浏览器里没有 pty，这个面板没有意义
+  if (!DESKTOP) return;                 // 浏览器里没有 pty，这个面板没有意义
   termOn = on;
   $("term").hidden = !on;
   if (!on) return;
@@ -1483,7 +1481,7 @@ function showTerm(on) {
   requestAnimationFrame(() => { try { fit.fit(); } catch {} term.focus(); });
 }
 
-if (TAURI) {
+if (DESKTOP) {
   $("act-term").onclick = () => showTerm($("term").hidden);
   $("term-close").onclick = () => showTerm(false);
   document.addEventListener("keydown", (e) => {
@@ -2441,6 +2439,7 @@ let deskNow = "";
 
 function setDesk(path) {
   deskNow = path || "";
+  document.dispatchEvent(new CustomEvent("feiyu:workspace", { detail: deskNow }));
   // 侧栏那一列比状态栏窄得多，budget 单给
   $("desk-path").textContent = shortPath(path, 28);
   $("desk-path").title = path || "";
@@ -2468,10 +2467,10 @@ function drawDesks() {
 
 async function goDesk(path) {
   $("desks").hidden = true;
-  if (!TAURI || path === deskNow) return;
+  if (!DESKTOP || path === deskNow) return;
   sayOnce("off", "正在换工作台…");
   try {
-    const now = await TAURI.core.invoke("switch", { dir: path });
+    const now = await DESKTOP.core.invoke("switch", { dir: path });
     // 换过去就是另一段对话了：正文、侧栏、附件全部归零
     streamEl.replaceChildren();
     syncHello();
@@ -2484,7 +2483,7 @@ async function goDesk(path) {
     // 面板里那个 shell 也跟着换过去（Rust 那边已经把旧的收掉了）
     if (term) {
       term.reset();
-      TAURI.core.invoke("term_start", { cwd: now, cols: term.cols, rows: term.rows })
+      DESKTOP.core.invoke("term_start", { cwd: now, cols: term.cols, rows: term.rows })
         .catch(() => {});
     }
     hello();
@@ -2494,8 +2493,8 @@ async function goDesk(path) {
 }
 
 async function pickDesk() {
-  if (!TAURI) return;
-  const dir = await TAURI.dialog.open({ directory: true, multiple: false, title: "选一个工作台" });
+  if (!DESKTOP) return;
+  const dir = await DESKTOP.dialog.open({ directory: true, multiple: false, title: "选一个工作台" });
   if (dir) goDesk(dir);
 }
 
@@ -2673,8 +2672,8 @@ $("new-talk").onclick = () => { showShelf(false); send({ op: "new" }); };
 $("find").addEventListener("input", renderTalks);
 
 /* 窗口按钮。只有桌面端有窗口可操作，浏览器里把它们藏起来。 */
-if (TAURI) {
-  const win = TAURI.window.getCurrentWindow();
+if (DESKTOP) {
+  const win = DESKTOP.window.getCurrentWindow();
   $("win-min").onclick = () => win.minimize();
   $("win-max").onclick = () => win.toggleMaximize();
   $("win-close").onclick = () => win.close();
@@ -2724,9 +2723,9 @@ async function upload(file) {
   drawClips();
   try {
     let path;
-    if (TAURI) {
+    if (DESKTOP) {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      path = await TAURI.core.invoke("upload", { name: file.name, data: [...bytes] });
+      path = await DESKTOP.core.invoke("upload", { name: file.name, data: [...bytes] });
     } else {
       const reply = await fetch(`/upload?t=${encodeURIComponent(TOKEN)}`, {
         method: "POST",
@@ -2812,8 +2811,8 @@ function send(msg) {
     return false;
   }
   const line = JSON.stringify(msg);
-  if (TAURI) {
-    TAURI.core.invoke("send", { line }).catch(() => {
+  if (DESKTOP) {
+    DESKTOP.core.invoke("send", { line }).catch(() => {
       online = false;
       sayOnce("off", "agent 断了");
     });
@@ -2824,11 +2823,21 @@ function send(msg) {
 }
 
 function connect() {
-  if (TAURI) {
+  if (DESKTOP) {
     // 桌面：进程内通道，没有端口、没有令牌、没有 Origin 那一套
-    TAURI.event.listen("feiyu://event", (e) => inbound(e.payload));
-    TAURI.core.invoke("where_am_i").then(setDesk);
-    hello();
+    DESKTOP.event.listen("feiyu://event", (e) => inbound(e.payload));
+    if (window.feiyuDesktop) {
+      const reconnect = () => DESKTOP.core.invoke("connect").then(path => { setDesk(path); hello(); })
+        .catch(error => { online = false; sayOnce("off", String(error).slice(0, 100)); });
+      DESKTOP.event.listen("feiyu://state", e => {
+        if (e.payload.state === "error") { online = false; sayOnce("off", "Agent 已断开"); }
+      });
+      document.addEventListener("feiyu:reconnect", reconnect);
+      reconnect();
+    } else {
+      DESKTOP.core.invoke("where_am_i").then(setDesk);
+      hello();
+    }
     return;
   }
   // 开发：连 feiyu-devserver，好让 headless Chrome 那套夹具还能跑
@@ -3301,7 +3310,7 @@ streamEl.addEventListener("click", async (e) => {
   const link = e.target.closest("a[href]");
   if (link) {
     e.preventDefault();
-    TAURI.core.invoke("open_url", { url: link.href }).catch(() => {});
+    DESKTOP.core.invoke("open_url", { url: link.href }).catch(() => {});
     return;
   }
 
@@ -3453,8 +3462,8 @@ document.addEventListener("pointerdown", () => { if (away) { away = false; sawAl
 const LONG_TURN = 10;       // 秒。NN/g：过了 10 秒，人的注意力就不在这个对话上了
 
 function notifyUser(title, body) {
-  if (!TAURI) return;
-  TAURI.core.invoke("notify", { title, body }).catch(() => { /* 叫不出来不耽误别的 */ });
+  if (!DESKTOP) return;
+  DESKTOP.core.invoke("notify", { title, body }).catch(() => { /* 叫不出来不耽误别的 */ });
 }
 
 /* ── 空对话时输入框在正中（Anthropic 那套皮） ─────────────────

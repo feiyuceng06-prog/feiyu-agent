@@ -811,7 +811,7 @@ def _save_trap(pwd_file: str, state: str) -> str:
     """
     return (
         "__feiyu_save() {\n"
-        "  pwd > %s 2>/dev/null\n"
+        "  %s > %%s 2>/dev/null\n" % ("pwd -W" if os.name == "nt" else "pwd") +
         "  ( unset -v %s 2>/dev/null; unset -f __feiyu_save 2>/dev/null;"
         " export -p; declare -f ) > %s 2>/dev/null"
         " && echo %s >> %s 2>/dev/null\n"
@@ -1857,7 +1857,9 @@ class Toolbox:
         if not target.is_file():
             return None
         if not self.files.seen(target):
-            if _looks_binary(target.read_bytes()):
+            with target.open("rb") as source:
+                binary = _looks_binary(source.read(4096))
+            if binary:
                 return None      # 读都读不了的格式，没法要求它先读
             return ToolResult(
                 f"{shown} 已经存在，但你这次会话里还没读过它 "
@@ -2551,22 +2553,25 @@ class Toolbox:
             return ToolResult("语言服务器出错：%s 退回用 search 找 " % exc,
                               is_error=True, summary="语言服务器出错")
         rows = []
-        for hit in spots:
+        capped = len(spots) > lsp.MAX_RESULTS
+        file_lines = {}
+        for hit in spots[:lsp.MAX_RESULTS]:
             path = hit["path"]
             try:
                 rel = path.relative_to(self.root)
             except ValueError:
                 rel = path      # 标准库、依赖里的定义，照样报出来
             try:
-                line_text = path.read_text(encoding="utf-8", errors="replace").splitlines()[hit["line"]]
+                if path not in file_lines:
+                    file_lines[path] = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                line_text = file_lines[path][hit["line"]]
             except (OSError, IndexError):
+                file_lines.setdefault(path, [])
                 line_text = ""
             rows.append(f"{rel}:{hit['line'] + 1}:{line_text}")
         if not rows:
             return ToolResult("语言服务器没找到 可能它还没分析完这个项目，或者这个名字它认不出来；"
                               "退回用 search 试试 ", summary="没找到")
-        capped = len(rows) > lsp.MAX_RESULTS
-        rows = rows[:lsp.MAX_RESULTS]
         label = "定义" if action == "definition" else "引用"
         body = "\n".join(rows)
         if capped:
@@ -2660,7 +2665,12 @@ class Toolbox:
         """没有 rg 时的兜底：纯 Python 逐行扫 141M 的仓库要 0.8 秒，rg 只要 6 毫秒 """
         rx = re.compile(regex)
         hits: list[str] = []
-        for path in self.root.glob(glob or "**/*"):
+        def all_files():
+            for directory, dirs, names in os.walk(self.root):
+                dirs[:] = [name for name in dirs if name not in files.IGNORE_DIRS]
+                for name in names:
+                    yield Path(directory) / name
+        for path in (self.root.glob(glob) if glob else all_files()):
             if not path.is_file():
                 continue
             if any(part in files.IGNORE_DIRS for part in path.relative_to(self.root).parts):

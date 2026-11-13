@@ -47,6 +47,11 @@ class TestVersionSync(unittest.TestCase):
         got = _re.search(r'name = "feiyu-desktop"\nversion = "([^"]+)"', lock)
         self.assertEqual(got and got.group(1), __version__, "desktop/Cargo.lock")
 
+        # Electron 那份：electron-builder 拿它命名安装包（Feiyu-<版本>.AppImage）
+        for name in ("package.json", "package-lock.json"):
+            pkg = _json.loads((root / "desktop" / name).read_text(encoding="utf-8"))
+            self.assertEqual(pkg.get("version"), __version__, "desktop/" + name)
+
 
 class TestArgs(unittest.TestCase):
     def test_version(self):

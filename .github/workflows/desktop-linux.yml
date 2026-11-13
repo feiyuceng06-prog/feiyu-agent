@@ -1,0 +1,45 @@
+name: Build Linux desktop
+on:
+  workflow_dispatch:
+  push:
+    tags: ['desktop-v*']
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgtk-3-0 libnss3 libasound2 libgbm1 libxss1 libsecret-1-0 xvfb
+      - run: npm ci
+        working-directory: desktop
+      - run: npm test
+        working-directory: desktop
+      - run: python3 scripts/build_backend.py
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop
+      - run: xvfb-run -a npm run test:desktop
+        working-directory: desktop
+      - run: npm run dist:linux
+        working-directory: desktop
+      - name: Test packaged application
+        working-directory: desktop
+        run: FEIYU_TEST_EXECUTABLE="$PWD/release/linux-unpacked/feiyu-desktop" xvfb-run -a npm run test:desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feiyu-linux-x64
+          path: |
+            desktop/release/*.deb
+            desktop/release/*.AppImage
+            desktop/test-results/workbench.png

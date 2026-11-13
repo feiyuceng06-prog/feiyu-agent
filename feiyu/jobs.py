@@ -1,7 +1,10 @@
 """后台跑的 bash 命令 构建、dev server、跑一整套测试不该把整轮 turn 卡住 """
 
+import codecs
+import io
 import os
 import signal
+import subprocess
 import threading
 import time
 from collections import deque
@@ -29,13 +32,12 @@ class Job:
 
     def _drain(self) -> None:
         try:
-            for line in self.proc.stdout:
-                with self._lock:
-                    self._chunks.append(line)
-                    self._size += len(line)
-                    while self._size > MAX_CHARS and len(self._chunks) > 1:
-                        self._size -= len(self._chunks.popleft())
-                        self._dropped = True
+            stream = self.proc.stdout
+            decoder = io.IncrementalNewlineDecoder(
+                codecs.getincrementaldecoder(stream.encoding)(errors=stream.errors), True)
+            while chunk := stream.buffer.read1(8192):
+                self._append(decoder.decode(chunk))
+            self._append(decoder.decode(b"", final=True))
         except (ValueError, OSError):
             pass        # 被 kill 掉时管道会在读到一半时关掉
         finally:
@@ -44,6 +46,21 @@ class Job:
                 self.proc.wait()
             except OSError:
                 pass
+
+    def _append(self, text: str) -> None:
+        if text:
+            with self._lock:
+                self._chunks.append(text)
+                self._size += len(text)
+                while self._size > MAX_CHARS:
+                    excess = self._size - MAX_CHARS
+                    first = self._chunks.popleft()
+                    if len(first) > excess:
+                        self._chunks.appendleft(first[excess:])
+                        self._size -= excess
+                    else:
+                        self._size -= len(first)
+                    self._dropped = True
 
     def take(self) -> tuple[str, bool]:
         """取走还没读过的输出，顺带说有没有丢过
@@ -77,6 +94,10 @@ class Job:
         """杀掉整个进程组 只杀 pid 的话 `npm run dev` 底下那个 node 会活下来 """
         if not self.running:
             return False
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return True
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(os.getpgid(self.proc.pid), sig)

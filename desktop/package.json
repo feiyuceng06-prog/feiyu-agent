@@ -1,0 +1,89 @@
+{
+  "name": "feiyu-desktop",
+  "version": "0.80.3",
+  "description": "Feiyu agent desktop workbench",
+  "author": {
+    "name": "Feiyu",
+    "email": "feiyuceng06@gmail.com"
+  },
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "dev": "npm run start",
+    "test": "node --test tests/*.test.mjs",
+    "test:desktop": "node tests/smoke.mjs",
+    "payload": "python3 scripts/build_backend.py",
+    "pack": "npm run build && electron-builder --dir",
+    "dist:linux": "npm run build && electron-builder --linux deb AppImage",
+    "postinstall": "electron-builder install-app-deps",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:mac": "npm run build && electron-builder --mac dmg"
+  },
+  "build": {
+    "appId": "com.feiyuz.feiyu",
+    "productName": "Feiyu",
+    "executableName": "feiyu-desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**",
+      "dist/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ],
+    "extraResources": [
+      {
+        "from": "build/backend",
+        "to": "backend"
+      }
+    ],
+    "linux": {
+      "target": [
+        "deb",
+        "AppImage"
+      ],
+      "category": "Development",
+      "icon": "icons/256.png",
+      "syncDesktopName": true
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0 | libgtk-3-0t64",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "libatspi2.0-0 | libatspi2.0-0t64",
+        "libuuid1",
+        "libsecret-1-0",
+        "libasound2 | libasound2t64"
+      ]
+    }
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "electron": "^45.3.1",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true,
+    "esbuild@0.28.2": true
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "homepage": "https://github.com/feiyuceng06-prog/feiyu-agent",
+  "desktopName": "feiyu.desktop"
+}

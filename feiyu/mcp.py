@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 import re
-import select
 import subprocess
 import threading
 import time
@@ -192,6 +191,8 @@ class _Stdio:
                 stderr=subprocess.DEVNULL, cwd=cwd, env=merged, start_new_session=True)
         except OSError as exc:
             raise RuntimeError("起不来：%s" % exc) from exc
+        from .pipe import PipeReader
+        self.reader = PipeReader(self.proc.stdout)
         self.buf = b""
 
     @property
@@ -211,14 +212,7 @@ class _Stdio:
             raise RuntimeError("服务器 %s 的管道断了：%s" % (self.name, exc)) from exc
 
     def _fill(self, deadline: float) -> bool:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return False
-        fd = self.proc.stdout.fileno()
-        ready, _, _ = select.select([fd], [], [], left)
-        if not ready:
-            return False
-        chunk = os.read(fd, 65536)
+        chunk = self.reader.read(deadline)
         if not chunk:
             return False
         self.buf += chunk
@@ -240,13 +234,20 @@ class _Stdio:
 
     def close(self) -> None:
         proc = self.proc
+        self.reader.close()
+        if os.name == "nt" and proc.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         if proc.poll() is None:
             try:
-                os.killpg(proc.pid, 15)
+                if os.name == "nt":
+                    proc.kill()
+                else:
+                    os.killpg(proc.pid, 15)
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, 9)
+                    proc.kill() if os.name == "nt" else os.killpg(proc.pid, 9)
                     proc.wait(timeout=2)
             except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
                 pass

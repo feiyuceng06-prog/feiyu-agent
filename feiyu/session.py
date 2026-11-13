@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 
 from . import files
@@ -161,9 +162,14 @@ def save(workspace, agent, sid: str | None = None) -> None:
         # 于是那一行永远赖在侧栏上，点多少次「删掉」都只是回一句「删掉了」。
         path = (_legacy_path(workspace) if not sid or sid == LEGACY
                 else _path(workspace, sid))
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        fd, temporary = tempfile.mkstemp(prefix=".feiyu-session-", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     except (OSError, TypeError, ValueError):
         return
     _write_card(path, data)

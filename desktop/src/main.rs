@@ -55,7 +55,7 @@ fn feiyu_bin() -> String {
     }
     if let Ok(exe) = std::env::current_exe() {
         for base in exe.ancestors().skip(1).take(6) {
-            let candidate = base.join(".venv/bin/feiyu");
+            let candidate = base.join(if cfg!(windows) { ".venv/Scripts/feiyu.exe" } else { ".venv/bin/feiyu" });
             if candidate.is_file() {
                 return candidate.to_string_lossy().into_owned();
             }
@@ -179,8 +179,13 @@ fn open_url(url: String) -> Result<(), String> {
         return Err("只开 http/https 的链接".into());
     }
     // 这个桌面端只在 Linux 上跑（打包脚本也只出 Linux 的包），不做 macOS/Windows 分叉。
-    let child = std::process::Command::new("xdg-open")
-        .arg(&url)
+    #[cfg(target_os = "windows")]
+    let mut command = { let mut c = std::process::Command::new("rundll32.exe"); c.arg("url.dll,FileProtocolHandler"); c };
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    let child = command.arg(&url)
         .spawn()
         .map_err(|e| format!("开不了：{e}"))?;
     reap(child);
@@ -366,7 +371,7 @@ fn start_agent(
     // `--own-window`：**只有这个二进制会传。** 它是"前后端之间没有网络"的凭据 ——
     // 桌面端走 invoke/emit 的进程内通道，外面够不着；而 devserver 是听在回环上的，
     // 同机任何进程都能连。写密钥那条路只对前者开（见 serve.Server.trusted）。
-    cmd.arg("--serve").arg("--own-window").arg("-w").arg(workspace);
+    cmd.env("PYTHONUTF8", "1").arg("--serve").arg("--own-window").arg("-w").arg(workspace);
     if let Some(model) = model {
         cmd.arg("-m").arg(model);
     }

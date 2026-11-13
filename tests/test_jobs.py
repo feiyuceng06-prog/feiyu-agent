@@ -60,6 +60,26 @@ class TestStart(Base):
 
 
 class TestOutput(Base):
+    def test_无换行输出在进程运行时可读(self):
+        job = self.start("printf ready; sleep 3")
+        pieces = []
+        def received():
+            pieces.append(job.take()[0])
+            return "ready" in "".join(pieces)
+        self.assertTrue(wait(received, limit=2))
+        self.assertTrue(job.running)
+
+    def test_超长单行也受限并保留末尾(self):
+        self.addCleanup(setattr, jobs_mod, "MAX_CHARS", jobs_mod.MAX_CHARS)
+        jobs_mod.MAX_CHARS = 200
+        job = self.start("head -c 100000 /dev/zero | tr '\\0' x; printf END")
+        self.assertTrue(wait(lambda: not job.running))
+        self.assertTrue(wait(lambda: job.proc.stdout.closed))
+        text, dropped = job.take()
+        self.assertTrue(dropped)
+        self.assertEqual(len(text), 200)
+        self.assertTrue(text.endswith("END"))
+
     def test_读过的不再重复给(self):
         job = self.start("echo 第一段")
         self.assertTrue(wait(lambda: not job.running))

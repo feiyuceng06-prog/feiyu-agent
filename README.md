@@ -10,11 +10,31 @@ About 4,800 lines of Python, no framework, three dependencies: `anthropic`, `pil
 
 ## Install
 
+### Ubuntu one-command CLI install
+
+```bash
+wget -qO- https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/bootstrap-ubuntu.sh | bash
+```
+
+Requires network access and `wget`. The installer checks for Python 3.10+ and venv, installing missing system packages with `sudo apt-get` when necessary. It installs the program and dependencies in your user directory and starts Feiyu in an interactive terminal. Enter `/key add` to configure a model. Later, run `~/.local/bin/feiyu`, or `feiyu` if `~/.local/bin` is on your PATH. Run the command again to install the current main branch; previous version directories and model configurations are retained.
+
+### Install from source
+
 ```
 git clone https://github.com/feiyuceng06-prog/feiyu-agent.git && cd feiyu-agent && ./install.sh
 ```
 
-The script creates a virtualenv, installs the dependencies and puts a `feiyu` command in `~/.local/bin`. Needs Python 3.10 or newer. Run it again after pulling new code.
+By default the script creates a CLI virtualenv in the checkout, installs dependencies and puts `feiyu` in `~/.local/bin`. It needs Python 3.10 or newer and a network connection; on Debian/Ubuntu install `python3-venv` if needed. Keep the checkout in place for the CLI and rerun the script after updating it. The script does not run sudo or modify shell configuration.
+
+```bash
+./install.sh --cli-only           # skip the desktop build
+./install.sh --desktop            # install only the desktop app
+./install.sh --all                # install both separately
+./install.sh --python /path/to/python3  # Python to use for a new virtualenv
+./install.sh --help
+```
+
+By default only the CLI is installed. The desktop app has its own installed application and Python environment; it does not require the CLI or the checkout after installation, and bundles its Python backend. It needs desktop system libraries, but not system Python or WebKitGTK. Open it from the application menu and configure a model in its settings. A failed desktop rebuild preserves the existing desktop launcher. If the CLI is not on PATH, the script explains how to add it; you can also run `~/.local/bin/feiyu` directly.
 
 Then add a model: run `feiyu`, type `/key add`, and fill in the API base URL, model id and key. See [Models](#models).
 
@@ -33,8 +53,7 @@ sudo pacman -S bubblewrap ripgrep      # Debian/Ubuntu: apt install bubblewrap r
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[openai]"
-printf '#!/usr/bin/env bash\nexec %s/.venv/bin/feiyu "$@"\n' "$PWD" > ~/.local/bin/feiyu
-chmod +x ~/.local/bin/feiyu
+feiyu
 ```
 
 `[openai]` pulls in the `openai` package, which DeepSeek, Kimi and other OpenAI-compatible APIs use. For Claude only, `pip install -e .` is enough.
@@ -436,13 +455,15 @@ Code blocks are line-numbered with a copy button, the numbers living outside the
 
 The component inventory and the motion recipes are informed by [Beautiful UI](https://www.beautifului.dev/) and [beUI](https://beui.dev/) — the shapes and the timing, not the skin: this window stays white paper, square corners and flat, and every animation is off under `prefers-reduced-motion`.
 
-Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown as a diff or the literal command and nothing runs until you approve. Slash commands, skills and `esc` to interrupt all work. Key management stays in the terminal (`/key add` inside `feiyu`); the desktop app cannot even read them.
+Same agent, same permissions, same session file as the terminal — only the surface changes. Edits and commands are shown as a diff or the literal command and nothing runs until you approve. Slash commands, skills and `esc` to interrupt all work. Manage models in Desktop Settings; saved API keys are never returned to the renderer.
 
-Under the hood it is a Tauri window supervising a `feiyu --serve` child process, one JSON object per line between them. **It listens on no port** — the front end and the agent talk over an in-process channel that nothing outside can reach.
+Under the hood it is an Electron window supervising a `feiyu --serve` child process, one JSON object per line between them. **It listens on no port** — the front end and the agent talk over an in-process channel that nothing outside can reach.
 
-The information architecture follows [Hermes Desktop](https://github.com/NousResearch/hermes-agent)'s `DESIGN.md` (MIT); the palette, type and spacing are [feiyuz123.com](https://feiyuz123.com)'s. No framework, no npm dependencies.
+The information architecture follows [Hermes Desktop](https://github.com/NousResearch/hermes-agent)'s `DESIGN.md` (MIT); the palette, type and spacing are [feiyuz123.com](https://feiyuz123.com)'s. The chat renderer retains its existing implementation; Electron and the React workbench use the dependencies locked under `desktop/`.
 
-The desktop app needs `cargo` and `webkit2gtk`. It is optional in `install.sh`: without them the step is skipped and the terminal version is unaffected.
+The default desktop is now Electron, with a React file/preview workbench and the existing chat/settings renderer. The main process owns native capabilities and the Python subprocess; a narrow, isolated preload bridge carries the existing JSON protocol. Agent behavior and approval flows remain in Python. Browse and preview workspace files with `Ctrl Shift E`; use the independent PTY terminal with Ctrl + backtick.
+
+Source builds require Node.js 22+, npm, Python 3.10+, and native C/C++ build tools. Run `./install.sh --desktop`; PyInstaller stages a standalone backend and electron-builder packages the app. Installed applications do not need the source checkout, Node.js, or system Python. See [desktop/README.md](desktop/README.md) for development, packaging, tests, and architecture. The old Tauri sources remain as a compatibility implementation. Linux release builds target Ubuntu 22.04; packages built on a newer distribution are not guaranteed to run on older Ubuntu versions.
 
 ## Skills and custom commands
 
@@ -631,7 +652,7 @@ So: use it on projects you trust and keep under git, where a bad edit is easy to
 
 ## Platforms
 
-Linux and macOS fully; the bash sandbox is Linux only. Windows works inside WSL only.
+The Python agent supports Linux and macOS; its bash sandbox is Linux-only. The Electron desktop is validated on Linux first. macOS and Windows build commands exist but require platform testing. For Windows development, install Python 3.10+, Node.js 22+, MSVC build tools and Git for Windows, then run `./install-windows.ps1`; the app is built under `desktop/release/win-unpacked/`.
 
 ## Tests
 

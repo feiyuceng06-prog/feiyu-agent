@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from feiyu import lsp
@@ -32,6 +33,34 @@ class TestNoServer(unittest.TestCase):
             out = Toolbox(root).run("symbol", {"action": "definition", "path": "x.zig", "name": "x"})
         self.assertTrue(out.is_error)
         self.assertIn("search", out.content)
+
+    def test_引用结果只读显示范围内的文件且每份只读一次(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.py"
+            result = root / "result.py"
+            ignored = root / "ignored.py"
+            source.write_text("needle\n", encoding="utf-8")
+            result.write_text("found\n", encoding="utf-8")
+            class Client:
+                def open(self, *args): pass
+                def locate(self, *args):
+                    return ([{"path": result, "line": 0}] * lsp.MAX_RESULTS +
+                            [{"path": ignored, "line": 0}])
+            box = Toolbox(root)
+            reads = []
+            original = Path.read_text
+            def read(path, *args, **kwargs):
+                reads.append(path)
+                return original(path, *args, **kwargs)
+            with patch.object(lsp, "server_for", return_value=["fake"]), \
+                 patch.object(box.lsp, "get", return_value=Client()), \
+                 patch.object(Path, "read_text", read):
+                out = box.run("symbol", {"action": "references", "path": "source.py", "name": "needle"})
+            self.assertFalse(out.is_error, out.content)
+            self.assertEqual(reads.count(result), 1)
+            self.assertNotIn(ignored, reads)
+            self.assertIn("还有更多", out.content)
 
 
 @有pyright

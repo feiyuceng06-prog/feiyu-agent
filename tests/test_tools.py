@@ -943,6 +943,20 @@ class TestSearchOptions(Base):
         tools._shutil.which = lambda name: None
         self.addCleanup(setattr, tools._shutil, "which", real)
 
+    def test_兜底搜索不进入忽略目录(self):
+        from unittest.mock import patch
+        self.write("node_modules/deep/hidden.txt", "目标\n")
+        self.write("source/visible.txt", "目标\n")
+        scanned = []
+        real_scandir = os.scandir
+        def scandir(path):
+            scanned.append(Path(path))
+            return real_scandir(path)
+        with patch.object(tools.os, "scandir", side_effect=scandir):
+            hits, _ = self.box._scan("目标", "")
+        self.assertEqual(len(hits), 1)
+        self.assertFalse(any("node_modules" in path.parts for path in scanned))
+
     def both_paths(self):
         yield "rg"
         self.no_rg()

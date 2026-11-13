@@ -7,12 +7,12 @@ definition / references 两个请求，stdio JSON-RPC，不引依赖
 
 import json
 import os
-import select
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
+from .pipe import PipeReader
 
 # 按扩展名选服务器 这是工具表不是模型表：这几个的命令行多年没变过
 SERVERS = {
@@ -68,8 +68,9 @@ def _uri(path: Path) -> str:
 
 
 def _path(uri: str) -> Path:
-    from urllib.parse import unquote, urlparse
-    return Path(unquote(urlparse(uri).path))
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname
+    return Path(url2pathname(urlparse(uri).path))
 
 
 class Client:
@@ -81,6 +82,7 @@ class Client:
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             cwd=root, start_new_session=True)
+        self.reader = PipeReader(self.proc.stdout)
         self.lock = threading.Lock()
         self.buf = b""
         self.seq = 0
@@ -120,14 +122,7 @@ class Client:
             return {}
 
     def _fill(self, deadline: float) -> bool:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return False
-        fd = self.proc.stdout.fileno()
-        ready, _, _ = select.select([fd], [], [], left)
-        if not ready:
-            return False
-        chunk = os.read(fd, 65536)
+        chunk = self.reader.read(deadline)
         if not chunk:
             return False
         self.buf += chunk
@@ -274,6 +269,8 @@ class Client:
         return out
 
     def close(self) -> None:
+        if hasattr(self, "reader"):
+            self.reader.close()
         try:
             self.proc.kill()
         except OSError:

@@ -6,6 +6,7 @@ import stat
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from feiyu import keys as keys_mod
@@ -65,6 +66,19 @@ class TestRoundTrip(Base):
         self.assertEqual(data["tokens_total"], 500)
         self.assertEqual(data["cost"], 1.25)
         self.assertEqual(len(data["messages"]), 3)
+
+    def test_写到一半失败保留上次存盘(self):
+        agent = Agentish(self.make())
+        session.save(self.ws, agent, "one")
+        original = Path(session._path(self.ws, "one")).read_bytes()
+        def fail(data, stream, **kwargs):
+            stream.write('{"partial":')
+            raise OSError("disk full")
+        with patch.object(session.json, "dump", side_effect=fail):
+            session.save(self.ws, agent, "one")
+        self.assertEqual(Path(session._path(self.ws, "one")).read_bytes(), original)
+        self.assertEqual(session.load(self.ws, "one")["model"], "fake")
+        self.assertFalse(list(Path(session.folder(self.ws)).glob(".feiyu-session-*")))
 
     def test_权限是_600(self):
         session.save(self.ws, Agentish(self.make()))

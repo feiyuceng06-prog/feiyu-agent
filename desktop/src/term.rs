@@ -55,11 +55,15 @@ pub fn term_start(
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let shell = if cfg!(windows) {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    };
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(&cwd);
     // 交互式：不然 zsh/bash 不读 rc、没有提示符，看着像卡住了
-    cmd.args(["-i"]);
+    if !cfg!(windows) { cmd.args(["-i"]); }
     // 有些提示符会按 TERM 决定画不画颜色
     cmd.env("TERM", "xterm-256color");
 

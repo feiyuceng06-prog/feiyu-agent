@@ -10,11 +10,31 @@
 
 ## 安装
 
+### Ubuntu 一键安装命令行版
+
+```bash
+wget -qO- https://raw.githubusercontent.com/feiyuceng06-prog/feiyu-agent/main/bootstrap-ubuntu.sh | bash
+```
+
+需要网络和 `wget`。脚本会检查 Python 3.10+ 和 venv；缺少时通过 `sudo apt-get` 安装，可能要求输入密码。程序和依赖安装在用户目录，交互式终端中安装后自动启动，在程序里输入 `/key add` 配置模型。之后运行 `~/.local/bin/feiyu`；若 `~/.local/bin` 已在 PATH，也可以直接运行 `feiyu`。重新执行该命令可安装当前主分支版本，旧版本目录不会自动删除，模型和密钥配置会保留。
+
+### 从源码安装
+
 ```
 git clone https://github.com/feiyuceng06-prog/feiyu-agent.git && cd feiyu-agent && ./install.sh
 ```
 
-脚本会建虚拟环境、装依赖，并往 `~/.local/bin` 放一个 `feiyu` 命令。需要 Python 3.10 以上。升级代码后再跑一次即可。
+默认脚本会在源码目录建立命令行版的虚拟环境、安装依赖，并在 `~/.local/bin` 创建 `feiyu`。需要 Python 3.10 以上和网络连接；Debian/Ubuntu 如缺少 venv，先运行 `sudo apt install python3-venv`。命令行版需要保留源码目录；更新代码后重新运行脚本即可。脚本不会自动使用 sudo 或修改 shell 配置。
+
+```bash
+./install.sh --cli-only           # 只装命令行，跳过桌面编译
+./install.sh --desktop            # 只安装桌面版，不安装终端命令
+./install.sh --all                # 分别安装两个版本
+./install.sh --python /path/to/python3  # 建虚拟环境时指定 Python
+./install.sh --help
+```
+
+默认只安装命令行版。桌面版拥有单独的程序和 Python 环境，安装后可以删除源码目录，无需先安装终端版；Electron 安装包携带 Python 后端，不需要系统 Python 或 WebKitGTK；仍需系统的桌面运行库。桌面版从应用列表打开并在设置中配置模型。重新安装时若桌面构建失败，已有桌面启动器会保留。若终端命令不在 PATH，脚本会给出设置方法，也可直接运行 `~/.local/bin/feiyu`。
 
 装完先加一个模型：运行 `feiyu`，输入 `/key add`，填接口地址、模型 id 和密钥。细节见[模型](#模型)一节。
 
@@ -33,8 +53,7 @@ sudo pacman -S bubblewrap ripgrep      # Debian/Ubuntu: apt install bubblewrap r
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[openai]"
-printf '#!/usr/bin/env bash\nexec %s/.venv/bin/feiyu "$@"\n' "$PWD" > ~/.local/bin/feiyu
-chmod +x ~/.local/bin/feiyu
+feiyu
 ```
 
 `[openai]` 装的是 `openai` 包，DeepSeek、Kimi 和其他 OpenAI 兼容接口都靠它。只用 Claude 的话 `pip install -e .` 就够。
@@ -407,13 +426,15 @@ style: concise
 
 组件的清单和动效的手感参考了 [Beautiful UI](https://www.beautifului.dev/) 和 [beUI](https://beui.dev/)——借的是形态和节奏，不是皮：这扇窗照旧白纸、直角、不套卡片，而且 `prefers-reduced-motion` 一开所有动效全关。
 
-跟终端版是同一个 agent、同一套权限、同一份会话存盘——只是画面换成了窗口。要改文件、跑命令时在页面上画出 diff 和命令原文，点了同意才动手。斜杠命令、技能、`esc` 中断都在。密钥的增删只在终端做（`feiyu` 里 `/key add`），桌面端连读都不给。
+跟终端版是同一个 agent、同一套权限、同一份会话存盘——只是画面换成了窗口。要改文件、跑命令时在页面上画出 diff 和命令原文，点了同意才动手。斜杠命令、技能、`esc` 中断都在。模型配置可以在桌面「设置 → 通用 → 模型」里管理，已保存的密钥不会回传给界面。
 
-实现上是一个 Tauri 窗口，底下监管一个 `feiyu --serve` 子进程，两边一行一个 JSON。**它不监听任何端口**——前端和 agent 之间走进程内通道，外面够不着。
+实现上是 **Electron 主进程 + React 工作台面板 + Python agent 子进程**。Electron 管理窗口、文件、终端和 agent 生命周期；聊天与设置沿用现有界面，通过受限 preload 桥接传输逐行 JSON。默认不监听网络端口，模型调用和权限确认仍由原来的 Python agent 处理。
 
-界面的信息架构参考了 [Hermes Desktop](https://github.com/NousResearch/hermes-agent)（MIT）的 `DESIGN.md`；配色、字体、间距是 [feiyuz123.com](https://feiyuz123.com) 那一套。没有框架，没有 npm 依赖。
+右侧「文件」面板支持目录浏览、文件名筛选、多标签文本/代码和图片预览；`Ctrl Shift E` 收起或展开。文件预览只读，限制在当前工作区内。底部终端是独立 PTY，`Ctrl \`` 切换；它不会替代 agent 的命令审批流程。
 
-桌面端要 `cargo` 和 `webkit2gtk`。`install.sh` 里是可选的：没有就跳过，终端版照常。
+开发和构建说明见 [desktop/README.md](desktop/README.md)。源码安装桌面端需要 Node.js 22+、npm、Python 3.10+ 和本地 C/C++ 构建工具，运行 `./install.sh --desktop`。该流程用 PyInstaller 准备独立 Python 后端，再用 electron-builder 打包。安装后的应用不需要源码、Node.js 或系统 Python。
+
+旧的 Tauri/Rust 目录保留供兼容与对照，默认桌面安装已改用 Electron。Linux 发布构建工作流运行在 Ubuntu 22.04，生成 `.deb` 和 AppImage；本机在更新发行版上构建的包不保证兼容旧 Ubuntu。
 
 ## 技能和自定义命令
 
@@ -579,7 +600,7 @@ stdout 里只有 JSON，界面和日志全走 stderr。不合 schema 会让它�
 
 ## 平台
 
-Linux 和 macOS 完整可用，bash 沙箱只在 Linux 上。Windows 只在 WSL 里可用。
+Python agent 支持 Linux 和 macOS；bash 沙箱只在 Linux 上。Electron 桌面优先验证 Linux；macOS/Windows 构建入口已提供，但仍需对应平台实机验证。Windows 开发需 Python 3.10+、Node.js 22+、MSVC 构建工具和 Git for Windows，运行 `./install-windows.ps1`，产物位于 `desktop/release/win-unpacked/`。
 
 ## 测试
 

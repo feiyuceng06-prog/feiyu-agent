@@ -1,0 +1,40 @@
+body[data-electron] .bar, body[data-electron] .bar__drag { -webkit-app-region: drag; }
+body[data-electron] .bar button, body[data-electron] .bar label { -webkit-app-region: no-drag; }
+body[data-electron] .grips { display: none; }
+#workbench { display: contents; }
+body[data-files="on"] { grid-template-columns: var(--side) minmax(340px, 1fr) minmax(300px, 32vw); }
+.files-panel { grid-column: 3; grid-row: 2 / 5; min-height: 0; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg); }
+.files-panel[hidden] { display: none; }
+.files-head, .files-location, .preview-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.files-head { font-size: 12px; letter-spacing: .03em; }
+.files-head button, .files-location button, .file-tab button { background: transparent; border: 0; color: var(--text); padding: 4px 8px; cursor: pointer; }
+.files-panel button:hover { background: var(--panel); }
+.files-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.files-location { justify-content: flex-start; font: 11px var(--font-mono); color: var(--muted); }
+.files-location span, .preview-footer span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-location button:disabled { opacity: .3; cursor: default; }
+.files-filter { margin: 10px 16px; padding: 7px 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: 12px var(--font-sans); }
+.files-list { flex: 0 1 28%; min-height: 100px; overflow: auto; padding: 0 8px 12px; }
+.file-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 5px 10px; text-align: left; color: var(--text); background: transparent; border: 0; font: 12px/22px var(--font-mono); cursor: pointer; }
+.file-row > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row[data-selected="true"] { background: var(--panel); }
+.file-kind { width: 12px; color: var(--muted); flex-shrink: 0; }
+.files-empty { padding: 16px; color: var(--muted); font-size: 12px; }
+.file-tabs { display: flex; overflow-x: auto; min-height: 34px; border-block: 1px solid var(--line); background: var(--code-bg); flex-shrink: 0; }
+.file-tab { display: flex; max-width: 200px; flex-shrink: 0; border-right: 1px solid var(--line); border-top: 2px solid transparent; }
+.file-tab[data-active="true"] { background: var(--bg); border-top-color: var(--accent); }
+.file-tab button { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-preview { min-height: 0; flex: 1; overflow: auto; }
+.file-preview pre { margin: 0; padding: 16px; background: transparent; color: var(--text); font: 12px/1.8 var(--font-mono); white-space: pre; }
+.file-preview img { display: block; max-width: 100%; height: auto; margin: auto; padding: 16px; }
+.preview-empty { display: flex; height: 100%; min-height: 140px; align-items: center; justify-content: center; flex-direction: column; color: var(--muted); font-size: 12px; }
+.preview-empty > span { font-size: 32px; color: var(--faint); margin-bottom: 16px; }
+.preview-empty small { color: var(--faint); }
+.preview-footer { border-top: 1px solid var(--line); border-bottom: 0; font: 10px var(--font-mono); color: var(--muted); }
+.preview-footer span:last-child { flex-shrink: 0; }
+.backend-error { position: fixed; z-index: 10000; top: 46px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; max-width: 85vw; background: var(--bg); color: var(--alert); border: 1px solid var(--alert); padding: 12px 20px; font-size: 13px; }
+.backend-error button { white-space: nowrap; background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 6px 12px; cursor: pointer; }
+@media (max-width: 1100px) {
+  body[data-files="on"] { grid-template-columns: var(--side) minmax(0, 1fr); }
+  .files-panel { position: fixed; z-index: 50; top: var(--bar); right: 0; bottom: var(--bar-s); width: min(440px, 65vw); box-shadow: -16px 0 32px #0001; }
+}

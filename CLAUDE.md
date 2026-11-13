@@ -1,7 +1,7 @@
 # Feiyu Agent — 给 Claude 的项目约定
 
 跑在终端里的编程 agent。约 14900 行 Python，无框架。
-另有一个桌面端（`desktop/`，Tauri + 原生前端），入口是 `feiyu-desktop`。
+另有一个桌面端（`desktop/`，0.80.3 起是 Electron + 原生前端，旧 Tauri 源码还留着），入口是 `feiyu-desktop`。
 
 verify: .venv/bin/python -m unittest discover -s tests -t .
 
@@ -27,7 +27,9 @@ verify: .venv/bin/python -m unittest discover -s tests -t .
 | `feiyu/profiles.py` | 配置档案（人格）：一份 .md 一套人格，拼进系统提示 |
 | `feiyu/events.py` | 结构化事件的 sink：ui 除了画终端，还能把同一件事报给别的前端 |
 | `feiyu/serve.py` | `--serve`：把 agent 挂在 stdio 上说行 JSON，给网页端用 |
-| `desktop/src/main.rs` | feiyu-desktop：Tauri 窗口，监管一个 `feiyu --serve`，走 invoke / emit |
+| `desktop/electron/` | feiyu-desktop（0.80.3 起）：Electron 主进程监管 `feiyu --serve`，preload 只暴露白名单 invoke / listen；文件读取和 pty 也在这儿 |
+| `desktop/renderer/` | React 文件树 / 预览面板（`Ctrl Shift E`）；聊天界面仍是 `desktop/ui/app.js`，`scripts/build.mjs` 拼进 `dist/` |
+| `desktop/src/main.rs` | 旧 Tauri 窗口，留作兼容，安装和打包已不走它 |
 | `desktop/src/pathguard.rs` | 外面给的路径必须落在工作区里，两个二进制共用一份 |
 | `desktop/src/devserver.rs` | **只给测试用**的静态服务（Tauri 没 CDP，夹具接不上去），不是产品 |
 | `desktop/ui/` | 前端（index.html / app.css / app.js / logo.svg），无框架无依赖 |
@@ -4761,3 +4763,30 @@ nano-banana-pro $0.134、gpt-5.4-image-2 $0.006，有的吃参考图有的不吃
 接模型本身一行代码都不用改。动手前我以为它只能走 `/chat/completions` 加
 `modalities: ["image"]`，**打一次真请求比猜省事**。`size` 也认。
 
+
+## 0.80.3：桌面端从 Tauri 换成 Electron（照 Hermes Desktop 的进程划分）
+
+用户问「Ubuntu 上有没有桌面版」「有没有比 Tauri 更好的」，定了照 Hermes 做。
+理由是**引擎**：0.80.0 那条 flex-end 在 Chrome 和 WebKitGTK 里各错一半，夹具跑 Chrome、
+产品跑 WebKitGTK 是结构性的；换 Electron 之后两边都是 Chromium，`shoot.mjs` / `input.mjs`
+量的就是产品本身。代价是体积（AppImage 162M、deb 137M）。
+
+- **Python 照旧是唯一的真源**：会话、模型、权限、工具都在 `feiyu --serve` 里，协议没变。
+  Electron 主进程（`desktop/electron/`）只管进程生命周期和原生能力（对话框、通知、pty、读工作区文件）。
+- **渲染进程没有 Node**：contextIsolation + sandbox，`preload.cjs` 只暴露白名单里的命令和事件，
+  主进程 `trusted()` 再核一次调用来源是不是顶层那个 `dist/index.html`；禁导航、禁新窗口、权限请求一律拒。
+  不监听端口（stdio），0.50.1 那三道门照旧不需要。
+- **聊天界面没重写**：`ui/app.js` 只把 `TAURI` 换成 `DESKTOP = window.feiyuDesktop || window.__TAURI__`。
+  新加的只有 React 那块文件树 / 预览（`renderer/workbench.jsx`），HTML 只当源码显示，不执行。
+- **路径边界在 `electron/files.mjs`**：先 realpath 再比，符号链接跳出工作区的一律拒（`pathguard.rs` 的同一条规矩）。
+- **打包后的应用只认自带的后端**（`resources/backend/feiyu-backend`，PyInstaller 冻结的解释器 + 依赖，
+  `scripts/build_backend.py`），缺了就报错，**不去 PATH 上找一个 feiyu 凑合**——那可能是另一个版本。
+  开发时才按 `FEIYU_BIN` → `.venv` → PATH 找。
+- 版本号又多了两处手抄的：`desktop/package.json` / `package-lock.json`，`TestVersionSync` 一起盯着。
+- **改完 `desktop/ui/` 要 `npm run build`**（它把 ui/ 拷进 dist/），跟 Tauri 时代「要重新编二进制」同一个坑换了个形状。
+
+验证：`cd desktop && npm test`（路径边界、子进程生命周期）、`npm run test:desktop`
+（真 Electron + 冻结后端 + pty，不打模型；`FEIYU_TEST_EXECUTABLE=release/linux-unpacked/feiyu-desktop`
+测打包产物）、`python3 tests/check_backend.py`（冻结后的两个 SDK 能初始化）。
+**还没验的**：Ubuntu 实机、GitHub Actions 那条 22.04 构建（`.github/workflows/desktop-linux.yml`）、Windows / macOS。
+`webkit.py` 对 Electron 版已经没有意义，只在还跑 Tauri 版时有用。
